@@ -55,10 +55,10 @@ import maya.OpenMayaUI as omui
 
 try:
     from PySide6 import QtCore, QtWidgets
-    from shiboken6 import wrapInstance
+    from shiboken6 import wrapInstance, isValid
 except ImportError:
     from PySide2 import QtCore, QtWidgets
-    from shiboken2 import wrapInstance
+    from shiboken2 import wrapInstance, isValid
 
 
 WINDOW_NAME = "SmartScatterTool2026"
@@ -354,10 +354,6 @@ class FaceSampler(TargetSampler):
 
             for comp in comps:
                 idx = int(comp.split(".f[")[-1].rstrip("]"))
-                try:
-                    tris_pts, _tris_verts = fn_mesh.getTriangles()
-                except Exception:
-                    tris_pts = []
                 poly_verts = fn_mesh.getPolygonVertices(idx)
                 if len(poly_verts) < 3:
                     continue
@@ -447,7 +443,6 @@ class EdgeSampler(TargetSampler):
 
             normal = om.MVector(0.0, 1.0, 0.0)
             try:
-                connected = fn_mesh.getEdgeVertices(edge_id)
                 poly_ids = fn_mesh.getConnectedFaces(edge_id)
                 if poly_ids:
                     acc = om.MVector()
@@ -769,11 +764,12 @@ class SmartScatterEngine(object):
         final_m = rot_m * base_m
         return final_m, pos, world_up
 
-    def _passes_spacing(self, pos, accepted_positions, min_dist):
+    def _passes_spacing(self, pos, src_radius, accepted_positions, min_dist):
         if min_dist <= 0.0:
             return True
-        min_sq = min_dist * min_dist
-        for p, _radius in accepted_positions:
+        for p, other_radius in accepted_positions:
+            pair_min_dist = max(min_dist, src_radius + other_radius)
+            min_sq = pair_min_dist * pair_min_dist
             d = pos - p
             if (d.x * d.x + d.y * d.y + d.z * d.z) < min_sq:
                 return False
@@ -833,7 +829,7 @@ class SmartScatterEngine(object):
             mat, pos, world_up = self._build_transform_from_sample(sample, settings, rng)
             if not self._passes_slope_filter(sample, settings, world_up):
                 continue
-            if not self._passes_spacing(pos, accepted_positions, dyn_min_dist):
+            if not self._passes_spacing(pos, src_radius, accepted_positions, dyn_min_dist):
                 continue
 
             if use_instances:
@@ -914,13 +910,16 @@ class SmartScatterEngine(object):
 class ScatterUI(QtWidgets.QDialog):
     _instance = None
 
-    def __init__(self, parent=maya_main_window()):
+    def __init__(self, parent=None):
+        if parent is None:
+            parent = maya_main_window()
         super(ScatterUI, self).__init__(parent)
         self.setObjectName(WINDOW_NAME)
         self.setWindowTitle(WINDOW_TITLE)
         self.setMinimumWidth(560)
         self.setMinimumHeight(760)
         self.setWindowFlags(QtCore.Qt.Window | QtCore.Qt.WindowCloseButtonHint)
+        self.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
 
         self.engine = SmartScatterEngine()
         self._build_ui()
@@ -1518,6 +1517,7 @@ class ScatterUI(QtWidgets.QDialog):
         self._live_timer.start(self.live_debounce_ms.value())
 
     def on_preview(self):
+        cmds.undoInfo(openChunk=True, chunkName="SmartScatterPreview")
         try:
             self._live_timer.stop()
             res = self.engine.preview(self._settings())
@@ -1527,8 +1527,11 @@ class ScatterUI(QtWidgets.QDialog):
             cmds.warning("Smart Scatter Preview failed: {}".format(exc))
             traceback.print_exc()
             self.status.setText("Preview failed")
+        finally:
+            cmds.undoInfo(closeChunk=True)
 
     def on_bake(self):
+        cmds.undoInfo(openChunk=True, chunkName="SmartScatterBake")
         try:
             result = self.engine.bake(group_result=self.chk_group.isChecked())
             self.status.setText("Baked")
@@ -1536,6 +1539,8 @@ class ScatterUI(QtWidgets.QDialog):
         except Exception as exc:
             cmds.warning("Bake failed: {}".format(exc))
             self.status.setText("Bake failed")
+        finally:
+            cmds.undoInfo(closeChunk=True)
 
     def on_clear(self):
         self._live_timer.stop()
@@ -1585,23 +1590,26 @@ class ScatterUI(QtWidgets.QDialog):
             self.engine.clear_preview()
         except Exception:
             pass
+        type(self)._instance = None
         super(ScatterUI, self).closeEvent(event)
 
     @classmethod
     def show_ui(cls):
         if cls._instance is not None:
             try:
-                cls._instance.close()
-                cls._instance.deleteLater()
+                if isValid(cls._instance):
+                    cls._instance.show()
+                    cls._instance.raise_()
+                    cls._instance.activateWindow()
+                    return cls._instance
             except Exception:
                 pass
             cls._instance = None
 
-        if cmds.window(WINDOW_NAME, exists=True):
-            cmds.deleteUI(WINDOW_NAME)
-
-        cls._instance = ScatterUI()
+        cls._instance = ScatterUI(parent=maya_main_window())
         cls._instance.show()
+        cls._instance.raise_()
+        cls._instance.activateWindow()
         return cls._instance
 
 

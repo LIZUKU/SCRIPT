@@ -154,7 +154,7 @@ def build_matrix_from_axes(x_axis=None, y_axis=None, z_axis=None, pos=(0.0, 0.0,
 
 
 def matrix_to_list(m):
-    return [m(i, j) for i in range(4) for j in range(4)]
+    return [m[i] for i in range(16)]
 
 
 def rotation_matrix_x(angle_deg):
@@ -948,7 +948,7 @@ class ScatterUI(QtWidgets.QDialog):
         main.addWidget(self._section_label("DISTRIBUTION"))
         self.count_spin = self._add_spin(main, "Count", 1, 50000, 100)
         self.seed_spin = self._add_spin(main, "Seed", 1, 999999, 1)
-        self.spacing_mul_spin = self._add_dspin(main, "Spacing Mult", 0.0, 10.0, 0.01, 0.0)
+        self.spacing_mul_spin = self._add_dspin_slider(main, "Spacing Mult", 0.0, 10.0, 0.01, 0.0)
 
         self.source_pick_combo = QtWidgets.QComboBox()
         self.source_pick_combo.addItems(["random", "cycle", "weighted"])
@@ -972,9 +972,9 @@ class ScatterUI(QtWidgets.QDialog):
         self.overlap_combo = QtWidgets.QComboBox()
         self.overlap_combo.addItems(["strict", "soft", "ignore"])
         self._add_widget_row(main, "Overlap", self.overlap_combo)
-        self.overlap_softness = self._add_dspin(main, "Overlap Softness", 0.0, 1.0, 0.01, 0.35)
-        self.slope_min = self._add_dspin(main, "Min Slope°", 0.0, 180.0, 0.1, 0.0)
-        self.slope_max = self._add_dspin(main, "Max Slope°", 0.0, 180.0, 0.1, 180.0)
+        self.overlap_softness = self._add_dspin_slider(main, "Overlap Softness", 0.0, 1.0, 0.01, 0.35)
+        self.slope_min = self._add_dspin_slider(main, "Min Slope°", 0.0, 180.0, 0.1, 0.0)
+        self.slope_max = self._add_dspin_slider(main, "Max Slope°", 0.0, 180.0, 0.1, 180.0)
 
         # Offsets / rotation
         main.addWidget(self._section_label("OFFSET POSITION"))
@@ -986,12 +986,12 @@ class ScatterUI(QtWidgets.QDialog):
         self.local_offset_z = self._add_dspin(main, "Local Offset Z", -100000, 100000, 0.01, 0.0)
 
         main.addWidget(self._section_label("RANDOM POSITION"))
-        self.rand_pos_x = self._add_dspin(main, "Rand Pos X", 0.0, 100000, 0.01, 0.0)
-        self.rand_pos_y = self._add_dspin(main, "Rand Pos Y", 0.0, 100000, 0.01, 0.0)
-        self.rand_pos_z = self._add_dspin(main, "Rand Pos Z", 0.0, 100000, 0.01, 0.0)
-        self.rand_local_x = self._add_dspin(main, "Rand Local X", 0.0, 100000, 0.01, 0.0)
-        self.rand_local_y = self._add_dspin(main, "Rand Local Y", 0.0, 100000, 0.01, 0.0)
-        self.rand_local_z = self._add_dspin(main, "Rand Local Z", 0.0, 100000, 0.01, 0.0)
+        self.rand_pos_x = self._add_dspin_slider(main, "Rand Pos X", 0.0, 100000, 0.01, 0.0)
+        self.rand_pos_y = self._add_dspin_slider(main, "Rand Pos Y", 0.0, 100000, 0.01, 0.0)
+        self.rand_pos_z = self._add_dspin_slider(main, "Rand Pos Z", 0.0, 100000, 0.01, 0.0)
+        self.rand_local_x = self._add_dspin_slider(main, "Rand Local X", 0.0, 100000, 0.01, 0.0)
+        self.rand_local_y = self._add_dspin_slider(main, "Rand Local Y", 0.0, 100000, 0.01, 0.0)
+        self.rand_local_z = self._add_dspin_slider(main, "Rand Local Z", 0.0, 100000, 0.01, 0.0)
 
         main.addWidget(self._section_label("BASE ROTATION"))
         self.base_rot_x = self._add_dspin(main, "Base Rot X", -360.0, 360.0, 0.1, 0.0)
@@ -999,17 +999,17 @@ class ScatterUI(QtWidgets.QDialog):
         self.base_rot_z = self._add_dspin(main, "Base Rot Z", -360.0, 360.0, 0.1, 0.0)
 
         main.addWidget(self._section_label("RANDOM ROTATION"))
-        self.rand_rot_x = self._add_dspin(main, "Rand Rot X", 0.0, 360.0, 0.1, 0.0)
-        self.rand_rot_y = self._add_dspin(main, "Rand Rot Y", 0.0, 360.0, 0.1, 0.0)
-        self.rand_rot_z = self._add_dspin(main, "Rand Rot Z", 0.0, 360.0, 0.1, 0.0)
+        self.rand_rot_x = self._add_dspin_slider(main, "Rand Rot X", 0.0, 360.0, 0.1, 0.0)
+        self.rand_rot_y = self._add_dspin_slider(main, "Rand Rot Y", 0.0, 360.0, 0.1, 0.0)
+        self.rand_rot_z = self._add_dspin_slider(main, "Rand Rot Z", 0.0, 360.0, 0.1, 0.0)
 
         # Scale
         main.addWidget(self._section_label("SCALE"))
-        self.scale_spin = self._add_dspin(main, "Base Scale", 0.001, 1000.0, 0.01, 1.0)
-        self.rand_uni_scale = self._add_dspin(main, "Rand Uniform", 0.0, 1000.0, 0.01, 0.0)
-        self.rand_scale_x = self._add_dspin(main, "Rand Scale X", 0.0, 1000.0, 0.01, 0.0)
-        self.rand_scale_y = self._add_dspin(main, "Rand Scale Y", 0.0, 1000.0, 0.01, 0.0)
-        self.rand_scale_z = self._add_dspin(main, "Rand Scale Z", 0.0, 1000.0, 0.01, 0.0)
+        self.scale_spin = self._add_dspin_slider(main, "Base Scale", 0.001, 1000.0, 0.01, 1.0)
+        self.rand_uni_scale = self._add_dspin_slider(main, "Rand Uniform", 0.0, 1000.0, 0.01, 0.0)
+        self.rand_scale_x = self._add_dspin_slider(main, "Rand Scale X", 0.0, 1000.0, 0.01, 0.0)
+        self.rand_scale_y = self._add_dspin_slider(main, "Rand Scale Y", 0.0, 1000.0, 0.01, 0.0)
+        self.rand_scale_z = self._add_dspin_slider(main, "Rand Scale Z", 0.0, 1000.0, 0.01, 0.0)
 
         # Options
         main.addWidget(self._section_label("OPTIONS"))
@@ -1140,6 +1140,45 @@ class ScatterUI(QtWidgets.QDialog):
         w.setValue(dv)
         self._add_widget_row(parent_layout, label, w)
         return w
+
+    def _add_dspin_slider(self, parent_layout, label, mn, mx, step, dv):
+        row = QtWidgets.QHBoxLayout()
+        lbl = QtWidgets.QLabel(label)
+        lbl.setFixedWidth(110)
+        row.addWidget(lbl)
+
+        slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        slider.setMinimumWidth(120)
+        row.addWidget(slider, 1)
+
+        spin = QtWidgets.QDoubleSpinBox()
+        spin.setDecimals(3)
+        spin.setSingleStep(step)
+        spin.setRange(mn, mx)
+        spin.setValue(dv)
+        row.addWidget(spin)
+        parent_layout.addLayout(row)
+
+        scale = max(1, int(round(1.0 / step)))
+        slider_min = int(round(mn * scale))
+        slider_max = int(round(mx * scale))
+        slider.setRange(slider_min, slider_max)
+        slider.setValue(int(round(dv * scale)))
+
+        def _on_spin_changed(val):
+            slider.blockSignals(True)
+            slider.setValue(int(round(val * scale)))
+            slider.blockSignals(False)
+
+        def _on_slider_changed(val):
+            spin.blockSignals(True)
+            spin.setValue(float(val) / float(scale))
+            spin.blockSignals(False)
+            spin.valueChanged.emit(spin.value())
+
+        spin.valueChanged.connect(_on_spin_changed)
+        slider.valueChanged.connect(_on_slider_changed)
+        return spin
 
     def _connect_live_preview_controls(self):
         widgets = [

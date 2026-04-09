@@ -17,6 +17,8 @@ Features
 - Density / count
 - Simple collision-like spacing using min distance rejection
 - Multiple source objects support
+- Dynamic slider UI with compact +/- steppers
+- Optional slope-based scale modulation
 - Keep upright option
 - World up axis choice
 - Preview / Bake / Clear
@@ -596,6 +598,15 @@ class SmartScatterEngine(object):
         slope = self._slope_angle_deg(sample.normal, world_up)
         return min_slope <= slope <= max_slope
 
+    def _slope_scale_factor(self, sample, settings, world_up):
+        if not settings.get("enable_slope_scale", False):
+            return 1.0
+        slope = self._slope_angle_deg(sample.normal, world_up)
+        t = clamp(slope / 180.0, 0.0, 1.0)
+        smin = float(settings.get("slope_scale_min", 1.0))
+        smax = float(settings.get("slope_scale_max", 1.0))
+        return max(0.001, lerp(smin, smax, t))
+
     def clear_preview(self):
         for node in list(self.preview_nodes):
             safe_delete(node)
@@ -835,6 +846,8 @@ class SmartScatterEngine(object):
             uni_rand = float(settings.get("rand_uniform_scale", 0.0))
             rand_xyz = settings.get("rand_non_uniform", False)
 
+            slope_scale = self._slope_scale_factor(sample, settings, world_up)
+
             if rand_xyz:
                 sx = max(0.001, base_scale + rng.uniform(-settings["rand_scale_x"], settings["rand_scale_x"]))
                 sy = max(0.001, base_scale + rng.uniform(-settings["rand_scale_y"], settings["rand_scale_y"]))
@@ -842,6 +855,9 @@ class SmartScatterEngine(object):
             else:
                 s = max(0.001, base_scale + rng.uniform(-uni_rand, uni_rand))
                 sx = sy = sz = s
+            sx *= slope_scale
+            sy *= slope_scale
+            sz *= slope_scale
 
             cmds.scale(sx, sy, sz, node, absolute=True, objectSpace=True)
             try:
@@ -1010,6 +1026,8 @@ class ScatterUI(QtWidgets.QDialog):
         self.rand_scale_x = self._add_dspin_slider(main, "Rand Scale X", 0.0, 1000.0, 0.01, 0.0)
         self.rand_scale_y = self._add_dspin_slider(main, "Rand Scale Y", 0.0, 1000.0, 0.01, 0.0)
         self.rand_scale_z = self._add_dspin_slider(main, "Rand Scale Z", 0.0, 1000.0, 0.01, 0.0)
+        self.slope_scale_min = self._add_dspin_slider(main, "Slope Scale Min", 0.001, 10.0, 0.01, 1.0)
+        self.slope_scale_max = self._add_dspin_slider(main, "Slope Scale Max", 0.001, 10.0, 0.01, 1.0)
 
         # Options
         main.addWidget(self._section_label("OPTIONS"))
@@ -1028,6 +1046,9 @@ class ScatterUI(QtWidgets.QDialog):
         self.chk_rand_non_uniform = QtWidgets.QCheckBox("Use XYZ Random Scale")
         self.chk_rand_non_uniform.setChecked(False)
         main.addWidget(self.chk_rand_non_uniform)
+        self.chk_slope_scale = QtWidgets.QCheckBox("Scale By Slope")
+        self.chk_slope_scale.setChecked(False)
+        main.addWidget(self.chk_slope_scale)
 
         self.chk_live_preview = QtWidgets.QCheckBox("Live Preview")
         self.chk_live_preview.setChecked(False)
@@ -1109,7 +1130,17 @@ class ScatterUI(QtWidgets.QDialog):
             QCheckBox {
                 padding: 2px;
             }
-        """ % (BG, TEXT, PANEL, ACCENT, ACCENT, ACCENT, FIELD))
+            QToolButton {
+                background-color: #3a3a3a;
+                border: 1px solid #4b4b4b;
+                border-radius: 2px;
+                font-size: 9px;
+                padding: 0px;
+            }
+            QToolButton:hover {
+                border: 1px solid %s;
+            }
+        """ % (BG, TEXT, PANEL, ACCENT, ACCENT, ACCENT, FIELD, ACCENT))
 
     def _section_label(self, text):
         lbl = QtWidgets.QLabel(text)
@@ -1126,20 +1157,28 @@ class ScatterUI(QtWidgets.QDialog):
         return widget
 
     def _add_spin(self, parent_layout, label, mn, mx, dv):
+        row = QtWidgets.QHBoxLayout()
+        lbl = QtWidgets.QLabel(label)
+        lbl.setFixedWidth(110)
+        row.addWidget(lbl)
+
+        slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        slider.setMinimumWidth(120)
+        row.addWidget(slider, 1)
+
         w = QtWidgets.QSpinBox()
         w.setRange(mn, mx)
         w.setValue(dv)
-        self._add_widget_row(parent_layout, label, w)
+        row.addWidget(w)
+
+        row.addLayout(self._build_micro_stepper(w))
+        parent_layout.addLayout(row)
+
+        self._bind_dynamic_slider(slider, w, mn, mx, step=1.0)
         return w
 
     def _add_dspin(self, parent_layout, label, mn, mx, step, dv):
-        w = QtWidgets.QDoubleSpinBox()
-        w.setDecimals(3)
-        w.setSingleStep(step)
-        w.setRange(mn, mx)
-        w.setValue(dv)
-        self._add_widget_row(parent_layout, label, w)
-        return w
+        return self._add_dspin_slider(parent_layout, label, mn, mx, step, dv)
 
     def _add_dspin_slider(self, parent_layout, label, mn, mx, step, dv):
         row = QtWidgets.QHBoxLayout()
@@ -1157,28 +1196,71 @@ class ScatterUI(QtWidgets.QDialog):
         spin.setRange(mn, mx)
         spin.setValue(dv)
         row.addWidget(spin)
+        row.addLayout(self._build_micro_stepper(spin))
         parent_layout.addLayout(row)
 
-        scale = max(1, int(round(1.0 / step)))
-        slider_min = int(round(mn * scale))
-        slider_max = int(round(mx * scale))
-        slider.setRange(slider_min, slider_max)
-        slider.setValue(int(round(dv * scale)))
+        self._bind_dynamic_slider(slider, spin, mn, mx, step)
+        return spin
 
-        def _on_spin_changed(val):
+    def _build_micro_stepper(self, spin_widget):
+        controls = QtWidgets.QVBoxLayout()
+        controls.setSpacing(0)
+        controls.setContentsMargins(1, 0, 0, 0)
+
+        btn_plus = QtWidgets.QToolButton()
+        btn_plus.setText("+")
+        btn_plus.setAutoRaise(True)
+        btn_plus.setFixedSize(16, 11)
+
+        btn_minus = QtWidgets.QToolButton()
+        btn_minus.setText("-")
+        btn_minus.setAutoRaise(True)
+        btn_minus.setFixedSize(16, 11)
+
+        btn_plus.clicked.connect(spin_widget.stepUp)
+        btn_minus.clicked.connect(spin_widget.stepDown)
+
+        controls.addWidget(btn_plus)
+        controls.addWidget(btn_minus)
+        return controls
+
+    def _bind_dynamic_slider(self, slider, spin_widget, mn, mx, step):
+        scale = max(1, int(round(1.0 / max(step, 1e-6))))
+        slider_window = 500
+        full_min = int(round(mn * scale))
+        full_max = int(round(mx * scale))
+
+        def _set_window(center_value):
+            center = int(round(center_value * scale))
+            if full_max - full_min <= slider_window:
+                lo, hi = full_min, full_max
+            else:
+                half = slider_window // 2
+                lo = max(full_min, center - half)
+                hi = min(full_max, center + half)
+                width = hi - lo
+                if width < slider_window:
+                    if lo == full_min:
+                        hi = min(full_max, lo + slider_window)
+                    elif hi == full_max:
+                        lo = max(full_min, hi - slider_window)
             slider.blockSignals(True)
-            slider.setValue(int(round(val * scale)))
+            slider.setRange(lo, hi)
+            slider.setValue(clamp(center, lo, hi))
             slider.blockSignals(False)
 
-        def _on_slider_changed(val):
-            spin.blockSignals(True)
-            spin.setValue(float(val) / float(scale))
-            spin.blockSignals(False)
-            spin.valueChanged.emit(spin.value())
+        def _on_spin_changed(val):
+            _set_window(val)
 
-        spin.valueChanged.connect(_on_spin_changed)
+        def _on_slider_changed(val):
+            spin_widget.blockSignals(True)
+            spin_widget.setValue(float(val) / float(scale))
+            spin_widget.blockSignals(False)
+            spin_widget.valueChanged.emit(spin_widget.value())
+
+        _set_window(spin_widget.value())
+        spin_widget.valueChanged.connect(_on_spin_changed)
         slider.valueChanged.connect(_on_slider_changed)
-        return spin
 
     def _connect_live_preview_controls(self):
         widgets = [
@@ -1192,7 +1274,8 @@ class ScatterUI(QtWidgets.QDialog):
             self.base_rot_x, self.base_rot_y, self.base_rot_z,
             self.rand_rot_x, self.rand_rot_y, self.rand_rot_z,
             self.scale_spin, self.rand_uni_scale, self.rand_scale_x, self.rand_scale_y, self.rand_scale_z,
-            self.chk_instance, self.chk_keep_upright, self.chk_rand_non_uniform,
+            self.slope_scale_min, self.slope_scale_max,
+            self.chk_instance, self.chk_keep_upright, self.chk_rand_non_uniform, self.chk_slope_scale,
         ]
         for w in widgets:
             if hasattr(w, "valueChanged"):
@@ -1265,7 +1348,10 @@ class ScatterUI(QtWidgets.QDialog):
             "rand_scale_x": self.rand_scale_x.value(),
             "rand_scale_y": self.rand_scale_y.value(),
             "rand_scale_z": self.rand_scale_z.value(),
+            "slope_scale_min": self.slope_scale_min.value(),
+            "slope_scale_max": self.slope_scale_max.value(),
             "rand_non_uniform": self.chk_rand_non_uniform.isChecked(),
+            "enable_slope_scale": self.chk_slope_scale.isChecked(),
             "use_instances": self.chk_instance.isChecked(),
             "keep_upright": self.chk_keep_upright.isChecked(),
         }
@@ -1292,6 +1378,7 @@ class ScatterUI(QtWidgets.QDialog):
             "base_rot_x", "base_rot_y", "base_rot_z",
             "rand_rot_x", "rand_rot_y", "rand_rot_z",
             "scale", "rand_uniform_scale", "rand_scale_x", "rand_scale_y", "rand_scale_z",
+            "slope_scale_min", "slope_scale_max",
         ):
             widget = {
                 "offset_x": self.offset_x, "offset_y": self.offset_y, "offset_z": self.offset_z,
@@ -1302,10 +1389,12 @@ class ScatterUI(QtWidgets.QDialog):
                 "rand_rot_x": self.rand_rot_x, "rand_rot_y": self.rand_rot_y, "rand_rot_z": self.rand_rot_z,
                 "scale": self.scale_spin, "rand_uniform_scale": self.rand_uni_scale,
                 "rand_scale_x": self.rand_scale_x, "rand_scale_y": self.rand_scale_y, "rand_scale_z": self.rand_scale_z,
+                "slope_scale_min": self.slope_scale_min, "slope_scale_max": self.slope_scale_max,
             }[key]
             widget.setValue(float(data.get(key, widget.value())))
 
         self.chk_rand_non_uniform.setChecked(bool(data.get("rand_non_uniform", self.chk_rand_non_uniform.isChecked())))
+        self.chk_slope_scale.setChecked(bool(data.get("enable_slope_scale", self.chk_slope_scale.isChecked())))
         self.chk_instance.setChecked(bool(data.get("use_instances", self.chk_instance.isChecked())))
         self.chk_keep_upright.setChecked(bool(data.get("keep_upright", self.chk_keep_upright.isChecked())))
 

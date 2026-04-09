@@ -72,6 +72,8 @@ PANEL = "#353535"
 FIELD = "#252525"
 TEXT = "#c8c8c8"
 PRESET_VERSION = 1
+DEFAULT_PREVIEW_CAP = 2000
+DEFAULT_SAMPLE_BATCH_SIZE = 64
 
 
 # ============================================================
@@ -414,6 +416,7 @@ class FaceSampler(TargetSampler):
         super(FaceSampler, self).__init__(seed=seed)
         self.face_components = cmds.filterExpand(face_components, sm=34) or []
         self.entries = []
+        self.cumulative = []
         self.total_area = 0.0
         self._build_cache()
 
@@ -443,6 +446,7 @@ class FaceSampler(TargetSampler):
                         continue
                     self.total_area += area
                     self.entries.append((self.total_area, mesh, idx, p0, p1, p2, fn_mesh))
+        self.cumulative = [e[0] for e in self.entries]
 
     def sample(self, count):
         out = []
@@ -450,10 +454,9 @@ class FaceSampler(TargetSampler):
             return out
 
         import bisect
-        cumulative = [e[0] for e in self.entries]
         for _ in range(count):
             r = self.random.uniform(0.0, self.total_area)
-            idx = bisect.bisect_left(cumulative, r)
+            idx = bisect.bisect_left(self.cumulative, r)
             _cum, mesh, face_id, p0, p1, p2, fn_mesh = self.entries[min(idx, len(self.entries) - 1)]
 
             rr1 = math.sqrt(self.random.random())
@@ -479,6 +482,7 @@ class EdgeSampler(TargetSampler):
         super(EdgeSampler, self).__init__(seed=seed)
         self.edge_components = cmds.filterExpand(edge_components, sm=32) or []
         self.edges = []
+        self.cumulative = []
         self.total_length = 0.0
         self._build_cache()
 
@@ -502,6 +506,7 @@ class EdgeSampler(TargetSampler):
                 self.edges.append((self.total_length, mesh, edge_id, p0, p1, fn_mesh))
             except Exception:
                 continue
+        self.cumulative = [e[0] for e in self.edges]
 
     def sample(self, count):
         out = []
@@ -509,10 +514,9 @@ class EdgeSampler(TargetSampler):
             return out
 
         import bisect
-        cumulative = [e[0] for e in self.edges]
         for _ in range(count):
             r = self.random.uniform(0.0, self.total_length)
-            idx = bisect.bisect_left(cumulative, r)
+            idx = bisect.bisect_left(self.cumulative, r)
             _cum, mesh, edge_id, p0, p1, fn_mesh = self.edges[min(idx, len(self.edges) - 1)]
             t = self.random.random()
             pos = p0 + ((p1 - p0) * t)
@@ -873,6 +877,8 @@ class SmartScatterEngine(object):
         mode = settings.get("contact_mode", "bbox_bottom")
         axis_name = settings.get("contact_axis", "y")
         axis_idx = {"x": 0, "y": 1, "z": 2}.get(axis_name, 1)
+        if mode == "pivot":
+            return om.MVector(0.0, 0.0, 0.0)
         if mode in ("custom", "custom_local"):
             return om.MVector(
                 float(settings.get("contact_custom_x", 0.0)),
@@ -886,7 +892,7 @@ class SmartScatterEngine(object):
                 (bb_min[1] + bb_max[1]) * 0.5,
                 (bb_min[2] + bb_max[2]) * 0.5,
             )
-        if mode in ("bbox_bottom", "bbox_bottom_center", "bbox_min_y_keep_xz"):
+        if mode == "bbox_bottom":
             bb_min, bb_max = source_local_bbox(src)
             center = [
                 (bb_min[0] + bb_max[0]) * 0.5,
@@ -922,21 +928,17 @@ class SmartScatterEngine(object):
             raise RuntimeError("No target set.")
 
         t0 = time.time()
-        count = max(1, int(settings.get("count", 100)))
+        requested_count = max(1, int(settings.get("count", 100)))
+        preview_cap = max(1, int(settings.get("preview_cap", DEFAULT_PREVIEW_CAP)))
+        count = min(requested_count, preview_cap)
         source_mode = settings.get("source_pick_mode", "random")
         use_instances = settings.get("use_instances", True)
         rng = random.Random(int(settings.get("seed", 1)))
         desired_signature = self._distribution_signature_from_settings(settings)
-        can_transform_only = (
-            update_mode == "transform"
-            and self._distribution_signature == desired_signature
-            and len(self._distribution_cache) == count
-            and len(self.preview_nodes) == count
-        )
+        can_transform_only = False
 
-        if not can_transform_only:
-            self.clear_preview()
-            sampler = self._build_sampler(settings)
+        self.clear_preview()
+        sampler = self._build_sampler(settings)
 
         source_weights = self._parse_source_weights(settings)
         source_radii = {obj: estimate_source_radius(obj) for obj in self.source_objects}
@@ -961,94 +963,95 @@ class SmartScatterEngine(object):
         else:
             self.preview_group = PREVIEW_GROUP
 
-        if can_transform_only:
-            records = self._distribution_cache
-            tries = len(records)
-        else:
-            records = []
+        records = []
+        sample_batch = []
+        sample_batch_size = max(1, int(settings.get("sample_batch_size", DEFAULT_SAMPLE_BATCH_SIZE)))
 
-        while created < count and (can_transform_only or tries < max_tries):
-            if can_transform_only:
-                rec = records[created]
-                sample = ScatterSample(position=rec["position"], normal=rec["normal"], tangent=rec["tangent"], meta=rec.get("meta", {}))
-                src = rec["src"]
-                rec_seed = rec["rand_seed"]
+        refresh_suspended = False
+        try:
+            cmds.refresh(suspend=True)
+            refresh_suspended = True
+        except Exception:
+            refresh_suspended = False
+
+        try:
+            while created < count and tries < max_tries:
+                if not sample_batch:
+                    wanted = min(sample_batch_size, max_tries - tries)
+                    if wanted <= 0:
+                        break
+                    sample_batch = sampler.sample(wanted)
+                    if not sample_batch:
+                        break
+
                 tries += 1
-            else:
-                tries += 1
-                batch = sampler.sample(1)
-                if not batch:
-                    break
-                sample = batch[0]
+                sample = sample_batch.pop()
                 src = self._pick_source(source_mode, rng, created, source_weights)
                 rec_seed = rng.randint(0, 10 ** 9)
 
-            src_radius = custom_radius if spacing_mode == "custom_radius" else source_radii.get(src, 0.001)
-            dyn_min_dist = self._compute_min_dist(src_radius, spacing_mul, overlap_mode, overlap_softness)
+                src_radius = custom_radius if spacing_mode == "custom_radius" else source_radii.get(src, 0.001)
+                dyn_min_dist = self._compute_min_dist(src_radius, spacing_mul, overlap_mode, overlap_softness)
 
-            if source_mode == "cycle":
-                preview_idx = created
-            else:
-                preview_idx = len(self.preview_nodes)
+                if source_mode == "cycle":
+                    preview_idx = created
+                else:
+                    preview_idx = len(self.preview_nodes)
 
-            trng = random.Random(rec_seed)
-            mat, pos, world_up = self._build_transform_from_sample(sample, settings, trng)
-            if not self._passes_slope_filter(sample, settings, world_up):
-                rejected_slope += 1
-                continue
-            nearby_positions = spacing_hash.nearby(pos) if spacing_mode != "none" else ()
-            if spacing_mode != "none" and not self._passes_spacing(pos, src_radius, nearby_positions, dyn_min_dist, spacing_mode=spacing_mode):
-                rejected_spacing += 1
-                continue
+                trng = random.Random(rec_seed)
+                mat, pos, world_up = self._build_transform_from_sample(sample, settings, trng)
+                if not self._passes_slope_filter(sample, settings, world_up):
+                    rejected_slope += 1
+                    continue
+                nearby_positions = spacing_hash.nearby(pos) if spacing_mode != "none" else ()
+                if spacing_mode != "none" and not self._passes_spacing(pos, src_radius, nearby_positions, dyn_min_dist, spacing_mode=spacing_mode):
+                    rejected_spacing += 1
+                    continue
 
-            base_scale = float(settings.get("scale", 1.0))
-            uni_rand = float(settings.get("rand_uniform_scale", 0.0))
-            rand_xyz = settings.get("rand_non_uniform", False)
-            slope_scale = self._slope_scale_factor(sample, settings, world_up)
+                base_scale = float(settings.get("scale", 1.0))
+                uni_rand = float(settings.get("rand_uniform_scale", 0.0))
+                rand_xyz = settings.get("rand_non_uniform", False)
+                slope_scale = self._slope_scale_factor(sample, settings, world_up)
 
-            if rand_xyz:
-                sx = max(0.001, base_scale + trng.uniform(-settings["rand_scale_x"], settings["rand_scale_x"]))
-                sy = max(0.001, base_scale + trng.uniform(-settings["rand_scale_y"], settings["rand_scale_y"]))
-                sz = max(0.001, base_scale + trng.uniform(-settings["rand_scale_z"], settings["rand_scale_z"]))
-            else:
-                s = max(0.001, base_scale + trng.uniform(-uni_rand, uni_rand))
-                sx = sy = sz = s
-            sx *= slope_scale
-            sy *= slope_scale
-            sz *= slope_scale
+                if rand_xyz:
+                    sx = max(0.001, base_scale + trng.uniform(-settings["rand_scale_x"], settings["rand_scale_x"]))
+                    sy = max(0.001, base_scale + trng.uniform(-settings["rand_scale_y"], settings["rand_scale_y"]))
+                    sz = max(0.001, base_scale + trng.uniform(-settings["rand_scale_z"], settings["rand_scale_z"]))
+                else:
+                    s = max(0.001, base_scale + trng.uniform(-uni_rand, uni_rand))
+                    sx = sy = sz = s
+                sx *= slope_scale
+                sy *= slope_scale
+                sz *= slope_scale
 
-            normal_push = float(settings.get("offset_along_normal", 0.0))
-            if abs(normal_push) > 1e-8:
-                pos += v_norm(sample.normal) * normal_push
+                normal_push = float(settings.get("offset_along_normal", 0.0))
+                if abs(normal_push) > 1e-8:
+                    pos += v_norm(sample.normal) * normal_push
 
-            contact_mode = settings.get("contact_mode", "bbox_bottom")
-            if contact_mode == "custom_world":
-                pos -= om.MVector(
-                    float(settings.get("contact_custom_x", 0.0)),
-                    float(settings.get("contact_custom_y", 0.0)),
-                    float(settings.get("contact_custom_z", 0.0)),
-                )
-            else:
-                contact_local = source_contact_local.get(src, om.MVector())
-                if contact_local.length() > 1e-8:
-                    ax, ay, az = matrix_axes(mat)
-                    contact_world = (ax * (contact_local.x * sx)) + (ay * (contact_local.y * sy)) + (az * (contact_local.z * sz))
-                    pos -= contact_world
+                contact_mode = settings.get("contact_mode", "bbox_bottom")
+                if contact_mode == "custom_world":
+                    pos -= om.MVector(
+                        float(settings.get("contact_custom_x", 0.0)),
+                        float(settings.get("contact_custom_y", 0.0)),
+                        float(settings.get("contact_custom_z", 0.0)),
+                    )
+                else:
+                    contact_local = source_contact_local.get(src, om.MVector())
+                    if contact_local.length() > 1e-8:
+                        ax, ay, az = matrix_axes(mat)
+                        contact_world = (ax * (contact_local.x * sx)) + (ay * (contact_local.y * sy)) + (az * (contact_local.z * sz))
+                        pos -= contact_world
 
-            if can_transform_only:
-                node = self.preview_nodes[created]
-            elif use_instances:
-                node = cmds.instance(src, n="smartScatter_preview_{:04d}".format(preview_idx + 1))[0]
-            else:
-                node = cmds.duplicate(src, rr=True, n="smartScatter_preview_{:04d}".format(preview_idx + 1))[0]
-            mat_list = matrix_to_list(mat)
-            mat_list[12] = pos.x
-            mat_list[13] = pos.y
-            mat_list[14] = pos.z
-            cmds.xform(node, ws=True, matrix=mat_list)
+                if use_instances:
+                    node = cmds.instance(src, n="smartScatter_preview_{:04d}".format(preview_idx + 1))[0]
+                else:
+                    node = cmds.duplicate(src, rr=True, n="smartScatter_preview_{:04d}".format(preview_idx + 1))[0]
+                mat_list = matrix_to_list(mat)
+                mat_list[12] = pos.x
+                mat_list[13] = pos.y
+                mat_list[14] = pos.z
+                cmds.xform(node, ws=True, matrix=mat_list)
 
-            cmds.scale(sx, sy, sz, node, absolute=True, objectSpace=True)
-            if not can_transform_only:
+                cmds.scale(sx, sy, sz, node, absolute=True, objectSpace=True)
                 try:
                     cmds.parent(node, self.preview_group)
                 except Exception:
@@ -1062,26 +1065,34 @@ class SmartScatterEngine(object):
                     "src": src,
                     "rand_seed": rec_seed,
                 })
-            accepted_positions.append((om.MVector(pos), src_radius))
-            spacing_hash.add(pos, src_radius)
-            created += 1
+                accepted_positions.append((om.MVector(pos), src_radius))
+                spacing_hash.add(pos, src_radius)
+                created += 1
+        finally:
+            if refresh_suspended:
+                try:
+                    cmds.refresh(suspend=False)
+                    cmds.refresh(force=True)
+                except Exception:
+                    pass
 
         if not self.preview_nodes:
             raise RuntimeError("No valid scatter points found.")
 
         self.last_preview_stats = {
-            "requested": count,
+            "requested": requested_count,
             "created": created,
             "tries": tries,
             "rejected_slope": rejected_slope,
             "rejected_spacing": rejected_spacing,
             "mode": "instances" if use_instances else "duplicates",
             "update_mode": "transform" if can_transform_only else "full",
+            "preview_cap": preview_cap,
+            "capped": requested_count > count,
             "seconds": time.time() - t0,
         }
-        if not can_transform_only:
-            self._distribution_cache = records
-            self._distribution_signature = desired_signature
+        self._distribution_cache = records
+        self._distribution_signature = desired_signature
         return self.preview_nodes
 
     def bake(self, group_result=True):
@@ -1818,18 +1829,8 @@ class ScatterUI(QtWidgets.QDialog):
         self.status.setText("Preview cleared")
 
     def _choose_update_mode(self, settings):
-        if not self._last_settings_snapshot:
-            return "full"
-        if settings == self._last_settings_snapshot:
-            return "transform"
-        distribution_keys = {
-            "count", "seed", "spacing_multiplier", "spacing_mode", "custom_radius", "source_pick_mode",
-            "source_weights", "curve_mode", "overlap_mode", "overlap_softness",
-        }
-        for key in distribution_keys:
-            if settings.get(key) != self._last_settings_snapshot.get(key):
-                return "full"
-        return "transform"
+        _ = settings
+        return "full"
 
     def on_save_preset(self):
         try:

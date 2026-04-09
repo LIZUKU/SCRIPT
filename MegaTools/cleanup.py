@@ -1565,16 +1565,27 @@ def mesh_remove_useless_vertices():
                 # 2) Vertices "useless" au milieu d'une ligne -> dissolve
                 #    (cmds.delete peut casser les faces ici)
                 if dissolve_candidates:
+                    def _dissolve_vertex_safe(vtx_name):
+                        if not cmds.objExists(vtx_name):
+                            return False
+                        try:
+                            cmds.polyDelVertex(vtx_name, ch=False)
+                            return True
+                        except Exception:
+                            pass
+                        try:
+                            cmds.select(vtx_name, r=True)
+                            mel.eval("polyDelVertex;")
+                            return True
+                        except Exception:
+                            return False
+
                     def _vtx_index_key(v):
                         m = re.search(r"\[(\d+)\]$", v)
                         return int(m.group(1)) if m else -1
 
                     for vtx in sorted(dissolve_candidates, key=_vtx_index_key, reverse=True):
-                        if cmds.objExists(vtx):
-                            try:
-                                cmds.polyDelVertex(vtx)
-                            except Exception:
-                                pass
+                        _dissolve_vertex_safe(vtx)
 
                 final_vcount = cmds.polyEvaluate(mesh, vertex=True)
                 total_removed += max(0, initial_vcount - final_vcount)
@@ -2319,9 +2330,9 @@ class MeshToolkitWidget(QtWidgets.QWidget):
         bridge_row = QtWidgets.QHBoxLayout()
         bridge_row.setSpacing(3)
 
-        self.smart_concentric_btn = MTK_ColorBtn("? Smart", "Smart Concentric: Bridge or Connect", "#1e3a50", "#70b0ff", 70, 28)
-        self.bridge_hole_btn = MTK_ColorBtn("? Hole", "Fill hole from border loop", "#1e4a30", "#70ff90", 65, 28)
-        self.bridge_loops_btn = MTK_ColorBtn("? Bridge", "Bridge 2 edge loops", "#1e3a50", "#70b0ff", 65, 28)
+        self.smart_concentric_btn = MTK_ColorBtn("Smart", "Smart Concentric: Bridge or Connect", "#1e3a50", "#70b0ff", 70, 28)
+        self.bridge_hole_btn = MTK_ColorBtn("Hole", "Fill hole from border loop", "#1e4a30", "#70ff90", 65, 28)
+        self.bridge_loops_btn = MTK_ColorBtn("Bridge", "Bridge 2 edge loops", "#1e3a50", "#70b0ff", 65, 28)
 
         bridge_row.addWidget(self.smart_concentric_btn)
         bridge_row.addWidget(self.bridge_hole_btn)
@@ -2343,7 +2354,7 @@ class MeshToolkitWidget(QtWidgets.QWidget):
         self.bridge_settings.setVisible(False)
         main_layout.addWidget(self.bridge_settings)
 
-        self.bridge_settings_btn = QtWidgets.QPushButton("? Settings")
+        self.bridge_settings_btn = QtWidgets.QPushButton("Settings")
         self.bridge_settings_btn.setFixedHeight(16)
         self.bridge_settings_btn.setStyleSheet(
             """
@@ -2362,11 +2373,11 @@ class MeshToolkitWidget(QtWidgets.QWidget):
         detect_row = QtWidgets.QHBoxLayout()
         detect_row.setSpacing(3)
 
-        self.ngon_btn = MTK_ColorBtn("? NGon", "Detect N-gons", "#50301e", "#ffaa70", 58, 26)
-        self.tri_btn = MTK_ColorBtn("? Tri", "Detect triangles", "#50301e", "#ffaa70", 50, 26)
-        self.quad_btn = MTK_ColorBtn("? Quad", "Detect quads", "#1e4030", "#70c080", 55, 26)
-        self.stuck_btn = MTK_ColorBtn("? Stuck", "Stuck extrusions", "#50301e", "#ffaa70", 55, 26)
-        self.lamina_btn = MTK_ColorBtn("? Lam", "Lamina faces", "#50301e", "#ffaa70", 50, 26)
+        self.ngon_btn = MTK_ColorBtn("NGon", "Detect N-gons", "#50301e", "#ffaa70", 58, 26)
+        self.tri_btn = MTK_ColorBtn("Tri", "Detect triangles", "#50301e", "#ffaa70", 50, 26)
+        self.quad_btn = MTK_ColorBtn("Quad", "Detect quads", "#1e4030", "#70c080", 55, 26)
+        self.stuck_btn = MTK_ColorBtn("Stuck", "Stuck extrusions", "#50301e", "#ffaa70", 55, 26)
+        self.lamina_btn = MTK_ColorBtn("Lam", "Lamina faces", "#50301e", "#ffaa70", 50, 26)
 
         detect_row.addWidget(self.ngon_btn)
         detect_row.addWidget(self.tri_btn)
@@ -2381,8 +2392,8 @@ class MeshToolkitWidget(QtWidgets.QWidget):
         vert_row = QtWidgets.QHBoxLayout()
         vert_row.setSpacing(3)
 
-        self.remove_verts_btn = MTK_ColorBtn("? Remove Useless", "Remove unnecessary vertices", "#3a2a2a", "#ff9090", 110, 26)
-        self.merge_verts_btn = MTK_ColorBtn("? Merge", "Merge overlapping vertices", "#3a2a2a", "#ff9090", 70, 26)
+        self.remove_verts_btn = MTK_ColorBtn("Remove Useless", "Remove unnecessary vertices", "#3a2a2a", "#ff9090", 110, 26)
+        self.merge_verts_btn = MTK_ColorBtn("Merge", "Merge overlapping vertices", "#3a2a2a", "#ff9090", 70, 26)
 
         vert_row.addWidget(self.remove_verts_btn)
         vert_row.addWidget(self.merge_verts_btn)
@@ -2398,9 +2409,9 @@ class MeshToolkitWidget(QtWidgets.QWidget):
         topo_row = QtWidgets.QHBoxLayout()
         topo_row.setSpacing(3)
 
-        self.quadrangulate_btn = MTK_ColorBtn("? Quadrangulate", "Convert triangle pairs to quads", "#1e4030", "#70c080", 105, 26)
-        self.triangulate_btn = MTK_ColorBtn("? Triangulate", "Smart: Quad->Tri->Quad", "#1e3050", "#7090c0", 100, 26)
-        self.triangulate_quality_btn = MTK_ColorBtn("? Tri Quality", "Anti-stretch triangulation", "#2e4050", "#80a0d0", 90, 26)
+        self.quadrangulate_btn = MTK_ColorBtn("Quadrangulate", "Convert triangle pairs to quads", "#1e4030", "#70c080", 105, 26)
+        self.triangulate_btn = MTK_ColorBtn("Triangulate", "Smart: Quad->Tri->Quad", "#1e3050", "#7090c0", 100, 26)
+        self.triangulate_quality_btn = MTK_ColorBtn("Tri Quality", "Anti-stretch triangulation", "#2e4050", "#80a0d0", 90, 26)
 
         topo_row.addWidget(self.quadrangulate_btn)
         topo_row.addWidget(self.triangulate_btn)
@@ -2434,8 +2445,8 @@ class MeshToolkitWidget(QtWidgets.QWidget):
         clean_row = QtWidgets.QHBoxLayout()
         clean_row.setSpacing(3)
 
-        self.select_edges_btn = MTK_ColorBtn("? Select Edges", "Select removable edges", "#3a3a20", "#c0c070", 100, 28)
-        self.auto_clean_btn = MTK_ColorBtn("? Auto Clean", "Automatically clean mesh", "#4a3a10", "#ffc040", 100, 28)
+        self.select_edges_btn = MTK_ColorBtn("Select Edges", "Select removable edges", "#3a3a20", "#c0c070", 100, 28)
+        self.auto_clean_btn = MTK_ColorBtn("Auto Clean", "Automatically clean mesh", "#4a3a10", "#ffc040", 100, 28)
 
         clean_row.addWidget(self.select_edges_btn)
         clean_row.addWidget(self.auto_clean_btn)

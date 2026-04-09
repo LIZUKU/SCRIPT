@@ -1516,10 +1516,11 @@ def mesh_remove_useless_vertices():
                 if not cmds.objExists(mesh):
                     break
 
-                vcount = cmds.polyEvaluate(mesh, vertex=True)
-                to_delete = []
+                initial_vcount = cmds.polyEvaluate(mesh, vertex=True)
+                isolated_vertices = set()
+                dissolve_candidates = set()
 
-                for i in range(vcount):
+                for i in range(initial_vcount):
                     vtx = "{}.vtx[{}]".format(mesh, i)
                     if not cmds.objExists(vtx):
                         continue
@@ -1528,10 +1529,7 @@ def mesh_remove_useless_vertices():
                     edges = vert_to_edges(vtx)
 
                     if len(faces) == 0:
-                        to_delete.append(vtx)
-                        continue
-
-                    if is_border_vertex(vtx):
+                        isolated_vertices.add(vtx)
                         continue
 
                     if len(edges) == 2:
@@ -1551,14 +1549,34 @@ def mesh_remove_useless_vertices():
                         if len(neigh_pos) == 2:
                             v1 = normalize((p[0] - neigh_pos[0][0], p[1] - neigh_pos[0][1], p[2] - neigh_pos[0][2]))
                             v2 = normalize((neigh_pos[1][0] - p[0], neigh_pos[1][1] - p[1], neigh_pos[1][2] - p[2]))
-                            if abs(dot(v1, v2)) > 0.99:
-                                to_delete.append(vtx)
+                            # Autorise aussi les vertices de bord colinéaires:
+                            # dans les retopos "zigzag", ils sont souvent sur une frontière.
+                            if abs(dot(v1, v2)) > 0.98:
+                                dissolve_candidates.add(vtx)
 
-                if not to_delete:
+                if not isolated_vertices and not dissolve_candidates:
                     break
 
-                cmds.delete(to_delete)
-                total_removed += len(to_delete)
+                # 1) Vertices réellement orphelins -> delete safe
+                if isolated_vertices:
+                    cmds.delete(list(isolated_vertices))
+
+                # 2) Vertices "useless" au milieu d'une ligne -> dissolve
+                #    (cmds.delete peut casser les faces ici)
+                if dissolve_candidates:
+                    def _vtx_index_key(v):
+                        m = re.search(r"\[(\d+)\]$", v)
+                        return int(m.group(1)) if m else -1
+
+                    for vtx in sorted(dissolve_candidates, key=_vtx_index_key, reverse=True):
+                        if cmds.objExists(vtx):
+                            try:
+                                cmds.polyDelVertex(vtx)
+                            except Exception:
+                                pass
+
+                final_vcount = cmds.polyEvaluate(mesh, vertex=True)
+                total_removed += max(0, initial_vcount - final_vcount)
 
         cmds.select(meshes, r=True)
         show_inview_message("{} vertices supprimés".format(total_removed), 2.0, "success" if total_removed > 0 else "info")

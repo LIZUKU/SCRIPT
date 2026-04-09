@@ -918,7 +918,8 @@ class ScatterUI(QtWidgets.QDialog):
         super(ScatterUI, self).__init__(parent)
         self.setObjectName(WINDOW_NAME)
         self.setWindowTitle(WINDOW_TITLE)
-        self.setMinimumWidth(440)
+        self.setMinimumWidth(560)
+        self.setMinimumHeight(760)
         self.setWindowFlags(QtCore.Qt.Window | QtCore.Qt.WindowCloseButtonHint)
 
         self.engine = SmartScatterEngine()
@@ -931,132 +932,146 @@ class ScatterUI(QtWidgets.QDialog):
     def _build_ui(self):
         main = QtWidgets.QVBoxLayout(self)
         main.setContentsMargins(10, 10, 10, 10)
-        main.setSpacing(6)
+        main.setSpacing(8)
 
         self.status = QtWidgets.QLabel("Ready")
         self.status.setObjectName("statusLabel")
         self.status.setAlignment(QtCore.Qt.AlignCenter)
         main.addWidget(self.status)
 
-        # Sources
-        main.addWidget(self._section_label("SOURCES"))
+        self.tabs = QtWidgets.QTabWidget()
+        main.addWidget(self.tabs, 1)
+
+        tab_setup_page, tab_setup = self._create_tab_layout()
+        tab_transform_page, tab_transform = self._create_tab_layout()
+        tab_scale_page, tab_scale = self._create_tab_layout()
+        tab_workflow_page, tab_workflow = self._create_tab_layout()
+
+        # Setup tab ---------------------------------------------------------
+        setup_sources_grp, setup_sources = self._section_box("Sources")
         src_row = QtWidgets.QHBoxLayout()
         self.btn_set_sources = QtWidgets.QPushButton("Set Sources From Selection")
         self.btn_set_sources.clicked.connect(self.on_set_sources)
         src_row.addWidget(self.btn_set_sources)
-        main.addLayout(src_row)
+        setup_sources.addLayout(src_row)
 
         self.sources_label = QtWidgets.QLabel("Sources: -")
-        main.addWidget(self.sources_label)
+        setup_sources.addWidget(self.sources_label)
+        tab_setup.addWidget(setup_sources_grp)
 
-        # Target
-        main.addWidget(self._section_label("TARGET"))
+        setup_target_grp, setup_target = self._section_box("Target")
         target_row = QtWidgets.QHBoxLayout()
         self.btn_set_target = QtWidgets.QPushButton("Set Target From Selection")
         self.btn_set_target.clicked.connect(self.on_set_target)
         target_row.addWidget(self.btn_set_target)
-        main.addLayout(target_row)
+        setup_target.addLayout(target_row)
 
         self.target_label = QtWidgets.QLabel("Target: -")
-        main.addWidget(self.target_label)
+        setup_target.addWidget(self.target_label)
+        tab_setup.addWidget(setup_target_grp)
 
-        # Core
-        main.addWidget(self._section_label("DISTRIBUTION"))
-        self.count_spin = self._add_spin(main, "Count", 1, 50000, 100)
-        self.seed_spin = self._add_spin(main, "Seed", 1, 999999, 1)
-        self.spacing_mul_spin = self._add_dspin_slider(main, "Spacing Mult", 0.0, 10.0, 0.01, 0.0)
+        setup_distribution_grp, setup_distribution = self._section_box("Distribution")
+        self.count_spin = self._add_spin(setup_distribution, "Count", 1, 50000, 100)
+        self.seed_spin = self._add_spin(setup_distribution, "Seed", 1, 999999, 1)
+        self.spacing_mul_spin = self._add_dspin_slider(setup_distribution, "Spacing Mult", 0.0, 10.0, 0.01, 0.0)
 
         self.source_pick_combo = QtWidgets.QComboBox()
         self.source_pick_combo.addItems(["random", "cycle", "weighted"])
-        self._add_widget_row(main, "Source Pick", self.source_pick_combo)
+        self._add_widget_row(setup_distribution, "Source Pick", self.source_pick_combo)
         self.source_weights_edit = QtWidgets.QLineEdit()
         self.source_weights_edit.setPlaceholderText("ex: 60,25,15")
-        self._add_widget_row(main, "Source Weights", self.source_weights_edit)
+        self._add_widget_row(setup_distribution, "Source Weights", self.source_weights_edit)
 
         self.align_combo = QtWidgets.QComboBox()
         self.align_combo.addItems(["normal", "tangent", "world"])
-        self._add_widget_row(main, "Align Mode", self.align_combo)
+        self._add_widget_row(setup_distribution, "Align Mode", self.align_combo)
 
         self.curve_mode_combo = QtWidgets.QComboBox()
         self.curve_mode_combo.addItems(["count", "even"])
-        self._add_widget_row(main, "Curve Mode", self.curve_mode_combo)
+        self._add_widget_row(setup_distribution, "Curve Mode", self.curve_mode_combo)
 
         self.world_up_combo = QtWidgets.QComboBox()
         self.world_up_combo.addItems(["y", "x", "z"])
-        self._add_widget_row(main, "World Up", self.world_up_combo)
+        self._add_widget_row(setup_distribution, "World Up", self.world_up_combo)
 
         self.overlap_combo = QtWidgets.QComboBox()
         self.overlap_combo.addItems(["strict", "soft", "ignore"])
-        self._add_widget_row(main, "Overlap", self.overlap_combo)
-        self.overlap_softness = self._add_dspin_slider(main, "Overlap Softness", 0.0, 1.0, 0.01, 0.35)
-        self.slope_min = self._add_dspin_slider(main, "Min Slope°", 0.0, 180.0, 0.1, 0.0)
-        self.slope_max = self._add_dspin_slider(main, "Max Slope°", 0.0, 180.0, 0.1, 180.0)
+        self._add_widget_row(setup_distribution, "Overlap", self.overlap_combo)
+        self.overlap_softness = self._add_dspin_slider(setup_distribution, "Overlap Softness", 0.0, 1.0, 0.01, 0.35)
+        self.slope_min = self._add_dspin_slider(setup_distribution, "Min Slope°", 0.0, 180.0, 0.1, 0.0)
+        self.slope_max = self._add_dspin_slider(setup_distribution, "Max Slope°", 0.0, 180.0, 0.1, 180.0)
+        tab_setup.addWidget(setup_distribution_grp)
 
-        # Offsets / rotation
-        main.addWidget(self._section_label("OFFSET POSITION"))
-        self.offset_x = self._add_dspin(main, "Offset X", -100000, 100000, 0.01, 0.0)
-        self.offset_y = self._add_dspin(main, "Offset Y", -100000, 100000, 0.01, 0.0)
-        self.offset_z = self._add_dspin(main, "Offset Z", -100000, 100000, 0.01, 0.0)
-        self.local_offset_x = self._add_dspin(main, "Local Offset X", -100000, 100000, 0.01, 0.0)
-        self.local_offset_y = self._add_dspin(main, "Local Offset Y", -100000, 100000, 0.01, 0.0)
-        self.local_offset_z = self._add_dspin(main, "Local Offset Z", -100000, 100000, 0.01, 0.0)
+        # Transform tab -----------------------------------------------------
+        transform_offset_grp, transform_offset = self._section_box("Offset Position")
+        self.offset_x = self._add_dspin(transform_offset, "Offset X", -100000, 100000, 0.01, 0.0)
+        self.offset_y = self._add_dspin(transform_offset, "Offset Y", -100000, 100000, 0.01, 0.0)
+        self.offset_z = self._add_dspin(transform_offset, "Offset Z", -100000, 100000, 0.01, 0.0)
+        self.local_offset_x = self._add_dspin(transform_offset, "Local Offset X", -100000, 100000, 0.01, 0.0)
+        self.local_offset_y = self._add_dspin(transform_offset, "Local Offset Y", -100000, 100000, 0.01, 0.0)
+        self.local_offset_z = self._add_dspin(transform_offset, "Local Offset Z", -100000, 100000, 0.01, 0.0)
+        tab_transform.addWidget(transform_offset_grp)
 
-        main.addWidget(self._section_label("RANDOM POSITION"))
-        self.rand_pos_x = self._add_dspin_slider(main, "Rand Pos X", 0.0, 100000, 0.01, 0.0)
-        self.rand_pos_y = self._add_dspin_slider(main, "Rand Pos Y", 0.0, 100000, 0.01, 0.0)
-        self.rand_pos_z = self._add_dspin_slider(main, "Rand Pos Z", 0.0, 100000, 0.01, 0.0)
-        self.rand_local_x = self._add_dspin_slider(main, "Rand Local X", 0.0, 100000, 0.01, 0.0)
-        self.rand_local_y = self._add_dspin_slider(main, "Rand Local Y", 0.0, 100000, 0.01, 0.0)
-        self.rand_local_z = self._add_dspin_slider(main, "Rand Local Z", 0.0, 100000, 0.01, 0.0)
+        transform_random_pos_grp, transform_random_pos = self._section_box("Random Position")
+        self.rand_pos_x = self._add_dspin_slider(transform_random_pos, "Rand Pos X", 0.0, 100000, 0.01, 0.0)
+        self.rand_pos_y = self._add_dspin_slider(transform_random_pos, "Rand Pos Y", 0.0, 100000, 0.01, 0.0)
+        self.rand_pos_z = self._add_dspin_slider(transform_random_pos, "Rand Pos Z", 0.0, 100000, 0.01, 0.0)
+        self.rand_local_x = self._add_dspin_slider(transform_random_pos, "Rand Local X", 0.0, 100000, 0.01, 0.0)
+        self.rand_local_y = self._add_dspin_slider(transform_random_pos, "Rand Local Y", 0.0, 100000, 0.01, 0.0)
+        self.rand_local_z = self._add_dspin_slider(transform_random_pos, "Rand Local Z", 0.0, 100000, 0.01, 0.0)
+        tab_transform.addWidget(transform_random_pos_grp)
 
-        main.addWidget(self._section_label("BASE ROTATION"))
-        self.base_rot_x = self._add_dspin(main, "Base Rot X", -360.0, 360.0, 0.1, 0.0)
-        self.base_rot_y = self._add_dspin(main, "Base Rot Y", -360.0, 360.0, 0.1, 0.0)
-        self.base_rot_z = self._add_dspin(main, "Base Rot Z", -360.0, 360.0, 0.1, 0.0)
+        transform_base_rot_grp, transform_base_rot = self._section_box("Base Rotation")
+        self.base_rot_x = self._add_dspin(transform_base_rot, "Base Rot X", -360.0, 360.0, 0.1, 0.0)
+        self.base_rot_y = self._add_dspin(transform_base_rot, "Base Rot Y", -360.0, 360.0, 0.1, 0.0)
+        self.base_rot_z = self._add_dspin(transform_base_rot, "Base Rot Z", -360.0, 360.0, 0.1, 0.0)
+        tab_transform.addWidget(transform_base_rot_grp)
 
-        main.addWidget(self._section_label("RANDOM ROTATION"))
-        self.rand_rot_x = self._add_dspin_slider(main, "Rand Rot X", 0.0, 360.0, 0.1, 0.0)
-        self.rand_rot_y = self._add_dspin_slider(main, "Rand Rot Y", 0.0, 360.0, 0.1, 0.0)
-        self.rand_rot_z = self._add_dspin_slider(main, "Rand Rot Z", 0.0, 360.0, 0.1, 0.0)
+        transform_random_rot_grp, transform_random_rot = self._section_box("Random Rotation")
+        self.rand_rot_x = self._add_dspin_slider(transform_random_rot, "Rand Rot X", 0.0, 360.0, 0.1, 0.0)
+        self.rand_rot_y = self._add_dspin_slider(transform_random_rot, "Rand Rot Y", 0.0, 360.0, 0.1, 0.0)
+        self.rand_rot_z = self._add_dspin_slider(transform_random_rot, "Rand Rot Z", 0.0, 360.0, 0.1, 0.0)
+        tab_transform.addWidget(transform_random_rot_grp)
 
-        # Scale
-        main.addWidget(self._section_label("SCALE"))
-        self.scale_spin = self._add_dspin_slider(main, "Base Scale", 0.001, 1000.0, 0.01, 1.0)
-        self.rand_uni_scale = self._add_dspin_slider(main, "Rand Uniform", 0.0, 1000.0, 0.01, 0.0)
-        self.rand_scale_x = self._add_dspin_slider(main, "Rand Scale X", 0.0, 1000.0, 0.01, 0.0)
-        self.rand_scale_y = self._add_dspin_slider(main, "Rand Scale Y", 0.0, 1000.0, 0.01, 0.0)
-        self.rand_scale_z = self._add_dspin_slider(main, "Rand Scale Z", 0.0, 1000.0, 0.01, 0.0)
-        self.slope_scale_min = self._add_dspin_slider(main, "Slope Scale Min", 0.001, 10.0, 0.01, 1.0)
-        self.slope_scale_max = self._add_dspin_slider(main, "Slope Scale Max", 0.001, 10.0, 0.01, 1.0)
+        # Scale & Rules tab -------------------------------------------------
+        scale_box_grp, scale_box = self._section_box("Scale")
+        self.scale_spin = self._add_dspin_slider(scale_box, "Base Scale", 0.001, 1000.0, 0.01, 1.0)
+        self.rand_uni_scale = self._add_dspin_slider(scale_box, "Rand Uniform", 0.0, 1000.0, 0.01, 0.0)
+        self.rand_scale_x = self._add_dspin_slider(scale_box, "Rand Scale X", 0.0, 1000.0, 0.01, 0.0)
+        self.rand_scale_y = self._add_dspin_slider(scale_box, "Rand Scale Y", 0.0, 1000.0, 0.01, 0.0)
+        self.rand_scale_z = self._add_dspin_slider(scale_box, "Rand Scale Z", 0.0, 1000.0, 0.01, 0.0)
+        self.slope_scale_min = self._add_dspin_slider(scale_box, "Slope Scale Min", 0.001, 10.0, 0.01, 1.0)
+        self.slope_scale_max = self._add_dspin_slider(scale_box, "Slope Scale Max", 0.001, 10.0, 0.01, 1.0)
+        tab_scale.addWidget(scale_box_grp)
 
-        # Options
-        main.addWidget(self._section_label("OPTIONS"))
+        options_box_grp, options_box = self._section_box("Options")
         self.chk_instance = QtWidgets.QCheckBox("Use Instances")
         self.chk_instance.setChecked(True)
-        main.addWidget(self.chk_instance)
+        options_box.addWidget(self.chk_instance)
 
         self.chk_group = QtWidgets.QCheckBox("Group Result On Bake")
         self.chk_group.setChecked(True)
-        main.addWidget(self.chk_group)
+        options_box.addWidget(self.chk_group)
 
         self.chk_keep_upright = QtWidgets.QCheckBox("Keep Upright")
         self.chk_keep_upright.setChecked(False)
-        main.addWidget(self.chk_keep_upright)
+        options_box.addWidget(self.chk_keep_upright)
 
         self.chk_rand_non_uniform = QtWidgets.QCheckBox("Use XYZ Random Scale")
         self.chk_rand_non_uniform.setChecked(False)
-        main.addWidget(self.chk_rand_non_uniform)
+        options_box.addWidget(self.chk_rand_non_uniform)
         self.chk_slope_scale = QtWidgets.QCheckBox("Scale By Slope")
         self.chk_slope_scale.setChecked(False)
-        main.addWidget(self.chk_slope_scale)
+        options_box.addWidget(self.chk_slope_scale)
+        tab_scale.addWidget(options_box_grp)
 
+        # Workflow tab ------------------------------------------------------
+        workflow_preview_grp, workflow_preview = self._section_box("Preview")
         self.chk_live_preview = QtWidgets.QCheckBox("Live Preview")
         self.chk_live_preview.setChecked(False)
-        main.addWidget(self.chk_live_preview)
-        self.live_debounce_ms = self._add_spin(main, "Live Debounce ms", 50, 5000, 250)
+        workflow_preview.addWidget(self.chk_live_preview)
+        self.live_debounce_ms = self._add_spin(workflow_preview, "Live Debounce ms", 50, 5000, 250)
 
-        # Buttons
-        main.addSpacing(4)
         buttons = QtWidgets.QHBoxLayout()
         self.btn_preview = QtWidgets.QPushButton("Preview")
         self.btn_preview.clicked.connect(self.on_preview)
@@ -1069,7 +1084,7 @@ class ScatterUI(QtWidgets.QDialog):
         self.btn_clear = QtWidgets.QPushButton("Clear Preview")
         self.btn_clear.clicked.connect(self.on_clear)
         buttons.addWidget(self.btn_clear)
-        main.addLayout(buttons)
+        workflow_preview.addLayout(buttons)
 
         preset_row = QtWidgets.QHBoxLayout()
         self.btn_save_preset = QtWidgets.QPushButton("Save Preset")
@@ -1078,16 +1093,38 @@ class ScatterUI(QtWidgets.QDialog):
         self.btn_load_preset = QtWidgets.QPushButton("Load Preset")
         self.btn_load_preset.clicked.connect(self.on_load_preset)
         preset_row.addWidget(self.btn_load_preset)
-        main.addLayout(preset_row)
+        workflow_preview.addLayout(preset_row)
+        tab_workflow.addWidget(workflow_preview_grp)
+
+        tab_workflow.addStretch(1)
 
         self.btn_close = QtWidgets.QPushButton("Close")
         self.btn_close.clicked.connect(self.close)
         main.addWidget(self.btn_close)
 
+        self.tabs.addTab(tab_setup_page, "Setup")
+        self.tabs.addTab(tab_transform_page, "Transform")
+        self.tabs.addTab(tab_scale_page, "Scale / Rules")
+        self.tabs.addTab(tab_workflow_page, "Preview / Bake")
+
         self._live_timer = QtCore.QTimer(self)
         self._live_timer.setSingleShot(True)
         self._live_timer.timeout.connect(self.on_preview)
         self._connect_live_preview_controls()
+
+    def _create_tab_layout(self):
+        page = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(page)
+        lay.setContentsMargins(8, 10, 8, 8)
+        lay.setSpacing(8)
+        return page, lay
+
+    def _section_box(self, title):
+        grp = QtWidgets.QGroupBox(title)
+        lay = QtWidgets.QVBoxLayout(grp)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(6)
+        return grp, lay
 
     def _apply_style(self):
         self.setStyleSheet("""
@@ -1120,12 +1157,62 @@ class ScatterUI(QtWidgets.QDialog):
                 font-weight: bold;
                 padding: 4px;
             }
+            QTabWidget::pane {
+                border: 1px solid #4a4a4a;
+                border-radius: 4px;
+                top: -1px;
+            }
+            QTabBar::tab {
+                background: #313131;
+                border: 1px solid #474747;
+                border-bottom-color: #474747;
+                padding: 6px 10px;
+                min-width: 90px;
+                margin-right: 2px;
+            }
+            QTabBar::tab:selected {
+                background: #3c3c3c;
+                border-bottom-color: #3c3c3c;
+            }
+            QGroupBox {
+                border: 1px solid #444444;
+                margin-top: 8px;
+                padding-top: 8px;
+                border-radius: 4px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 8px;
+                padding: 0 4px;
+                color: %s;
+                font-weight: bold;
+            }
             QSpinBox, QDoubleSpinBox, QComboBox {
                 background-color: %s;
                 border: 1px solid #444444;
                 border-radius: 3px;
                 min-height: 22px;
                 padding-left: 4px;
+            }
+            QLineEdit {
+                background-color: %s;
+                border: 1px solid #444444;
+                border-radius: 3px;
+                min-height: 22px;
+                padding-left: 4px;
+            }
+            QSlider::groove:horizontal {
+                border: 1px solid #4b4b4b;
+                background: #202020;
+                height: 8px;
+                border-radius: 4px;
+            }
+            QSlider::handle:horizontal {
+                background: %s;
+                border: 1px solid #111111;
+                width: 12px;
+                margin: -4px 0;
+                border-radius: 6px;
             }
             QCheckBox {
                 padding: 2px;
@@ -1140,7 +1227,7 @@ class ScatterUI(QtWidgets.QDialog):
             QToolButton:hover {
                 border: 1px solid %s;
             }
-        """ % (BG, TEXT, PANEL, ACCENT, ACCENT, ACCENT, FIELD, ACCENT))
+        """ % (BG, TEXT, PANEL, ACCENT, ACCENT, ACCENT, ACCENT, FIELD, FIELD, ACCENT, ACCENT))
 
     def _section_label(self, text):
         lbl = QtWidgets.QLabel(text)
@@ -1150,7 +1237,7 @@ class ScatterUI(QtWidgets.QDialog):
     def _add_widget_row(self, parent_layout, label, widget):
         row = QtWidgets.QHBoxLayout()
         lbl = QtWidgets.QLabel(label)
-        lbl.setFixedWidth(110)
+        lbl.setFixedWidth(130)
         row.addWidget(lbl)
         row.addWidget(widget)
         parent_layout.addLayout(row)
@@ -1159,19 +1246,17 @@ class ScatterUI(QtWidgets.QDialog):
     def _add_spin(self, parent_layout, label, mn, mx, dv):
         row = QtWidgets.QHBoxLayout()
         lbl = QtWidgets.QLabel(label)
-        lbl.setFixedWidth(110)
+        lbl.setFixedWidth(130)
         row.addWidget(lbl)
 
         slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        slider.setMinimumWidth(120)
+        slider.setMinimumWidth(180)
         row.addWidget(slider, 1)
 
         w = QtWidgets.QSpinBox()
         w.setRange(mn, mx)
         w.setValue(dv)
         row.addWidget(w)
-
-        row.addLayout(self._build_micro_stepper(w))
         parent_layout.addLayout(row)
 
         self._bind_dynamic_slider(slider, w, mn, mx, step=1.0)
@@ -1183,11 +1268,11 @@ class ScatterUI(QtWidgets.QDialog):
     def _add_dspin_slider(self, parent_layout, label, mn, mx, step, dv):
         row = QtWidgets.QHBoxLayout()
         lbl = QtWidgets.QLabel(label)
-        lbl.setFixedWidth(110)
+        lbl.setFixedWidth(130)
         row.addWidget(lbl)
 
         slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        slider.setMinimumWidth(120)
+        slider.setMinimumWidth(180)
         row.addWidget(slider, 1)
 
         spin = QtWidgets.QDoubleSpinBox()
@@ -1196,7 +1281,6 @@ class ScatterUI(QtWidgets.QDialog):
         spin.setRange(mn, mx)
         spin.setValue(dv)
         row.addWidget(spin)
-        row.addLayout(self._build_micro_stepper(spin))
         parent_layout.addLayout(row)
 
         self._bind_dynamic_slider(slider, spin, mn, mx, step)

@@ -47,6 +47,7 @@ from __future__ import annotations
 import json
 import math
 import random
+import time
 import traceback
 
 import maya.cmds as cmds
@@ -159,6 +160,14 @@ def matrix_to_list(m):
     return [m[i] for i in range(16)]
 
 
+def matrix_axes(m):
+    return (
+        om.MVector(m[0], m[1], m[2]),
+        om.MVector(m[4], m[5], m[6]),
+        om.MVector(m[8], m[9], m[10]),
+    )
+
+
 def rotation_matrix_x(angle_deg):
     a = math.radians(angle_deg)
     c = math.cos(a)
@@ -243,6 +252,35 @@ def world_bbox_size(node):
 def estimate_source_radius(node):
     sx, sy, sz = world_bbox_size(node)
     return max(0.001, max(sx, sy, sz) * 0.5)
+
+
+def source_local_bbox(node):
+    shapes = cmds.listRelatives(node, s=True, ni=True, f=True) or []
+    mins = []
+    maxs = []
+    for shp in shapes:
+        try:
+            bb_min = cmds.getAttr("{}.boundingBoxMin".format(shp))[0]
+            bb_max = cmds.getAttr("{}.boundingBoxMax".format(shp))[0]
+            mins.append(bb_min)
+            maxs.append(bb_max)
+        except Exception:
+            continue
+
+    if not mins or not maxs:
+        return (-0.5, -0.5, -0.5), (0.5, 0.5, 0.5)
+
+    bb_min = (
+        min(v[0] for v in mins),
+        min(v[1] for v in mins),
+        min(v[2] for v in mins),
+    )
+    bb_max = (
+        max(v[0] for v in maxs),
+        max(v[1] for v in maxs),
+        max(v[2] for v in maxs),
+    )
+    return bb_min, bb_max
 
 
 # ============================================================
@@ -557,6 +595,7 @@ class SmartScatterEngine(object):
         self.source_objects = []
         self.target_data = None
         self.last_result_group = None
+        self.last_preview_stats = {}
 
     def _parse_source_weights(self, settings):
         raw = str(settings.get("source_weights", "") or "").strip()
@@ -783,12 +822,37 @@ class SmartScatterEngine(object):
             return src_radius * spacing_mul * (1.0 - softness)
         return src_radius * spacing_mul
 
+    def _source_contact_local(self, src, settings):
+        mode = settings.get("contact_mode", "pivot")
+        if mode == "custom":
+            return om.MVector(
+                float(settings.get("contact_custom_x", 0.0)),
+                float(settings.get("contact_custom_y", 0.0)),
+                float(settings.get("contact_custom_z", 0.0)),
+            )
+        if mode == "bbox_center":
+            bb_min, bb_max = source_local_bbox(src)
+            return om.MVector(
+                (bb_min[0] + bb_max[0]) * 0.5,
+                (bb_min[1] + bb_max[1]) * 0.5,
+                (bb_min[2] + bb_max[2]) * 0.5,
+            )
+        if mode == "bbox_bottom":
+            bb_min, bb_max = source_local_bbox(src)
+            return om.MVector(
+                (bb_min[0] + bb_max[0]) * 0.5,
+                bb_min[1],
+                (bb_min[2] + bb_max[2]) * 0.5,
+            )
+        return om.MVector(0.0, 0.0, 0.0)
+
     def preview(self, settings):
         if not self.source_objects:
             raise RuntimeError("No source objects set.")
         if not self.target_data:
             raise RuntimeError("No target set.")
 
+        t0 = time.time()
         self.clear_preview()
         sampler = self._build_sampler(settings)
         count = max(1, int(settings.get("count", 100)))
@@ -798,6 +862,7 @@ class SmartScatterEngine(object):
 
         source_weights = self._parse_source_weights(settings)
         source_radii = {obj: estimate_source_radius(obj) for obj in self.source_objects}
+        source_contact_local = {obj: self._source_contact_local(obj, settings) for obj in self.source_objects}
         spacing_mul = max(0.0, float(settings.get("spacing_multiplier", 0.0)))
         overlap_mode = settings.get("overlap_mode", "strict")
         overlap_softness = float(settings.get("overlap_softness", 0.35))
@@ -805,6 +870,8 @@ class SmartScatterEngine(object):
         accepted_positions = []
         tries = 0
         created = 0
+        rejected_slope = 0
+        rejected_spacing = 0
 
         if not cmds.objExists(PREVIEW_GROUP):
             self.preview_group = cmds.group(em=True, n=PREVIEW_GROUP)
@@ -828,20 +895,15 @@ class SmartScatterEngine(object):
 
             mat, pos, world_up = self._build_transform_from_sample(sample, settings, rng)
             if not self._passes_slope_filter(sample, settings, world_up):
+                rejected_slope += 1
                 continue
             if not self._passes_spacing(pos, src_radius, accepted_positions, dyn_min_dist):
+                rejected_spacing += 1
                 continue
-
-            if use_instances:
-                node = cmds.instance(src, n="smartScatter_preview_{:04d}".format(preview_idx + 1))[0]
-            else:
-                node = cmds.duplicate(src, rr=True, n="smartScatter_preview_{:04d}".format(preview_idx + 1))[0]
-            cmds.xform(node, ws=True, matrix=matrix_to_list(mat))
 
             base_scale = float(settings.get("scale", 1.0))
             uni_rand = float(settings.get("rand_uniform_scale", 0.0))
             rand_xyz = settings.get("rand_non_uniform", False)
-
             slope_scale = self._slope_scale_factor(sample, settings, world_up)
 
             if rand_xyz:
@@ -855,6 +917,26 @@ class SmartScatterEngine(object):
             sy *= slope_scale
             sz *= slope_scale
 
+            normal_push = float(settings.get("offset_along_normal", 0.0))
+            if abs(normal_push) > 1e-8:
+                pos += v_norm(sample.normal) * normal_push
+
+            contact_local = source_contact_local.get(src, om.MVector())
+            if contact_local.length() > 1e-8:
+                ax, ay, az = matrix_axes(mat)
+                contact_world = (ax * (contact_local.x * sx)) + (ay * (contact_local.y * sy)) + (az * (contact_local.z * sz))
+                pos -= contact_world
+
+            if use_instances:
+                node = cmds.instance(src, n="smartScatter_preview_{:04d}".format(preview_idx + 1))[0]
+            else:
+                node = cmds.duplicate(src, rr=True, n="smartScatter_preview_{:04d}".format(preview_idx + 1))[0]
+            mat_list = matrix_to_list(mat)
+            mat_list[12] = pos.x
+            mat_list[13] = pos.y
+            mat_list[14] = pos.z
+            cmds.xform(node, ws=True, matrix=mat_list)
+
             cmds.scale(sx, sy, sz, node, absolute=True, objectSpace=True)
             try:
                 cmds.parent(node, self.preview_group)
@@ -867,6 +949,15 @@ class SmartScatterEngine(object):
         if not self.preview_nodes:
             raise RuntimeError("No valid scatter points found.")
 
+        self.last_preview_stats = {
+            "requested": count,
+            "created": created,
+            "tries": tries,
+            "rejected_slope": rejected_slope,
+            "rejected_spacing": rejected_spacing,
+            "mode": "instances" if use_instances else "duplicates",
+            "seconds": time.time() - t0,
+        }
         return self.preview_nodes
 
     def bake(self, group_result=True):
@@ -999,6 +1090,9 @@ class ScatterUI(QtWidgets.QDialog):
         self.overlap_softness = self._add_dspin_slider(setup_distribution, "Overlap Softness", 0.0, 1.0, 0.01, 0.35)
         self.slope_min = self._add_dspin_slider(setup_distribution, "Min Slope°", 0.0, 180.0, 0.1, 0.0)
         self.slope_max = self._add_dspin_slider(setup_distribution, "Max Slope°", 0.0, 180.0, 0.1, 180.0)
+        self.contact_mode_combo = QtWidgets.QComboBox()
+        self.contact_mode_combo.addItems(["pivot", "bbox_bottom", "bbox_center", "custom"])
+        self._add_widget_row(setup_distribution, "Contact Mode", self.contact_mode_combo)
         tab_setup.addWidget(setup_distribution_grp)
 
         # Transform tab -----------------------------------------------------
@@ -1009,6 +1103,10 @@ class ScatterUI(QtWidgets.QDialog):
         self.local_offset_x = self._add_dspin(transform_offset, "Local Offset X", -100000, 100000, 0.01, 0.0)
         self.local_offset_y = self._add_dspin(transform_offset, "Local Offset Y", -100000, 100000, 0.01, 0.0)
         self.local_offset_z = self._add_dspin(transform_offset, "Local Offset Z", -100000, 100000, 0.01, 0.0)
+        self.normal_offset = self._add_dspin(transform_offset, "Offset Along Normal", -100000, 100000, 0.01, 0.0)
+        self.contact_custom_x = self._add_dspin(transform_offset, "Contact Custom X", -100000, 100000, 0.01, 0.0)
+        self.contact_custom_y = self._add_dspin(transform_offset, "Contact Custom Y", -100000, 100000, 0.01, 0.0)
+        self.contact_custom_z = self._add_dspin(transform_offset, "Contact Custom Z", -100000, 100000, 0.01, 0.0)
         tab_transform.addWidget(transform_offset_grp)
 
         transform_random_pos_grp, transform_random_pos = self._section_box("Random Position")
@@ -1349,9 +1447,10 @@ class ScatterUI(QtWidgets.QDialog):
         widgets = [
             self.count_spin, self.seed_spin, self.spacing_mul_spin,
             self.source_pick_combo, self.source_weights_edit, self.align_combo, self.curve_mode_combo,
-            self.world_up_combo, self.overlap_combo, self.overlap_softness, self.slope_min, self.slope_max,
+            self.world_up_combo, self.overlap_combo, self.overlap_softness, self.slope_min, self.slope_max, self.contact_mode_combo,
             self.offset_x, self.offset_y, self.offset_z,
-            self.local_offset_x, self.local_offset_y, self.local_offset_z,
+            self.local_offset_x, self.local_offset_y, self.local_offset_z, self.normal_offset,
+            self.contact_custom_x, self.contact_custom_y, self.contact_custom_z,
             self.rand_pos_x, self.rand_pos_y, self.rand_pos_z,
             self.rand_local_x, self.rand_local_y, self.rand_local_z,
             self.base_rot_x, self.base_rot_y, self.base_rot_z,
@@ -1408,12 +1507,17 @@ class ScatterUI(QtWidgets.QDialog):
             "overlap_softness": self.overlap_softness.value(),
             "slope_min_deg": self.slope_min.value(),
             "slope_max_deg": self.slope_max.value(),
+            "contact_mode": self.contact_mode_combo.currentText(),
             "offset_x": self.offset_x.value(),
             "offset_y": self.offset_y.value(),
             "offset_z": self.offset_z.value(),
             "local_offset_x": self.local_offset_x.value(),
             "local_offset_y": self.local_offset_y.value(),
             "local_offset_z": self.local_offset_z.value(),
+            "offset_along_normal": self.normal_offset.value(),
+            "contact_custom_x": self.contact_custom_x.value(),
+            "contact_custom_y": self.contact_custom_y.value(),
+            "contact_custom_z": self.contact_custom_z.value(),
             "rand_pos_x": self.rand_pos_x.value(),
             "rand_pos_y": self.rand_pos_y.value(),
             "rand_pos_z": self.rand_pos_z.value(),
@@ -1452,10 +1556,12 @@ class ScatterUI(QtWidgets.QDialog):
         self.overlap_softness.setValue(float(data.get("overlap_softness", self.overlap_softness.value())))
         self.slope_min.setValue(float(data.get("slope_min_deg", self.slope_min.value())))
         self.slope_max.setValue(float(data.get("slope_max_deg", self.slope_max.value())))
+        self.contact_mode_combo.setCurrentText(str(data.get("contact_mode", self.contact_mode_combo.currentText())))
 
         for key in (
             "offset_x", "offset_y", "offset_z",
             "local_offset_x", "local_offset_y", "local_offset_z",
+            "offset_along_normal", "contact_custom_x", "contact_custom_y", "contact_custom_z",
             "rand_pos_x", "rand_pos_y", "rand_pos_z",
             "rand_local_x", "rand_local_y", "rand_local_z",
             "base_rot_x", "base_rot_y", "base_rot_z",
@@ -1466,6 +1572,8 @@ class ScatterUI(QtWidgets.QDialog):
             widget = {
                 "offset_x": self.offset_x, "offset_y": self.offset_y, "offset_z": self.offset_z,
                 "local_offset_x": self.local_offset_x, "local_offset_y": self.local_offset_y, "local_offset_z": self.local_offset_z,
+                "offset_along_normal": self.normal_offset,
+                "contact_custom_x": self.contact_custom_x, "contact_custom_y": self.contact_custom_y, "contact_custom_z": self.contact_custom_z,
                 "rand_pos_x": self.rand_pos_x, "rand_pos_y": self.rand_pos_y, "rand_pos_z": self.rand_pos_z,
                 "rand_local_x": self.rand_local_x, "rand_local_y": self.rand_local_y, "rand_local_z": self.rand_local_z,
                 "base_rot_x": self.base_rot_x, "base_rot_y": self.base_rot_y, "base_rot_z": self.base_rot_z,
@@ -1521,7 +1629,18 @@ class ScatterUI(QtWidgets.QDialog):
         try:
             self._live_timer.stop()
             res = self.engine.preview(self._settings())
-            self.status.setText("Preview: {} objects".format(len(res)))
+            st = self.engine.last_preview_stats or {}
+            self.status.setText(
+                "Preview: {}/{} | spacing rej:{} | slope rej:{} | tries:{} | mode:{} | {:.2f}s".format(
+                    st.get("created", len(res)),
+                    st.get("requested", len(res)),
+                    st.get("rejected_spacing", 0),
+                    st.get("rejected_slope", 0),
+                    st.get("tries", 0),
+                    st.get("mode", "-"),
+                    float(st.get("seconds", 0.0)),
+                )
+            )
             cmds.select(clear=True)
         except Exception as exc:
             cmds.warning("Smart Scatter Preview failed: {}".format(exc))

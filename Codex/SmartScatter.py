@@ -42,6 +42,7 @@ Notes
 
 from __future__ import annotations
 
+import json
 import math
 import random
 import traceback
@@ -67,6 +68,7 @@ BG = "#2d2d2d"
 PANEL = "#353535"
 FIELD = "#252525"
 TEXT = "#c8c8c8"
+PRESET_VERSION = 1
 
 
 # ============================================================
@@ -559,6 +561,41 @@ class SmartScatterEngine(object):
         self.target_data = None
         self.last_result_group = None
 
+    def _parse_source_weights(self, settings):
+        raw = str(settings.get("source_weights", "") or "").strip()
+        if not raw:
+            return [1.0] * len(self.source_objects)
+
+        tokens = [t.strip() for t in raw.replace(";", ",").split(",") if t.strip()]
+        values = []
+        for i in range(len(self.source_objects)):
+            try:
+                values.append(max(0.0, float(tokens[i])))
+            except Exception:
+                values.append(1.0)
+        if sum(values) <= 1e-8:
+            return [1.0] * len(self.source_objects)
+        return values
+
+    def _pick_source(self, source_mode, rng, index, source_weights):
+        if source_mode == "cycle":
+            return self.source_objects[index % len(self.source_objects)]
+        if source_mode == "weighted":
+            return rng.choices(self.source_objects, weights=source_weights, k=1)[0]
+        return rng.choice(self.source_objects)
+
+    def _slope_angle_deg(self, normal, world_up):
+        dot = clamp(v_norm(normal) * v_norm(world_up), -1.0, 1.0)
+        return math.degrees(math.acos(dot))
+
+    def _passes_slope_filter(self, sample, settings, world_up):
+        min_slope = float(settings.get("slope_min_deg", 0.0))
+        max_slope = float(settings.get("slope_max_deg", 180.0))
+        if max_slope < min_slope:
+            min_slope, max_slope = max_slope, min_slope
+        slope = self._slope_angle_deg(sample.normal, world_up)
+        return min_slope <= slope <= max_slope
+
     def clear_preview(self):
         for node in list(self.preview_nodes):
             safe_delete(node)
@@ -686,7 +723,7 @@ class SmartScatterEngine(object):
 
         pos = om.MVector(sample.position)
 
-        # Local position jitter in world space
+        # World-space offset/jitter
         pos_jitter = om.MVector(
             rng.uniform(-settings["rand_pos_x"], settings["rand_pos_x"]),
             rng.uniform(-settings["rand_pos_y"], settings["rand_pos_y"]),
@@ -696,6 +733,15 @@ class SmartScatterEngine(object):
 
         base_offset = om.MVector(settings["offset_x"], settings["offset_y"], settings["offset_z"])
         pos += base_offset
+
+        # Local-space offset/jitter along the oriented basis
+        local_offset = v_mul(x_axis, settings["local_offset_x"]) + v_mul(y_axis, settings["local_offset_y"]) + v_mul(z_axis, settings["local_offset_z"])
+        local_jitter = (
+            v_mul(x_axis, rng.uniform(-settings["rand_local_x"], settings["rand_local_x"]))
+            + v_mul(y_axis, rng.uniform(-settings["rand_local_y"], settings["rand_local_y"]))
+            + v_mul(z_axis, rng.uniform(-settings["rand_local_z"], settings["rand_local_z"]))
+        )
+        pos += local_offset + local_jitter
 
         base_m = build_matrix_from_axes(
             x_axis=(x_axis.x, x_axis.y, x_axis.z),
@@ -710,17 +756,25 @@ class SmartScatterEngine(object):
 
         rot_m = compose_random_rotation(rx, ry, rz)
         final_m = rot_m * base_m
-        return final_m, pos
+        return final_m, pos, world_up
 
     def _passes_spacing(self, pos, accepted_positions, min_dist):
         if min_dist <= 0.0:
             return True
         min_sq = min_dist * min_dist
-        for p in accepted_positions:
+        for p, _radius in accepted_positions:
             d = pos - p
             if (d.x * d.x + d.y * d.y + d.z * d.z) < min_sq:
                 return False
         return True
+
+    def _compute_min_dist(self, src_radius, spacing_mul, overlap_mode, overlap_softness):
+        if overlap_mode == "ignore":
+            return 0.0
+        if overlap_mode == "soft":
+            softness = clamp(overlap_softness, 0.0, 1.0)
+            return src_radius * spacing_mul * (1.0 - softness)
+        return src_radius * spacing_mul
 
     def preview(self, settings):
         if not self.source_objects:
@@ -735,47 +789,46 @@ class SmartScatterEngine(object):
         use_instances = settings.get("use_instances", True)
         rng = random.Random(int(settings.get("seed", 1)))
 
-        source_radius = 0.0
-        if self.source_objects:
-            source_radius = max(estimate_source_radius(obj) for obj in self.source_objects)
-
+        source_weights = self._parse_source_weights(settings)
+        source_radii = {obj: estimate_source_radius(obj) for obj in self.source_objects}
         spacing_mul = max(0.0, float(settings.get("spacing_multiplier", 0.0)))
-        min_dist = source_radius * spacing_mul
+        overlap_mode = settings.get("overlap_mode", "strict")
+        overlap_softness = float(settings.get("overlap_softness", 0.35))
         max_tries = max(count * 30, 200)
-
-        samples = []
         accepted_positions = []
         tries = 0
-        while len(samples) < count and tries < max_tries:
-            tries += 1
-            batch = sampler.sample(1)
-            if not batch:
-                break
-            sample = batch[0]
-            if self._passes_spacing(sample.position, accepted_positions, min_dist):
-                samples.append(sample)
-                accepted_positions.append(om.MVector(sample.position))
-
-        if not samples:
-            raise RuntimeError("No valid scatter points found.")
+        created = 0
 
         if not cmds.objExists(PREVIEW_GROUP):
             self.preview_group = cmds.group(em=True, n=PREVIEW_GROUP)
         else:
             self.preview_group = PREVIEW_GROUP
 
-        for i, sample in enumerate(samples):
+        while created < count and tries < max_tries:
+            tries += 1
+            batch = sampler.sample(1)
+            if not batch:
+                break
+            sample = batch[0]
+            src = self._pick_source(source_mode, rng, created, source_weights)
+            src_radius = source_radii.get(src, 0.001)
+            dyn_min_dist = self._compute_min_dist(src_radius, spacing_mul, overlap_mode, overlap_softness)
+
             if source_mode == "cycle":
-                src = self.source_objects[i % len(self.source_objects)]
+                preview_idx = created
             else:
-                src = rng.choice(self.source_objects)
+                preview_idx = len(self.preview_nodes)
+
+            mat, pos, world_up = self._build_transform_from_sample(sample, settings, rng)
+            if not self._passes_slope_filter(sample, settings, world_up):
+                continue
+            if not self._passes_spacing(pos, accepted_positions, dyn_min_dist):
+                continue
 
             if use_instances:
-                node = cmds.instance(src, n="smartScatter_preview_{:04d}".format(i + 1))[0]
+                node = cmds.instance(src, n="smartScatter_preview_{:04d}".format(preview_idx + 1))[0]
             else:
-                node = cmds.duplicate(src, rr=True, n="smartScatter_preview_{:04d}".format(i + 1))[0]
-
-            mat, pos = self._build_transform_from_sample(sample, settings, rng)
+                node = cmds.duplicate(src, rr=True, n="smartScatter_preview_{:04d}".format(preview_idx + 1))[0]
             cmds.xform(node, ws=True, matrix=matrix_to_list(mat))
 
             base_scale = float(settings.get("scale", 1.0))
@@ -796,6 +849,11 @@ class SmartScatterEngine(object):
             except Exception:
                 pass
             self.preview_nodes.append(node)
+            accepted_positions.append((om.MVector(pos), src_radius))
+            created += 1
+
+        if not self.preview_nodes:
+            raise RuntimeError("No valid scatter points found.")
 
         return self.preview_nodes
 
@@ -893,8 +951,11 @@ class ScatterUI(QtWidgets.QDialog):
         self.spacing_mul_spin = self._add_dspin(main, "Spacing Mult", 0.0, 10.0, 0.01, 0.0)
 
         self.source_pick_combo = QtWidgets.QComboBox()
-        self.source_pick_combo.addItems(["random", "cycle"])
+        self.source_pick_combo.addItems(["random", "cycle", "weighted"])
         self._add_widget_row(main, "Source Pick", self.source_pick_combo)
+        self.source_weights_edit = QtWidgets.QLineEdit()
+        self.source_weights_edit.setPlaceholderText("ex: 60,25,15")
+        self._add_widget_row(main, "Source Weights", self.source_weights_edit)
 
         self.align_combo = QtWidgets.QComboBox()
         self.align_combo.addItems(["normal", "tangent", "world"])
@@ -908,16 +969,29 @@ class ScatterUI(QtWidgets.QDialog):
         self.world_up_combo.addItems(["y", "x", "z"])
         self._add_widget_row(main, "World Up", self.world_up_combo)
 
+        self.overlap_combo = QtWidgets.QComboBox()
+        self.overlap_combo.addItems(["strict", "soft", "ignore"])
+        self._add_widget_row(main, "Overlap", self.overlap_combo)
+        self.overlap_softness = self._add_dspin(main, "Overlap Softness", 0.0, 1.0, 0.01, 0.35)
+        self.slope_min = self._add_dspin(main, "Min Slope°", 0.0, 180.0, 0.1, 0.0)
+        self.slope_max = self._add_dspin(main, "Max Slope°", 0.0, 180.0, 0.1, 180.0)
+
         # Offsets / rotation
         main.addWidget(self._section_label("OFFSET POSITION"))
         self.offset_x = self._add_dspin(main, "Offset X", -100000, 100000, 0.01, 0.0)
         self.offset_y = self._add_dspin(main, "Offset Y", -100000, 100000, 0.01, 0.0)
         self.offset_z = self._add_dspin(main, "Offset Z", -100000, 100000, 0.01, 0.0)
+        self.local_offset_x = self._add_dspin(main, "Local Offset X", -100000, 100000, 0.01, 0.0)
+        self.local_offset_y = self._add_dspin(main, "Local Offset Y", -100000, 100000, 0.01, 0.0)
+        self.local_offset_z = self._add_dspin(main, "Local Offset Z", -100000, 100000, 0.01, 0.0)
 
         main.addWidget(self._section_label("RANDOM POSITION"))
         self.rand_pos_x = self._add_dspin(main, "Rand Pos X", 0.0, 100000, 0.01, 0.0)
         self.rand_pos_y = self._add_dspin(main, "Rand Pos Y", 0.0, 100000, 0.01, 0.0)
         self.rand_pos_z = self._add_dspin(main, "Rand Pos Z", 0.0, 100000, 0.01, 0.0)
+        self.rand_local_x = self._add_dspin(main, "Rand Local X", 0.0, 100000, 0.01, 0.0)
+        self.rand_local_y = self._add_dspin(main, "Rand Local Y", 0.0, 100000, 0.01, 0.0)
+        self.rand_local_z = self._add_dspin(main, "Rand Local Z", 0.0, 100000, 0.01, 0.0)
 
         main.addWidget(self._section_label("BASE ROTATION"))
         self.base_rot_x = self._add_dspin(main, "Base Rot X", -360.0, 360.0, 0.1, 0.0)
@@ -955,6 +1029,11 @@ class ScatterUI(QtWidgets.QDialog):
         self.chk_rand_non_uniform.setChecked(False)
         main.addWidget(self.chk_rand_non_uniform)
 
+        self.chk_live_preview = QtWidgets.QCheckBox("Live Preview")
+        self.chk_live_preview.setChecked(False)
+        main.addWidget(self.chk_live_preview)
+        self.live_debounce_ms = self._add_spin(main, "Live Debounce ms", 50, 5000, 250)
+
         # Buttons
         main.addSpacing(4)
         buttons = QtWidgets.QHBoxLayout()
@@ -971,9 +1050,23 @@ class ScatterUI(QtWidgets.QDialog):
         buttons.addWidget(self.btn_clear)
         main.addLayout(buttons)
 
+        preset_row = QtWidgets.QHBoxLayout()
+        self.btn_save_preset = QtWidgets.QPushButton("Save Preset")
+        self.btn_save_preset.clicked.connect(self.on_save_preset)
+        preset_row.addWidget(self.btn_save_preset)
+        self.btn_load_preset = QtWidgets.QPushButton("Load Preset")
+        self.btn_load_preset.clicked.connect(self.on_load_preset)
+        preset_row.addWidget(self.btn_load_preset)
+        main.addLayout(preset_row)
+
         self.btn_close = QtWidgets.QPushButton("Close")
         self.btn_close.clicked.connect(self.close)
         main.addWidget(self.btn_close)
+
+        self._live_timer = QtCore.QTimer(self)
+        self._live_timer.setSingleShot(True)
+        self._live_timer.timeout.connect(self.on_preview)
+        self._connect_live_preview_controls()
 
     def _apply_style(self):
         self.setStyleSheet("""
@@ -1048,6 +1141,32 @@ class ScatterUI(QtWidgets.QDialog):
         self._add_widget_row(parent_layout, label, w)
         return w
 
+    def _connect_live_preview_controls(self):
+        widgets = [
+            self.count_spin, self.seed_spin, self.spacing_mul_spin,
+            self.source_pick_combo, self.source_weights_edit, self.align_combo, self.curve_mode_combo,
+            self.world_up_combo, self.overlap_combo, self.overlap_softness, self.slope_min, self.slope_max,
+            self.offset_x, self.offset_y, self.offset_z,
+            self.local_offset_x, self.local_offset_y, self.local_offset_z,
+            self.rand_pos_x, self.rand_pos_y, self.rand_pos_z,
+            self.rand_local_x, self.rand_local_y, self.rand_local_z,
+            self.base_rot_x, self.base_rot_y, self.base_rot_z,
+            self.rand_rot_x, self.rand_rot_y, self.rand_rot_z,
+            self.scale_spin, self.rand_uni_scale, self.rand_scale_x, self.rand_scale_y, self.rand_scale_z,
+            self.chk_instance, self.chk_keep_upright, self.chk_rand_non_uniform,
+        ]
+        for w in widgets:
+            if hasattr(w, "valueChanged"):
+                w.valueChanged.connect(self.on_live_param_changed)
+            elif hasattr(w, "currentTextChanged"):
+                w.currentTextChanged.connect(self.on_live_param_changed)
+            elif hasattr(w, "textChanged"):
+                w.textChanged.connect(self.on_live_param_changed)
+            elif hasattr(w, "toggled"):
+                w.toggled.connect(self.on_live_param_changed)
+        self.chk_live_preview.toggled.connect(self.on_live_param_changed)
+        self.live_debounce_ms.valueChanged.connect(self.on_live_param_changed)
+
     # ------------------------------
     # State display
     # ------------------------------
@@ -1076,15 +1195,26 @@ class ScatterUI(QtWidgets.QDialog):
             "seed": self.seed_spin.value(),
             "spacing_multiplier": self.spacing_mul_spin.value(),
             "source_pick_mode": self.source_pick_combo.currentText(),
+            "source_weights": self.source_weights_edit.text(),
             "align_mode": self.align_combo.currentText(),
             "curve_mode": self.curve_mode_combo.currentText(),
             "world_up_axis": self.world_up_combo.currentText(),
+            "overlap_mode": self.overlap_combo.currentText(),
+            "overlap_softness": self.overlap_softness.value(),
+            "slope_min_deg": self.slope_min.value(),
+            "slope_max_deg": self.slope_max.value(),
             "offset_x": self.offset_x.value(),
             "offset_y": self.offset_y.value(),
             "offset_z": self.offset_z.value(),
+            "local_offset_x": self.local_offset_x.value(),
+            "local_offset_y": self.local_offset_y.value(),
+            "local_offset_z": self.local_offset_z.value(),
             "rand_pos_x": self.rand_pos_x.value(),
             "rand_pos_y": self.rand_pos_y.value(),
             "rand_pos_z": self.rand_pos_z.value(),
+            "rand_local_x": self.rand_local_x.value(),
+            "rand_local_y": self.rand_local_y.value(),
+            "rand_local_z": self.rand_local_z.value(),
             "base_rot_x": self.base_rot_x.value(),
             "base_rot_y": self.base_rot_y.value(),
             "base_rot_z": self.base_rot_z.value(),
@@ -1100,6 +1230,45 @@ class ScatterUI(QtWidgets.QDialog):
             "use_instances": self.chk_instance.isChecked(),
             "keep_upright": self.chk_keep_upright.isChecked(),
         }
+
+    def _apply_settings(self, data):
+        self.count_spin.setValue(int(data.get("count", self.count_spin.value())))
+        self.seed_spin.setValue(int(data.get("seed", self.seed_spin.value())))
+        self.spacing_mul_spin.setValue(float(data.get("spacing_multiplier", self.spacing_mul_spin.value())))
+        self.source_pick_combo.setCurrentText(str(data.get("source_pick_mode", self.source_pick_combo.currentText())))
+        self.source_weights_edit.setText(str(data.get("source_weights", self.source_weights_edit.text())))
+        self.align_combo.setCurrentText(str(data.get("align_mode", self.align_combo.currentText())))
+        self.curve_mode_combo.setCurrentText(str(data.get("curve_mode", self.curve_mode_combo.currentText())))
+        self.world_up_combo.setCurrentText(str(data.get("world_up_axis", self.world_up_combo.currentText())))
+        self.overlap_combo.setCurrentText(str(data.get("overlap_mode", self.overlap_combo.currentText())))
+        self.overlap_softness.setValue(float(data.get("overlap_softness", self.overlap_softness.value())))
+        self.slope_min.setValue(float(data.get("slope_min_deg", self.slope_min.value())))
+        self.slope_max.setValue(float(data.get("slope_max_deg", self.slope_max.value())))
+
+        for key in (
+            "offset_x", "offset_y", "offset_z",
+            "local_offset_x", "local_offset_y", "local_offset_z",
+            "rand_pos_x", "rand_pos_y", "rand_pos_z",
+            "rand_local_x", "rand_local_y", "rand_local_z",
+            "base_rot_x", "base_rot_y", "base_rot_z",
+            "rand_rot_x", "rand_rot_y", "rand_rot_z",
+            "scale", "rand_uniform_scale", "rand_scale_x", "rand_scale_y", "rand_scale_z",
+        ):
+            widget = {
+                "offset_x": self.offset_x, "offset_y": self.offset_y, "offset_z": self.offset_z,
+                "local_offset_x": self.local_offset_x, "local_offset_y": self.local_offset_y, "local_offset_z": self.local_offset_z,
+                "rand_pos_x": self.rand_pos_x, "rand_pos_y": self.rand_pos_y, "rand_pos_z": self.rand_pos_z,
+                "rand_local_x": self.rand_local_x, "rand_local_y": self.rand_local_y, "rand_local_z": self.rand_local_z,
+                "base_rot_x": self.base_rot_x, "base_rot_y": self.base_rot_y, "base_rot_z": self.base_rot_z,
+                "rand_rot_x": self.rand_rot_x, "rand_rot_y": self.rand_rot_y, "rand_rot_z": self.rand_rot_z,
+                "scale": self.scale_spin, "rand_uniform_scale": self.rand_uni_scale,
+                "rand_scale_x": self.rand_scale_x, "rand_scale_y": self.rand_scale_y, "rand_scale_z": self.rand_scale_z,
+            }[key]
+            widget.setValue(float(data.get(key, widget.value())))
+
+        self.chk_rand_non_uniform.setChecked(bool(data.get("rand_non_uniform", self.chk_rand_non_uniform.isChecked())))
+        self.chk_instance.setChecked(bool(data.get("use_instances", self.chk_instance.isChecked())))
+        self.chk_keep_upright.setChecked(bool(data.get("keep_upright", self.chk_keep_upright.isChecked())))
 
     # ------------------------------
     # Callbacks
@@ -1117,6 +1286,7 @@ class ScatterUI(QtWidgets.QDialog):
         except Exception as exc:
             cmds.warning(str(exc))
             self.status.setText("Source error")
+        self.on_live_param_changed()
 
     def on_set_target(self):
         try:
@@ -1126,9 +1296,18 @@ class ScatterUI(QtWidgets.QDialog):
         except Exception as exc:
             cmds.warning(str(exc))
             self.status.setText("Target error")
+        self.on_live_param_changed()
+
+    def on_live_param_changed(self, *_args):
+        if not self.chk_live_preview.isChecked():
+            return
+        if not self.engine.source_objects or not self.engine.target_data:
+            return
+        self._live_timer.start(self.live_debounce_ms.value())
 
     def on_preview(self):
         try:
+            self._live_timer.stop()
             res = self.engine.preview(self._settings())
             self.status.setText("Preview: {} objects".format(len(res)))
             cmds.select(clear=True)
@@ -1147,8 +1326,47 @@ class ScatterUI(QtWidgets.QDialog):
             self.status.setText("Bake failed")
 
     def on_clear(self):
+        self._live_timer.stop()
         self.engine.clear_preview()
         self.status.setText("Preview cleared")
+
+    def on_save_preset(self):
+        try:
+            path, _ = QtWidgets.QFileDialog.getSaveFileName(
+                self,
+                "Save Smart Scatter Preset",
+                "",
+                "Smart Scatter Preset (*.json)"
+            )
+            if not path:
+                return
+            data = {"version": PRESET_VERSION, "settings": self._settings()}
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, sort_keys=True)
+            self.status.setText("Preset saved")
+        except Exception as exc:
+            cmds.warning("Save preset failed: {}".format(exc))
+            self.status.setText("Preset save failed")
+
+    def on_load_preset(self):
+        try:
+            path, _ = QtWidgets.QFileDialog.getOpenFileName(
+                self,
+                "Load Smart Scatter Preset",
+                "",
+                "Smart Scatter Preset (*.json)"
+            )
+            if not path:
+                return
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            settings = data.get("settings", data)
+            self._apply_settings(settings)
+            self.status.setText("Preset loaded")
+            self.on_live_param_changed()
+        except Exception as exc:
+            cmds.warning("Load preset failed: {}".format(exc))
+            self.status.setText("Preset load failed")
 
     def closeEvent(self, event):
         try:

@@ -466,17 +466,35 @@ def _pt_get_internal_uv_seam_edges(obj):
     return seams
 
 def _pt_get_connected_shells(faces):
-    visited = set(); shells = []
-    for f in faces:
-        if f in visited: continue
-        stack = [f]; shell = []
+    """
+    Retourne les shells connectés *uniquement* à l'intérieur de `faces`.
+    IMPORTANT: on ne doit pas traverser les voisins hors du set, sinon
+    front/back se mélangent et le bridge saute des zones.
+    """
+    visited = set()
+    shells = []
+    face_set = set(faces or [])
+
+    for f in faces or []:
+        if f in visited:
+            continue
+        stack = [f]
+        shell = []
         while stack:
             cur = stack.pop()
-            if cur in visited: continue
-            visited.add(cur); shell.append(cur)
-            for n in (cmds.ls(cmds.polyListComponentConversion(cur, ff=True, tf=True), fl=True) or []):
-                if n not in visited: stack.append(n)
-        shells.append(shell)
+            if cur in visited or cur not in face_set:
+                continue
+            visited.add(cur)
+            shell.append(cur)
+
+            neighbors = cmds.ls(
+                cmds.polyListComponentConversion(cur, ff=True, tf=True),
+                fl=True) or []
+            for n in neighbors:
+                if n in face_set and n not in visited:
+                    stack.append(n)
+        if shell:
+            shells.append(shell)
     return shells
 
 def _pt_center(faces):
@@ -643,7 +661,9 @@ def _pt_loop_center(edges):
 
 def _pt_pair_loops_by_center(front_loops, back_loops):
     """
-    Pairing greedy des boucles front/back par proximité de centre.
+    Pairing greedy des boucles front/back.
+    Priorité 1: même nombre d'edges (évite les skips inutiles).
+    Priorité 2: proximité du centre.
     """
     pairs = []
     remaining = list(back_loops)
@@ -651,8 +671,10 @@ def _pt_pair_loops_by_center(front_loops, back_loops):
         if not remaining:
             break
         fc = _pt_loop_center(f_loop)
+        same_size = [b for b in remaining if len(b) == len(f_loop)]
+        candidates = same_size if same_size else remaining
         best = min(
-            remaining,
+            candidates,
             key=lambda b: (
                 (_pt_loop_center(b)[0] - fc[0]) ** 2 +
                 (_pt_loop_center(b)[1] - fc[1]) ** 2 +

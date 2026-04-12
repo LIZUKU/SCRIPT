@@ -1133,57 +1133,6 @@ def _om_start_mmb_dragger(get_fn,set_fn,change_fn):
 def _cg_ev(e): return cmds.ls(cmds.polyListComponentConversion(e,fromEdge=True,toVertex=True),flatten=True)
 def _cg_pos(v): p=cmds.pointPosition(v,world=True); return om2.MVector(p[0],p[1],p[2])
 def _cg_dist(v1,v2): return (_cg_pos(v2)-_cg_pos(v1)).length()
-def _cg_dist_vec(p1,p2):
-    d = p2 - p1
-    return d.length()
-def _cg_positions(vertices):
-    out = {}
-    for v in (vertices or []):
-        try:
-            p = cmds.pointPosition(v, world=True)
-            out[v] = om2.MVector(p[0], p[1], p[2])
-        except Exception:
-            continue
-    return out
-def _cg_build_pairs(v1, v2, max_dist, pos):
-    pairs = []
-    for a in v1:
-        pa = pos.get(a)
-        if pa is None:
-            continue
-        best = None
-        best_d = None
-        for b in v2:
-            pb = pos.get(b)
-            if pb is None:
-                continue
-            d = _cg_dist_vec(pa, pb)
-            if best_d is None or d < best_d:
-                best_d = d
-                best = b
-        if best is not None and best_d is not None and best_d <= max_dist:
-            pairs.append((a, best, best_d))
-
-    matched = {p[1] for p in pairs}
-    for b in v2:
-        if b in matched:
-            continue
-        pb = pos.get(b)
-        if pb is None:
-            continue
-        best = None
-        best_d = None
-        for a in v1:
-            pa = pos.get(a)
-            if pa is None:
-                continue
-            d = _cg_dist_vec(pa, pb)
-            if best_d is None or d < best_d:
-                best_d = d
-                best = a
-        if best is not None and best_d is not None and best_d <= max_dist:
-            pairs.append((best, b, best_d))
-    return pairs
 def _cg_edges_conn(e1,e2): return bool(set(_cg_ev(e1))&set(_cg_ev(e2)))
 def _cg_verts_conn(v1,v2):
     e1=set(cmds.ls(cmds.polyListComponentConversion(v1,fromVertex=True,toEdge=True),flatten=True))
@@ -1230,22 +1179,25 @@ def _cg_as_vertices():
 def _cg_estimate_gap():
     v1,v2=_cg_as_vertices()
     if not v1 or not v2: return 10.0
-    pos = _cg_positions(set(v1 + v2))
-    md = min(
-        (_cg_dist_vec(pos[a], pos[b]) for a in v1 for b in v2 if a in pos and b in pos),
-        default=float("inf")
-    )
+    md=min(_cg_dist(a,b) for a in v1 for b in v2)
     return 10.0 if(md==float('inf') or md<0.0001) else md*1.5
 def _cg_close_gaps(max_dist=None):
     v1,v2=_cg_as_vertices()
     if not v1 or not v2: cmds.warning("Two groups are required."); return 0
     if max_dist is None: max_dist=_cg_estimate_gap()
-    pos = _cg_positions(set(v1 + v2))
-    pairs = _cg_build_pairs(v1, v2, max_dist, pos)
+    pairs=[]
+    for a in v1:
+        best=min(v2,key=lambda b:_cg_dist(a,b))
+        if _cg_dist(a,best)<=max_dist: pairs.append((a,best,_cg_dist(a,best)))
+    matched={p[1] for p in pairs}
+    for b in v2:
+        if b in matched: continue
+        best=min(v1,key=lambda a:_cg_dist(a,b))
+        if _cg_dist(best,b)<=max_dist: pairs.append((best,b,_cg_dist(best,b)))
     if not pairs: cmds.warning(f"No pairs found within distance {max_dist:.3f}"); return 0
     vtgt={}
     for a,b,_ in pairs:
-        mid=(pos[a]+pos[b])*0.5
+        mid=(_cg_pos(a)+_cg_pos(b))*0.5
         vtgt.setdefault(a,[]).append(mid); vtgt.setdefault(b,[]).append(mid)
     cmds.undoInfo(openChunk=True)
     try:
@@ -1260,12 +1212,19 @@ def _cg_close_dir(max_dist,direction):
     v1,v2=_cg_as_vertices()
     if not v1 or not v2: return 0
     if max_dist is None: max_dist=_cg_estimate_gap()
-    pos = _cg_positions(set(v1 + v2))
-    pairs = _cg_build_pairs(v1, v2, max_dist, pos)
+    pairs=[]
+    for a in v1:
+        best=min(v2,key=lambda b:_cg_dist(a,b))
+        if _cg_dist(a,best)<=max_dist: pairs.append((a,best))
+    matched={p[1] for p in pairs}
+    for b in v2:
+        if b in matched: continue
+        best=min(v1,key=lambda a:_cg_dist(a,b))
+        if _cg_dist(best,b)<=max_dist: pairs.append((best,b))
     if not pairs: return 0
     vtgt={}
-    for a,b,_ in pairs:
-        tgt=pos[a] if direction=="g1" else pos[b]
+    for a,b in pairs:
+        tgt=_cg_pos(a) if direction=="g1" else _cg_pos(b)
         vtgt.setdefault(a,[]).append(tgt); vtgt.setdefault(b,[]).append(tgt)
     cmds.undoInfo(openChunk=True)
     try:
@@ -1303,13 +1262,6 @@ class PanelToolTab(QtWidgets.QWidget):
             "angle_bevel_enabled":False,"angle_bevel_threshold":90.0,
             "ui":{},
         }
-        self._live_apply_timer = QtCore.QTimer(self)
-        self._live_apply_timer.setSingleShot(True)
-        self._live_apply_timer.timeout.connect(self._apply_bevel_live_now)
-
-        self._rebuild_timer = QtCore.QTimer(self)
-        self._rebuild_timer.setSingleShot(True)
-        self._rebuild_timer.timeout.connect(self._rebuild_bevel_now)
         self._build()
 
     def _sync_bevel_state(self):
@@ -1323,9 +1275,6 @@ class PanelToolTab(QtWidgets.QWidget):
         s["angle_bevel_threshold"] = self.w_angle_val.value()
 
     def _apply_bevel_live(self):
-        self._live_apply_timer.start(30)
-
-    def _apply_bevel_live_now(self):
         if not self.state["started"]: return
         self._sync_bevel_state()
         bn = self.state.get("bevel_node")
@@ -1333,9 +1282,6 @@ class PanelToolTab(QtWidgets.QWidget):
             _pt_apply_bevel_state(bn, self.state)
 
     def _rebuild_bevel(self):
-        self._rebuild_timer.start(120)
-
-    def _rebuild_bevel_now(self):
         if not self.state["started"]: return
         self._sync_bevel_state()
         _pt_rebuild_bevel(self.state["short_name"], self.state)
@@ -1388,7 +1334,6 @@ class PanelToolTab(QtWidgets.QWidget):
         self.w_boff_sl.setEnabled(False)
         self.w_boff.valueChanged.connect(self._on_boff_field)
         self.w_boff_sl.sliderMoved.connect(self._on_boff_slider)
-        self.w_boff_sl.sliderReleased.connect(self._apply_bevel_live)
         root.addLayout(_slider_row("Offset", self.w_boff, self.w_boff_sl,
                                    step_slow=0.001, step_fast=0.01))
 
@@ -1400,7 +1345,6 @@ class PanelToolTab(QtWidgets.QWidget):
         self.w_bseg_sl.setEnabled(False)
         self.w_bseg.valueChanged.connect(self._on_bseg_field)
         self.w_bseg_sl.sliderMoved.connect(self._on_bseg_slider)
-        self.w_bseg_sl.sliderReleased.connect(self._apply_bevel_live)
         root.addLayout(_slider_row("Segments", self.w_bseg, self.w_bseg_sl,
                                    step_slow=1, step_fast=2))
 
@@ -1440,7 +1384,6 @@ class PanelToolTab(QtWidgets.QWidget):
         self.w_angle_sl.setEnabled(False)
         self.w_angle_val.valueChanged.connect(self._on_angle_field)
         self.w_angle_sl.sliderMoved.connect(self._on_angle_slider)
-        self.w_angle_sl.sliderReleased.connect(self._rebuild_bevel)
         root.addLayout(_slider_row("Angle", self.w_angle_val, self.w_angle_sl,
                                    step_slow=1.0, step_fast=5.0))
 
@@ -1501,85 +1444,85 @@ class PanelToolTab(QtWidgets.QWidget):
         _pt_debug(state, "Starting paneling on object '{}'.".format(short_name))
         _pt_validation_box("Start", "Detected object: {}\nStarting process.".format(short_name))
 
-        cmds.waitCursor(state=True)
-        cmds.refresh(suspend=True)
-        try:
-            backup = cmds.duplicate(obj, name=short_name+"_backup#")[0]
-            cmds.hide(backup); state["backup"] = backup
-            _pt_debug(state, "Backup created: {}".format(backup), "OK")
-            _pt_validation_box("Backup", "Backup created:\n{}".format(backup))
+        backup = cmds.duplicate(obj, name=short_name+"_backup#")[0]
+        cmds.hide(backup); state["backup"] = backup
+        _pt_debug(state, "Backup created: {}".format(backup), "OK")
+        _pt_validation_box("Backup", "Backup created:\n{}".format(backup))
 
-            edge_set = short_name+"_panelEdges_set"
-            if cmds.objExists(edge_set): cmds.delete(edge_set)
-            cmds.sets(edges, name=edge_set)
+        edge_set = short_name+"_panelEdges_set"
+        if cmds.objExists(edge_set): cmds.delete(edge_set)
+        cmds.sets(edges, name=edge_set)
 
-            stored = cmds.ls(cmds.sets(edge_set, q=True), fl=True) or []
-            corner_verts = _pt_extract_corner_vertices_from_edges(stored)
-            _pt_component_set(short_name + "_panelCornerVerts_set", corner_verts)
-            _pt_debug(state, "Corner verts stored: {}".format(len(corner_verts)))
-            if stored:
-                cmds.select(stored, r=True)
-                try: cmds.polyMapCut(stored)
-                except Exception:
-                    try: mel.eval("performPolyMapCut;")
-                    except Exception: cmds.warning("UV cut failed."); return
-            _pt_debug(state, "UV cut applied to {} edge(s).".format(len(stored)))
-            _pt_validation_box("UV Cut", "UV cut completed on {} edge(s).".format(len(stored)))
+        cmds.select(obj, r=True)
+        for cmd in ["UVCameraBasedProjection;","UnfoldUV;","UVOrientShells;","LayoutUV;"]:
+            try: mel.eval(cmd)
+            except Exception: pass
+        _pt_debug(state, "Projection/Unfold/Orient/Layout UV executed.")
 
-            cmds.select(obj+".f[*]", r=True)
-            extrude_node = cmds.polyExtrudeFacet(localTranslateZ=default_val, keepFacesTogether=True)[0]
-            state["extrude_node"] = extrude_node
-            _pt_debug(state, "Extrude created: {} (offset={})".format(extrude_node, default_val), "OK")
-            _pt_validation_box("Extrude", "Extrude node:\n{}\nOffset: {}".format(extrude_node, default_val))
+        stored = cmds.ls(cmds.sets(edge_set, q=True), fl=True) or []
+        corner_verts = _pt_extract_corner_vertices_from_edges(stored)
+        _pt_component_set(short_name + "_panelCornerVerts_set", corner_verts)
+        _pt_debug(state, "Corner verts stored: {}".format(len(corner_verts)))
+        if stored:
+            cmds.select(stored, r=True)
+            try: cmds.polyMapCut(stored)
+            except Exception:
+                try: mel.eval("performPolyMapCut;")
+                except Exception: cmds.warning("UV cut failed."); return
+        _pt_debug(state, "UV cut applied to {} edge(s).".format(len(stored)))
+        _pt_validation_box("UV Cut", "UV cut completed on {} edge(s).".format(len(stored)))
 
-            if state["is_negative"]:
-                cmds.select(obj, r=True); mel.eval("ReversePolygonNormals;"); cmds.select(obj, r=True)
+        cmds.select(obj+".f[*]", r=True)
+        extrude_node = cmds.polyExtrudeFacet(localTranslateZ=default_val, keepFacesTogether=True)[0]
+        state["extrude_node"] = extrude_node
+        _pt_debug(state, "Extrude created: {} (offset={})".format(extrude_node, default_val), "OK")
+        _pt_validation_box("Extrude", "Extrude node:\n{}\nOffset: {}".format(extrude_node, default_val))
 
-            front_faces = cmds.ls(sl=True, fl=True) or []
-            front_set   = short_name+"_panelFrontFaces_set"
-            if cmds.objExists(front_set): cmds.delete(front_set)
-            if front_faces: cmds.sets(front_faces, name=front_set)
-            _pt_debug(state, "Front faces: {}".format(len(front_faces)))
-            _pt_validation_box("Front Set", "{} face(s) stored in the front set.".format(len(front_faces)))
+        if state["is_negative"]:
+            cmds.select(obj, r=True); mel.eval("ReversePolygonNormals;"); cmds.select(obj, r=True)
 
-            cmds.select(front_faces, r=True)
-            mel.eval("GrowPolygonSelectionRegion;"); mel.eval("InvertSelection;")
-            back_faces = cmds.ls(sl=True, fl=True) or []
-            back_set   = short_name+"_panelBackFaces_set"
-            if cmds.objExists(back_set): cmds.delete(back_set)
-            if back_faces: cmds.sets(back_faces, name=back_set)
-            _pt_debug(state, "Back faces: {}".format(len(back_faces)))
-            _pt_validation_box("Back Set", "{} face(s) stored in the back set.".format(len(back_faces)))
+        front_faces = cmds.ls(sl=True, fl=True) or []
+        front_set   = short_name+"_panelFrontFaces_set"
+        if cmds.objExists(front_set): cmds.delete(front_set)
+        if front_faces: cmds.sets(front_faces, name=front_set)
+        _pt_debug(state, "Front faces: {}".format(len(front_faces)))
+        _pt_validation_box("Front Set", "{} face(s) stored in the front set.".format(len(front_faces)))
 
-            seam_edges = _pt_get_internal_uv_seam_edges(obj)
-            seam_set   = short_name+"_panelSeams_set"
-            if cmds.objExists(seam_set): cmds.delete(seam_set)
-            if seam_edges: cmds.sets(seam_edges, name=seam_set)
-            _pt_debug(state, "Seam edges detected: {}".format(len(seam_edges)))
-            _pt_validation_box("Seams", "{} seam edge(s) detected.".format(len(seam_edges)))
+        cmds.select(front_faces, r=True)
+        mel.eval("GrowPolygonSelectionRegion;"); mel.eval("InvertSelection;")
+        back_faces = cmds.ls(sl=True, fl=True) or []
+        back_set   = short_name+"_panelBackFaces_set"
+        if cmds.objExists(back_set): cmds.delete(back_set)
+        if back_faces: cmds.sets(back_faces, name=back_set)
+        _pt_debug(state, "Back faces: {}".format(len(back_faces)))
+        _pt_validation_box("Back Set", "{} face(s) stored in the back set.".format(len(back_faces)))
 
-            cmds.select(obj, r=True); state["safe_selection"] = [obj]
+        seam_edges = _pt_get_internal_uv_seam_edges(obj)
+        seam_set   = short_name+"_panelSeams_set"
+        if cmds.objExists(seam_set): cmds.delete(seam_set)
+        if seam_edges: cmds.sets(seam_edges, name=seam_set)
+        _pt_debug(state, "Seam edges detected: {}".format(len(seam_edges)))
+        _pt_validation_box("Seams", "{} seam edge(s) detected.".format(len(seam_edges)))
 
-            _pt_delete_side_faces(short_name)
-            _pt_debug(state, "Side faces deleted.")
-            _pt_detach(short_name)
-            _pt_debug(state, "Seam detach complete.")
-            _pt_bridge(short_name, state)
+        cmds.select(obj, r=True); state["safe_selection"] = [obj]
 
-            state["started"] = True
-            self._enable_controls(True)
+        _pt_delete_side_faces(short_name)
+        _pt_debug(state, "Side faces deleted.")
+        _pt_detach(short_name)
+        _pt_debug(state, "Seam detach complete.")
+        _pt_bridge(short_name, state)
 
-            if auto_bevel:
-                self._sync_bevel_state()
-                _pt_bevel(short_name, state)
+        state["started"] = True
+        self._enable_controls(True)
 
-            cmds.select(obj, r=True)
-            _pt_print_summary(state, context="START")
-            _pt_validation_box("Summary", "Process complete.\nSummary printed in the Script Editor.")
-        finally:
-            cmds.refresh(suspend=False)
-            cmds.refresh(f=True)
-            cmds.waitCursor(state=False)
+        if auto_bevel:
+            self._sync_bevel_state()
+            _pt_bevel(short_name, state)
+            _pt_rebuild_bevel(short_name, state)
+
+        cmds.select(obj, r=True)
+        _pt_print_summary(state, context="START")
+        _pt_validation_box("Summary", "Process complete.\nSummary printed in the Script Editor.")
 
     def _on_revert(self):
         _pt_revert(self.state)

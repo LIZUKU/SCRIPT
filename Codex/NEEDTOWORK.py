@@ -502,9 +502,21 @@ def _pt_remove_useless_vertices(obj, tolerance=0.0001):
 
     mesh = shapes[0]
     verts = cmds.ls(mesh + ".vtx[*]", flatten=True) or []
-    to_delete = []
+    to_delete = _pt_collect_collinear_vertices(verts, tolerance=tolerance)
 
-    for v in verts:
+    if to_delete:
+        cmds.select(to_delete, replace=True)
+        cmds.polyDelVertex()
+    cmds.select(obj, r=True)
+    return len(to_delete)
+
+
+def _pt_collect_collinear_vertices(vertices, tolerance=0.0001):
+    """Return collinear vertices from a provided vertex list."""
+    to_delete = []
+    vert_set = set(vertices or [])
+
+    for v in (vertices or []):
         edges = cmds.polyListComponentConversion(v, toEdge=True, fromVertex=True)
         edges = cmds.ls(edges, flatten=True) or []
         if len(edges) != 2:
@@ -515,7 +527,7 @@ def _pt_remove_useless_vertices(obj, tolerance=0.0001):
             edge_verts = cmds.polyListComponentConversion(edge, toVertex=True)
             edge_verts = cmds.ls(edge_verts, flatten=True) or []
             other = [ev for ev in edge_verts if ev != v]
-            if other:
+            if other and other[0] in vert_set:
                 voisins.append(other[0])
 
         if len(voisins) != 2:
@@ -536,8 +548,28 @@ def _pt_remove_useless_vertices(obj, tolerance=0.0001):
         if all(abs(val) < tolerance for val in cross):
             to_delete.append(v)
 
+    return to_delete
+
+
+def _pt_remove_useless_vertices_per_shell(obj, tolerance=0.0001):
+    """
+    Remove collinear vertices shell by shell (as if each shell was separated).
+    Returns number of deleted vertices.
+    """
+    all_faces = cmds.ls(obj + ".f[*]", fl=True) or []
+    shells = _pt_connected_face_shells(all_faces)
+    to_delete = set()
+
+    for shell_faces in shells:
+        shell_verts = cmds.ls(
+            cmds.polyListComponentConversion(shell_faces, fromFace=True, toVertex=True),
+            fl=True
+        ) or []
+        shell_delete = _pt_collect_collinear_vertices(shell_verts, tolerance=tolerance)
+        to_delete.update(shell_delete)
+
     if to_delete:
-        cmds.select(to_delete, replace=True)
+        cmds.select(list(to_delete), replace=True)
         cmds.polyDelVertex()
     cmds.select(obj, r=True)
     return len(to_delete)
@@ -1364,17 +1396,35 @@ class PanelToolTab(QtWidgets.QWidget):
         root.addWidget(_sep())
         root.addWidget(_section("Extrude"))
 
+        self._extr_slider_scale = 100.0
+        self._extr_range_limit = 10.0
         self.w_extr = QtWidgets.QDoubleSpinBox()
-        self.w_extr.setRange(-1000,1000); self.w_extr.setValue(1.0)
+        self.w_extr.setRange(-self._extr_range_limit, self._extr_range_limit); self.w_extr.setValue(1.0)
         self.w_extr.setSingleStep(0.01); self.w_extr.setDecimals(3)
         self.w_extr.setEnabled(False)
         self.w_extr_sl = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.w_extr_sl.setRange(-500,500); self.w_extr_sl.setValue(100)
+        self.w_extr_sl.setRange(
+            int(-self._extr_range_limit * self._extr_slider_scale),
+            int(self._extr_range_limit * self._extr_slider_scale)
+        )
+        self.w_extr_sl.setValue(100)
         self.w_extr_sl.setEnabled(False)
         self.w_extr_sl.sliderMoved.connect(self._on_extr_drag)
         self.w_extr_sl.sliderReleased.connect(self._on_extr_release)
         self.w_extr.valueChanged.connect(self._on_extr_field)
         root.addLayout(_slider_row("Distance", self.w_extr, self.w_extr_sl))
+        range_row = QtWidgets.QHBoxLayout()
+        range_row.addWidget(QtWidgets.QLabel("Range"))
+        self.w_extr_range_minus = _step_btn("-")
+        self.w_extr_range_plus = _step_btn("+")
+        self.w_extr_range_lbl = QtWidgets.QLabel("±{:.1f}".format(self._extr_range_limit))
+        self.w_extr_range_minus.clicked.connect(lambda: self._change_extrude_range(-10.0))
+        self.w_extr_range_plus.clicked.connect(lambda: self._change_extrude_range(+10.0))
+        range_row.addWidget(self.w_extr_range_minus)
+        range_row.addWidget(self.w_extr_range_plus)
+        range_row.addWidget(self.w_extr_range_lbl)
+        range_row.addStretch()
+        root.addLayout(range_row)
 
         root.addWidget(_sep())
         root.addWidget(_section("Bevel"))
@@ -1538,13 +1588,13 @@ class PanelToolTab(QtWidgets.QWidget):
         cmds.select(obj+".f[*]", r=True)
         extrude_node = cmds.polyExtrudeFacet(localTranslateZ=default_val, keepFacesTogether=True)[0]
         state["extrude_node"] = extrude_node
+        front_faces = [f for f in (cmds.ls(sl=True, fl=True) or []) if ".f[" in f]
         _pt_debug(state, "Extrude created: {} (offset={})".format(extrude_node, default_val), "OK")
         _pt_validation_box("Extrude", "Extrude node:\n{}\nOffset: {}".format(extrude_node, default_val))
 
         if state["is_negative"]:
             cmds.select(obj, r=True); mel.eval("ReversePolygonNormals;"); cmds.select(obj, r=True)
 
-        front_faces = cmds.ls(sl=True, fl=True) or []
         front_set   = short_name+"_panelFrontFaces_set"
         if cmds.objExists(front_set): cmds.delete(front_set)
         if front_faces: cmds.sets(front_faces, name=front_set)
@@ -1573,6 +1623,17 @@ class PanelToolTab(QtWidgets.QWidget):
         _pt_debug(state, "Side faces deleted.")
         _pt_detach(short_name)
         _pt_debug(state, "Seam detach complete.")
+        detached_deleted_vtx = _pt_remove_useless_vertices_per_shell(obj, tolerance=0.0001)
+        if detached_deleted_vtx:
+            _pt_debug(
+                state,
+                "Per-shell cleanup after detach: {} useless vertex/vertices removed.".format(detached_deleted_vtx),
+                "OK"
+            )
+            _pt_validation_box(
+                "Shell Cleanup",
+                "{} useless vertex/vertices removed shell by shell after detach.".format(detached_deleted_vtx)
+            )
         _pt_bridge(short_name, state)
 
         state["started"] = True
@@ -1592,22 +1653,36 @@ class PanelToolTab(QtWidgets.QWidget):
         self._enable_controls(False)
 
     def _on_extr_drag(self, val):
-        v = val/100.0
+        v = val / self._extr_slider_scale
         self.w_extr.blockSignals(True); self.w_extr.setValue(v); self.w_extr.blockSignals(False)
         en = self.state.get("extrude_node")
         if en and cmds.objExists(en): cmds.setAttr(en+".localTranslateZ", v)
         self.state["pending_is_negative"] = v < 0.0
 
     def _on_extr_release(self):
-        v = self.w_extr_sl.value()/100.0
+        v = self.w_extr_sl.value() / self._extr_slider_scale
         self._finalize_extrude(v)
 
     def _on_extr_field(self, v):
-        self.w_extr_sl.blockSignals(True); self.w_extr_sl.setValue(int(v*100))
+        self.w_extr_sl.blockSignals(True); self.w_extr_sl.setValue(int(v * self._extr_slider_scale))
         self.w_extr_sl.blockSignals(False)
         en = self.state.get("extrude_node")
         if en and cmds.objExists(en): cmds.setAttr(en+".localTranslateZ", v)
         self.state["pending_is_negative"] = v < 0.0
+
+    def _change_extrude_range(self, delta):
+        new_limit = max(10.0, self._extr_range_limit + delta)
+        if abs(new_limit - self._extr_range_limit) < 1e-8:
+            return
+        self._extr_range_limit = new_limit
+        cur_val = self.w_extr.value()
+        self.w_extr.setRange(-new_limit, new_limit)
+        self.w_extr_sl.setRange(
+            int(-new_limit * self._extr_slider_scale),
+            int(new_limit * self._extr_slider_scale)
+        )
+        self.w_extr.setValue(max(-new_limit, min(new_limit, cur_val)))
+        self.w_extr_range_lbl.setText("±{:.1f}".format(new_limit))
 
     def _finalize_extrude(self, v):
         state = self.state

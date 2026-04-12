@@ -1,20 +1,5 @@
 # -*- coding: utf-8 -*-
-"""
-Smart Paneling v2 — Maya Tool Suite
-=====================================
-  • Panel Tool      — extrude / bevel / bridge sur faces sélectionnées
-  • Overlay Merge   — merge de vertices sans weld (preview live)
-  • Close Edge Gaps — ferme les petits espaces entre edges / vertex
-
-Fixes v2 :
-  - Bridge robuste aux ngons (border edges via polyListComponentConversion direct)
-  - Add Side Hard Edges corrigé (ajoute EN PLUS des bevel edges existants)
-  - Offset slider 0-0.1 avec step fin + boutons +/- vitesse
-  - Segments slider 0-3 par défaut
-  - Taille texte légèrement agrandie
-  - Fond gris légèrement plus clair
-  - Texte footer supprimé
-"""
+"""Smart Paneling v2 — Maya Tool Suite."""
 
 import maya.cmds as cmds
 import maya.mel  as mel
@@ -30,17 +15,15 @@ except ImportError:
     from shiboken6 import wrapInstance
 
 
-# ══════════════════════════════════════════════════════════════
 #  DESIGN TOKENS
-# ══════════════════════════════════════════════════════════════
-C_BG        = "#252525"       # légèrement plus clair qu'avant
+C_BG        = "#252525"       
 C_PANEL     = "#2c2c2c"
 C_PANEL2    = "#303030"
 C_BORDER    = "#3a3a3a"
 C_RED       = "#e84d4d"
 C_RED_DIM   = "#5a2a2a"
 C_RED_DARK  = "#3d1818"
-C_TEXT      = "#d0d0d0"       # légèrement plus clair
+C_TEXT      = "#d0d0d0"       
 C_TEXT_DIM  = "#707070"
 C_GREEN     = "#4ecb71"
 C_ORANGE    = "#e8964d"
@@ -213,9 +196,6 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
 """
 
 
-# ══════════════════════════════════════════════════════════════
-# ██  UI HELPERS
-# ══════════════════════════════════════════════════════════════
 def _maya_main_window():
     ptr = omui.MQtUtil.mainWindow()
     return wrapInstance(int(ptr), QtWidgets.QWidget) if ptr else None
@@ -282,7 +262,7 @@ def _step_btn(symbol):
 
 
 def _slider_row(label, spinbox, slider, step_slow=None, step_fast=None):
-    """Retourne un layout: Label + Spin + optionnel −/+ lent + slider"""
+    """Return a layout: label + spinbox + optional slow/fast step buttons + slider."""
     col = QtWidgets.QVBoxLayout(); col.setSpacing(3)
     top = QtWidgets.QHBoxLayout(); top.setSpacing(4)
     top.addWidget(QtWidgets.QLabel(label))
@@ -312,9 +292,6 @@ def _slider_row(label, spinbox, slider, step_slow=None, step_fast=None):
     return col
 
 
-# ══════════════════════════════════════════════════════════════
-# ██  PANEL TOOL — backend
-# ══════════════════════════════════════════════════════════════
 
 def _pt_apply_bevel_state(bn, state):
     for attr, key, val in [
@@ -363,8 +340,6 @@ def _pt_angle_between(n1, n2):
     return math.degrees(math.acos(dot))
 
 
-##### GET UVS SEAMS #############################################
-#################################################################
 
 def _pt_get_internal_uv_seam_edges(obj):
     selection_list = om2.MSelectionList()
@@ -380,7 +355,6 @@ def _pt_get_internal_uv_seam_edges(obj):
         edge_index = edge_it.index()
         connected_faces = edge_it.getConnectedFaces()
 
-        # uniquement les edges internes partagés par 2 faces
         if len(connected_faces) != 2:
             edge_it.next()
             continue
@@ -419,7 +393,6 @@ def _pt_get_internal_uv_seam_edges(obj):
 
 
 
-####END UV SEAMS#####
 
 def _pt_get_connected_shells(faces):
     visited = set(); shells = []
@@ -466,15 +439,9 @@ def _pt_detach(short_name):
     mel.eval("performDetachComponents;")
 
 
-# ── Bridge robuste aux ngons ───────────────────────────────────
 def _pt_get_border_edges_of_shell(faces):
-    """
-    Récupère les edges de bordure d'un groupe de faces de façon robuste,
-    sans passer par ConvertSelectionToEdgePerimeter (qui plante sur ngons).
-    Un edge de bordure = partagé par exactement 1 face dans le groupe.
-    """
+    """Return robust border edges for a shell of faces."""
     face_set = set(faces)
-    # tous les edges des faces
     all_edges = cmds.ls(
         cmds.polyListComponentConversion(faces, fromFace=True, toEdge=True),
         fl=True) or []
@@ -484,17 +451,13 @@ def _pt_get_border_edges_of_shell(faces):
         adj_faces = cmds.ls(
             cmds.polyListComponentConversion(e, fromEdge=True, toFace=True),
             fl=True) or []
-        # compte combien de faces adjacentes sont dans notre groupe
         inside = sum(1 for f in adj_faces if f in face_set)
-        if inside == 1:   # edge partagé par une seule face du groupe -> bordure
+        if inside == 1:
             border.append(e)
     return border
 
 def _pt_filter_open_border_edges(edges):
-    """
-    Garde uniquement les edges qui sont de vraies borders de mesh
-    (adjacentes à une seule face dans le mesh complet).
-    """
+    """Keep only mesh border edges (adjacent to one face in the full mesh)."""
     out = []
     for e in (edges or []):
         if not cmds.objExists(e):
@@ -509,9 +472,7 @@ def _pt_filter_open_border_edges(edges):
     return out
 
 def _pt_split_edges_into_loops(edges):
-    """
-    Découpe une liste d'edges en composantes connexes (loops/boucles).
-    """
+    """Split edges into connected loops."""
     remaining = set(edges or [])
     loops = []
     while remaining:
@@ -596,7 +557,6 @@ def _pt_validation_box(title, message, icon="information"):
             icon=icon
         )
     except Exception:
-        # fallback si l'UI n'est pas dispo
         print("[PANEL][BOX:{}] {}".format(title, message))
 
 
@@ -632,9 +592,9 @@ def _pt_bridge(short_name, state):
     back  = cmds.ls(cmds.sets(short_name + "_panelBackFaces_set",  q=True), fl=True) or []
 
     if not front or not back:
-        cmds.warning("Front/back introuvables.")
-        _pt_debug(state, "Front/back introuvables avant bridge.", "ERROR")
-        _pt_validation_box("Bridge Error", "Front/back introuvables.", icon="warning")
+        cmds.warning("Front/back face sets not found.")
+        _pt_debug(state, "Front/back face sets missing before bridge.", "ERROR")
+        _pt_validation_box("Bridge Error", "Front/back face sets not found.", icon="warning")
         return
 
     front_shells = _pt_get_connected_shells(front)
@@ -665,10 +625,10 @@ def _pt_bridge(short_name, state):
         )
 
         if not f_border or not b_border:
-            cmds.warning("Shell sans perimeter valide, skip.")
+            cmds.warning("Skipping shell: invalid perimeter.")
             _pt_validation_box(
                 "Bridge Skip",
-                "Pair {} ignorée: perimeter invalide (front={}, back={}).".format(
+                "Pair {} skipped: invalid perimeter (front={}, back={}).".format(
                     i, len(f_border), len(b_border)
                 ),
                 icon="warning"
@@ -680,7 +640,7 @@ def _pt_bridge(short_name, state):
         loop_pairs = _pt_pair_edge_loops_by_center(f_loops, b_loops)
         _pt_debug(
             state,
-            "Pair {} -> loops front: {} | back: {} | appariées: {}".format(
+            "Pair {} -> loops front: {} | back: {} | paired: {}".format(
                 i, len(f_loops), len(b_loops), len(loop_pairs)
             )
         )
@@ -694,7 +654,7 @@ def _pt_bridge(short_name, state):
                 )
                 _pt_debug(
                     state,
-                    "Pair {} loop {} ignorée: {} vs {} edges.".format(
+                    "Pair {} loop {} skipped: {} vs {} edges.".format(
                         i, j, len(f_loop), len(b_loop)
                     ),
                     "WARNING"
@@ -719,30 +679,26 @@ def _pt_bridge(short_name, state):
                 created.append(bridge)
                 _pt_debug(
                     state,
-                    "Pair {} loop {} bridgée (node: {}).".format(i, j, bridge),
+                    "Pair {} loop {} bridged (node: {}).".format(i, j, bridge),
                     "OK"
                 )
 
             except Exception as e:
-                cmds.warning("polyBridgeEdge a échoué : {}".format(e))
+                cmds.warning("polyBridgeEdge failed: {}".format(e))
                 _pt_validation_box(
                     "Bridge Failed",
-                    "Pair {} loop {}: polyBridgeEdge a échoué.\n{}".format(i, j, e),
+                    "Pair {} loop {}: polyBridgeEdge failed.\n{}".format(i, j, e),
                     icon="critical"
                 )
-                _pt_debug(state, "Pair {} loop {} échec bridge: {}".format(i, j, e), "ERROR")
+                _pt_debug(state, "Pair {} loop {} bridge failed: {}".format(i, j, e), "ERROR")
 
     state["bridge_nodes"] = created
     cmds.select(clear=True)
-    _pt_debug(state, "Bridge terminé. {} node(s) créé(s).".format(len(created)))
+    _pt_debug(state, "Bridge complete. {} node(s) created.".format(len(created)))
 
 
-# ── Side Hard Edges ────────────────────────────────────────────
 def _pt_get_side_hard_edges_by_angle(obj, short_name, threshold):
-    """
-    Retourne les edges des side faces dont l'angle dièdre >= threshold.
-    Ces edges seront AJOUTÉS aux bevel edges déjà calculés (pas remplacés).
-    """
+    """Return side-face edges whose dihedral angle is above the threshold."""
     all_faces  = cmds.ls(obj + ".f[*]", fl=True) or []
     front_raw  = cmds.sets(short_name + "_panelFrontFaces_set", q=True) or []
     back_raw   = cmds.sets(short_name + "_panelBackFaces_set",  q=True) or []
@@ -773,15 +729,12 @@ def _pt_get_side_hard_edges_by_angle(obj, short_name, threshold):
 
 
 def _pt_bevel(short_name, state):
-    """
-    Bevel sur les edges périmètre du front/back + AJOUT optionnel
-    des hard edges des side faces par angle.
-    """
+    """Bevel front/back perimeter edges with optional extra side hard edges."""
     src_set = (short_name + "_panelBackFaces_set"
                if state["is_negative"] else short_name + "_panelFrontFaces_set")
     faces = [f for f in (cmds.ls(cmds.sets(src_set, q=True), fl=True) or [])
              if ".f[" in f and cmds.objExists(f)]
-    if not faces: cmds.warning("Aucune face pour le bevel."); return
+    if not faces: cmds.warning("No faces available for bevel."); return
 
     base_faces = list(faces)
     cmds.select(base_faces, r=True)
@@ -797,18 +750,15 @@ def _pt_bevel(short_name, state):
     if cmds.objExists(bevel_set): cmds.delete(bevel_set)
     cmds.sets(bevel_faces, name=bevel_set)
 
-    # Edges de périmètre du front/back (via méthode robuste)
     bevel_edges = _pt_get_border_edges_of_shell(bevel_faces)
     bevel_edges = [e for e in bevel_edges if cmds.objExists(e)]
 
-    # ── AJOUT des hard edges des side faces en PLUS ────────────
     if state.get("angle_bevel_enabled", False):
         extra = _pt_get_side_hard_edges_by_angle(
             state["obj"], short_name, state.get("angle_bevel_threshold", 90.0))
-        # On fusionne sans doublon : ces edges s'ajoutent au bevel
         bevel_edges = _pt_merge_unique(bevel_edges, extra)
 
-    if not bevel_edges: cmds.warning("Aucun edge pour le bevel."); return
+    if not bevel_edges: cmds.warning("No edges available for bevel."); return
 
     try:
         if state.get("bevel_node") and cmds.objExists(state["bevel_node"]):
@@ -857,12 +807,12 @@ def _pt_validate(state):
     state.update({"backup": None, "bridge_nodes": [], "bevel_node": None})
     cmds.select(obj, r=True)
     _pt_print_summary(state, context="VALIDATE")
-    _pt_validation_box("Validation", "Panel tool validé.\nRésumé imprimé dans le Script Editor.")
-    print("Panel tool validé.")
+    _pt_validation_box("Validation", "Panel tool validated.\nSummary printed in the Script Editor.")
+    print("Panel tool validated.")
 
 def _pt_revert(state):
     backup = state.get("backup"); obj = state.get("obj"); sn = state.get("short_name")
-    if not backup or not cmds.objExists(backup): cmds.warning("Backup introuvable."); return
+    if not backup or not cmds.objExists(backup): cmds.warning("Backup not found."); return
     if obj and cmds.objExists(obj):
         try: cmds.delete(obj)
         except Exception: return
@@ -882,7 +832,7 @@ def _pt_revert(state):
         "safe_selection": [restored]
     })
     cmds.select(restored, r=True)
-    print("Revert terminé.")
+    print("Revert complete.")
 
 def _pt_delete_opposite_faces(state):
     if not state["started"]: return
@@ -915,9 +865,6 @@ def _pt_grow_delete_opposite_faces(state):
     if final: cmds.delete(final)
 
 
-# ══════════════════════════════════════════════════════════════
-# ██  OVERLAY MERGE — backend
-# ══════════════════════════════════════════════════════════════
 _UNIT_MAP = {
     "mm": om2.MDistance.kMillimeters, "cm": om2.MDistance.kCentimeters,
     "m":  om2.MDistance.kMeters,      "in": om2.MDistance.kInches,
@@ -1048,7 +995,7 @@ def _om_ensure_snapshot():
 
 def _om_preview_update():
     if _OM_STATE["updating"] or not _OM_STATE["running"]: return
-    if not _om_ensure_snapshot(): cmds.warning("Sélectionne des vertex."); return
+    if not _om_ensure_snapshot(): cmds.warning("Select vertices first."); return
     _OM_STATE["updating"]=True
     try:
         prev=cmds.undoInfo(q=True,state=True); cmds.undoInfo(state=False)
@@ -1097,9 +1044,6 @@ def _om_start_mmb_dragger(get_fn,set_fn,change_fn):
     cmds.setToolTo(_OM_STATE["dragger"])
 
 
-# ══════════════════════════════════════════════════════════════
-# ██  CLOSE EDGE GAPS — backend
-# ══════════════════════════════════════════════════════════════
 def _cg_ev(e): return cmds.ls(cmds.polyListComponentConversion(e,fromEdge=True,toVertex=True),flatten=True)
 def _cg_pos(v): p=cmds.pointPosition(v,world=True); return om2.MVector(p[0],p[1],p[2])
 def _cg_dist(v1,v2): return (_cg_pos(v2)-_cg_pos(v1)).length()
@@ -1153,7 +1097,7 @@ def _cg_estimate_gap():
     return 10.0 if(md==float('inf') or md<0.0001) else md*1.5
 def _cg_close_gaps(max_dist=None):
     v1,v2=_cg_as_vertices()
-    if not v1 or not v2: cmds.warning("2 groupes nécessaires!"); return 0
+    if not v1 or not v2: cmds.warning("Two groups are required."); return 0
     if max_dist is None: max_dist=_cg_estimate_gap()
     pairs=[]
     for a in v1:
@@ -1164,7 +1108,7 @@ def _cg_close_gaps(max_dist=None):
         if b in matched: continue
         best=min(v1,key=lambda a:_cg_dist(a,b))
         if _cg_dist(best,b)<=max_dist: pairs.append((best,b,_cg_dist(best,b)))
-    if not pairs: cmds.warning(f"0 paires dans dist {max_dist:.3f}"); return 0
+    if not pairs: cmds.warning(f"No pairs found within distance {max_dist:.3f}"); return 0
     vtgt={}
     for a,b,_ in pairs:
         mid=(_cg_pos(a)+_cg_pos(b))*0.5
@@ -1174,7 +1118,7 @@ def _cg_close_gaps(max_dist=None):
         for vtx,tgts in vtgt.items():
             avg=sum(tgts,om2.MVector(0,0,0))/len(tgts)
             cmds.xform(vtx,worldSpace=True,translation=[avg.x,avg.y,avg.z])
-        cmds.inViewMessage(amg=f'<span style="color:#66FF66;">{len(vtgt)} vertex déplacés!</span>',
+        cmds.inViewMessage(amg=f'<span style="color:#66FF66;">{len(vtgt)} vertices moved.</span>',
                            pos='midCenter',fade=True,fadeStayTime=1200)
         return len(vtgt)
     finally: cmds.undoInfo(closeChunk=True)
@@ -1205,9 +1149,6 @@ def _cg_close_dir(max_dist,direction):
     finally: cmds.undoInfo(closeChunk=True)
 
 
-# ══════════════════════════════════════════════════════════════
-# ██  TAB 1 — Panel Tool
-# ══════════════════════════════════════════════════════════════
 class PanelToolTab(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1223,7 +1164,6 @@ class PanelToolTab(QtWidgets.QWidget):
         }
         self._build()
 
-    # ── helpers ──────────────────────────────────────────────
     def _sync_bevel_state(self):
         s = self.state
         s["bevel_offset"]      = self.w_boff.value()
@@ -1254,12 +1194,10 @@ class PanelToolTab(QtWidgets.QWidget):
                   self.w_angle_check, self.w_angle_val, self.w_angle_sl]:
             w.setEnabled(en)
 
-    # ── build UI ─────────────────────────────────────────────
     def _build(self):
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(10,10,10,10); root.setSpacing(5)
 
-        # START
         self.btn_start = QtWidgets.QPushButton("▶  START")
         self.btn_start.setObjectName("redBtn"); self.btn_start.setMinimumHeight(34)
         self.btn_start.clicked.connect(self._on_start)
@@ -1272,7 +1210,6 @@ class PanelToolTab(QtWidgets.QWidget):
         root.addWidget(_sep())
         root.addWidget(_section("Extrude"))
 
-        # Extrude : range -5 / +5, step 0.01
         self.w_extr = QtWidgets.QDoubleSpinBox()
         self.w_extr.setRange(-1000,1000); self.w_extr.setValue(1.0)
         self.w_extr.setSingleStep(0.01); self.w_extr.setDecimals(3)
@@ -1288,20 +1225,18 @@ class PanelToolTab(QtWidgets.QWidget):
         root.addWidget(_sep())
         root.addWidget(_section("Bevel"))
 
-        # Bevel offset : 0 – 0.5 visible, step fin 0.001 / step rapide 0.01
         self.w_boff = QtWidgets.QDoubleSpinBox()
         self.w_boff.setRange(0,1000); self.w_boff.setValue(0.01)
         self.w_boff.setSingleStep(0.001); self.w_boff.setDecimals(4)
         self.w_boff.setEnabled(False)
         self.w_boff_sl = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.w_boff_sl.setRange(0,5000); self.w_boff_sl.setValue(10)   # /1000 → 0.01
+        self.w_boff_sl.setRange(0,5000); self.w_boff_sl.setValue(10)
         self.w_boff_sl.setEnabled(False)
         self.w_boff.valueChanged.connect(self._on_boff_field)
         self.w_boff_sl.sliderMoved.connect(self._on_boff_slider)
         root.addLayout(_slider_row("Offset", self.w_boff, self.w_boff_sl,
                                    step_slow=0.001, step_fast=0.01))
 
-        # Bevel segments : 0 – 3 par défaut (max 20)
         self.w_bseg = QtWidgets.QSpinBox()
         self.w_bseg.setRange(1,100); self.w_bseg.setValue(1)
         self.w_bseg.setEnabled(False)
@@ -1313,7 +1248,6 @@ class PanelToolTab(QtWidgets.QWidget):
         root.addLayout(_slider_row("Segments", self.w_bseg, self.w_bseg_sl,
                                    step_slow=1, step_fast=2))
 
-        # Mitering + Miter Along + Chamfer
         grid = QtWidgets.QGridLayout(); grid.setSpacing(4)
 
         self.w_mitering = QtWidgets.QComboBox(); self.w_mitering.setEnabled(False)
@@ -1384,15 +1318,14 @@ class PanelToolTab(QtWidgets.QWidget):
         root.addLayout(vrow)
         root.addStretch()
 
-    # ── slots ─────────────────────────────────────────────────
     def _on_start(self):
         state = self.state
         sel   = cmds.ls(sl=True, fl=True, long=True)
         edges = cmds.filterExpand(sel, sm=32)
-        if not edges: cmds.warning("Sélectionne des edges."); return
+        if not edges: cmds.warning("Select edges first."); return
 
         obj        = edges[0].split(".e[")[0]
-        if not cmds.objExists(obj): cmds.warning("Objet introuvable."); return
+        if not cmds.objExists(obj): cmds.warning("Object not found."); return
         short_name = obj.split("|")[-1]
 
         default_val = self.w_extr.value()
@@ -1406,13 +1339,13 @@ class PanelToolTab(QtWidgets.QWidget):
             "internal_restore":False,"safe_selection":[obj],
             "bridge_nodes":[],"bevel_node":None,"debug_log":[],
         })
-        _pt_debug(state, "Start paneling sur objet '{}'.".format(short_name))
-        _pt_validation_box("Start", "Objet détecté: {}\nDébut du process.".format(short_name))
+        _pt_debug(state, "Starting paneling on object '{}'.".format(short_name))
+        _pt_validation_box("Start", "Detected object: {}\nStarting process.".format(short_name))
 
         backup = cmds.duplicate(obj, name=short_name+"_backup#")[0]
         cmds.hide(backup); state["backup"] = backup
-        _pt_debug(state, "Backup créé: {}".format(backup), "OK")
-        _pt_validation_box("Backup", "Backup créé:\n{}".format(backup))
+        _pt_debug(state, "Backup created: {}".format(backup), "OK")
+        _pt_validation_box("Backup", "Backup created:\n{}".format(backup))
 
         edge_set = short_name+"_panelEdges_set"
         if cmds.objExists(edge_set): cmds.delete(edge_set)
@@ -1422,7 +1355,7 @@ class PanelToolTab(QtWidgets.QWidget):
         for cmd in ["UVCameraBasedProjection;","UnfoldUV;","UVOrientShells;","LayoutUV;"]:
             try: mel.eval(cmd)
             except Exception: pass
-        _pt_debug(state, "Projection/Unfold/Orient/Layout UV exécutés.")
+        _pt_debug(state, "Projection/Unfold/Orient/Layout UV executed.")
 
         stored = cmds.ls(cmds.sets(edge_set, q=True), fl=True) or []
         if stored:
@@ -1430,14 +1363,14 @@ class PanelToolTab(QtWidgets.QWidget):
             try: cmds.polyMapCut(stored)
             except Exception:
                 try: mel.eval("performPolyMapCut;")
-                except Exception: cmds.warning("Cut UV échoué."); return
-        _pt_debug(state, "Cut UV effectué sur {} edge(s).".format(len(stored)))
-        _pt_validation_box("UV Cut", "Cut UV terminé sur {} edge(s).".format(len(stored)))
+                except Exception: cmds.warning("UV cut failed."); return
+        _pt_debug(state, "UV cut applied to {} edge(s).".format(len(stored)))
+        _pt_validation_box("UV Cut", "UV cut completed on {} edge(s).".format(len(stored)))
 
         cmds.select(obj+".f[*]", r=True)
         extrude_node = cmds.polyExtrudeFacet(localTranslateZ=default_val, keepFacesTogether=True)[0]
         state["extrude_node"] = extrude_node
-        _pt_debug(state, "Extrude créé: {} (offset={})".format(extrude_node, default_val), "OK")
+        _pt_debug(state, "Extrude created: {} (offset={})".format(extrude_node, default_val), "OK")
         _pt_validation_box("Extrude", "Extrude node:\n{}\nOffset: {}".format(extrude_node, default_val))
 
         if state["is_negative"]:
@@ -1448,7 +1381,7 @@ class PanelToolTab(QtWidgets.QWidget):
         if cmds.objExists(front_set): cmds.delete(front_set)
         if front_faces: cmds.sets(front_faces, name=front_set)
         _pt_debug(state, "Front faces: {}".format(len(front_faces)))
-        _pt_validation_box("Front Set", "{} face(s) dans le front set.".format(len(front_faces)))
+        _pt_validation_box("Front Set", "{} face(s) stored in the front set.".format(len(front_faces)))
 
         cmds.select(front_faces, r=True)
         mel.eval("GrowPolygonSelectionRegion;"); mel.eval("InvertSelection;")
@@ -1457,21 +1390,21 @@ class PanelToolTab(QtWidgets.QWidget):
         if cmds.objExists(back_set): cmds.delete(back_set)
         if back_faces: cmds.sets(back_faces, name=back_set)
         _pt_debug(state, "Back faces: {}".format(len(back_faces)))
-        _pt_validation_box("Back Set", "{} face(s) dans le back set.".format(len(back_faces)))
+        _pt_validation_box("Back Set", "{} face(s) stored in the back set.".format(len(back_faces)))
 
         seam_edges = _pt_get_internal_uv_seam_edges(obj)
         seam_set   = short_name+"_panelSeams_set"
         if cmds.objExists(seam_set): cmds.delete(seam_set)
         if seam_edges: cmds.sets(seam_edges, name=seam_set)
-        _pt_debug(state, "Seam edges détectées: {}".format(len(seam_edges)))
-        _pt_validation_box("Seams", "{} seam edge(s) détectée(s).".format(len(seam_edges)))
+        _pt_debug(state, "Seam edges detected: {}".format(len(seam_edges)))
+        _pt_validation_box("Seams", "{} seam edge(s) detected.".format(len(seam_edges)))
 
         cmds.select(obj, r=True); state["safe_selection"] = [obj]
 
         _pt_delete_side_faces(short_name)
-        _pt_debug(state, "Side faces supprimées.")
+        _pt_debug(state, "Side faces deleted.")
         _pt_detach(short_name)
-        _pt_debug(state, "Detach des seams terminé.")
+        _pt_debug(state, "Seam detach complete.")
         _pt_bridge(short_name, state)
 
         state["started"] = True
@@ -1484,13 +1417,12 @@ class PanelToolTab(QtWidgets.QWidget):
 
         cmds.select(obj, r=True)
         _pt_print_summary(state, context="START")
-        _pt_validation_box("Résumé", "Process terminé.\nRésumé imprimé dans le Script Editor.")
+        _pt_validation_box("Summary", "Process complete.\nSummary printed in the Script Editor.")
 
     def _on_revert(self):
         _pt_revert(self.state)
         self._enable_controls(False)
 
-    # Extrude
     def _on_extr_drag(self, val):
         v = val/100.0
         self.w_extr.blockSignals(True); self.w_extr.setValue(v); self.w_extr.blockSignals(False)
@@ -1524,7 +1456,6 @@ class PanelToolTab(QtWidgets.QWidget):
         else:
             state["is_negative"] = new_neg; state["pending_is_negative"] = new_neg
 
-    # Bevel offset
     def _on_boff_field(self, v):
         self.w_boff_sl.blockSignals(True); self.w_boff_sl.setValue(int(v*1000))
         self.w_boff_sl.blockSignals(False); self._apply_bevel_live()
@@ -1532,7 +1463,6 @@ class PanelToolTab(QtWidgets.QWidget):
         self.w_boff.blockSignals(True); self.w_boff.setValue(s/1000.0)
         self.w_boff.blockSignals(False); self._apply_bevel_live()
 
-    # Bevel segments
     def _on_bseg_field(self, v):
         self.w_bseg_sl.blockSignals(True); self.w_bseg_sl.setValue(v)
         self.w_bseg_sl.blockSignals(False); self._apply_bevel_live()
@@ -1540,7 +1470,6 @@ class PanelToolTab(QtWidgets.QWidget):
         self.w_bseg.blockSignals(True); self.w_bseg.setValue(s)
         self.w_bseg.blockSignals(False); self._apply_bevel_live()
 
-    # Angle
     def _on_angle_field(self, v):
         self.w_angle_sl.blockSignals(True); self.w_angle_sl.setValue(int(v))
         self.w_angle_sl.blockSignals(False); self._rebuild_bevel()
@@ -1549,12 +1478,9 @@ class PanelToolTab(QtWidgets.QWidget):
         self.w_angle_val.blockSignals(False); self._rebuild_bevel()
 
     def _set_angle_preset(self, angle):
-        self.w_angle_val.setValue(angle)  # déclenche _on_angle_field → rebuild
+        self.w_angle_val.setValue(angle)
 
 
-# ══════════════════════════════════════════════════════════════
-# ██  TAB 2 — Overlay Merge
-# ══════════════════════════════════════════════════════════════
 class OverlayMergeTab(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1576,7 +1502,7 @@ class OverlayMergeTab(QtWidgets.QWidget):
         self.field.setDecimals(6); self.field.setRange(-1e9,1e9)
         self.field.setSingleStep(0.001); self.field.setValue(0.1); self.field.setFixedWidth(130)
         row.addWidget(self.field)
-        self.btn_drag = _icon_btn("drag","Viewport drag (MMB)\nShift=fin | Ctrl=grossier")
+        self.btn_drag = _icon_btn("drag","Viewport drag (MMB)\nShift=fine | Ctrl=coarse")
         row.addWidget(self.btn_drag); row.addStretch()
         lay.addLayout(row)
 
@@ -1587,13 +1513,13 @@ class OverlayMergeTab(QtWidgets.QWidget):
         lay.addWidget(_section("Actions"))
         brow = QtWidgets.QHBoxLayout(); brow.setSpacing(6)
         self.btn_start   = _icon_btn("play",  "START — preview live")
-        self.btn_stop    = _icon_btn("stop",  "STOP — garde le résultat")
-        self.btn_reset   = _icon_btn("reset", "Reset au baseline")
-        self.btn_close_o = _icon_btn("close", "Fermer / restaurer")
+        self.btn_stop    = _icon_btn("stop",  "STOP — keep current result")
+        self.btn_reset   = _icon_btn("reset", "Reset to baseline")
+        self.btn_close_o = _icon_btn("close", "Close / restore")
         for b in [self.btn_start,self.btn_stop,self.btn_reset,self.btn_close_o]: brow.addWidget(b)
         brow.addStretch(); lay.addLayout(brow)
 
-        hint = QtWidgets.QLabel("Sélectionne des vertices ou meshes, puis START.\nShift=fin | Ctrl=grossier")
+        hint = QtWidgets.QLabel("Select vertices or meshes, then press START.\nShift=fine | Ctrl=coarse")
         hint.setWordWrap(True); hint.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:11px;")
         lay.addWidget(hint); lay.addStretch()
 
@@ -1640,7 +1566,7 @@ class OverlayMergeTab(QtWidgets.QWidget):
     def _on_start(self):
         _OM_STATE["running"]=True; self._set_status("RUNNING","statusLabel"); _om_preview_update()
     def _on_stop(self):
-        _om_stop_keep(); self._set_status("STOPPED — résultat conservé","statusOk")
+        _om_stop_keep(); self._set_status("STOPPED — result kept","statusOk")
     def _on_reset(self):
         _om_reset()
         if _OM_STATE["running"]: _om_preview_update()
@@ -1649,9 +1575,6 @@ class OverlayMergeTab(QtWidgets.QWidget):
         _om_close_restore(); self._set_status("IDLE","statusOk")
 
 
-# ══════════════════════════════════════════════════════════════
-# ██  TAB 3 — Close Edge Gaps
-# ══════════════════════════════════════════════════════════════
 class CloseGapsTab(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1661,7 +1584,7 @@ class CloseGapsTab(QtWidgets.QWidget):
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(10,10,10,10); lay.setSpacing(6)
 
-        info = QtWidgets.QLabel("Sélectionne edges ou vertex des deux côtés du gap.")
+        info = QtWidgets.QLabel("Select edges or vertices on both sides of the gap.")
         info.setWordWrap(True); info.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:11px;")
         lay.addWidget(info)
 
@@ -1682,25 +1605,25 @@ class CloseGapsTab(QtWidgets.QWidget):
         self.dist_slider.sliderMoved.connect(self._on_dist_slider)
 
         frow = QtWidgets.QHBoxLayout()
-        frow.addWidget(QtWidgets.QLabel("Valeur")); frow.addWidget(self.dist_field)
+        frow.addWidget(QtWidgets.QLabel("Value")); frow.addWidget(self.dist_field)
         lay.addLayout(frow); lay.addWidget(self.dist_slider)
 
         lay.addWidget(_sep())
         lay.addWidget(_section("Actions"))
 
-        btn_mid = QtWidgets.QPushButton("⇔  Fermer au Milieu")
+        btn_mid = QtWidgets.QPushButton("⇔  Close to Midpoint")
         btn_mid.setObjectName("greenBtn"); btn_mid.setMinimumHeight(34)
         btn_mid.clicked.connect(lambda: _cg_close_gaps(self.dist_field.value()))
         lay.addWidget(btn_mid)
 
         dr = QtWidgets.QHBoxLayout()
-        bg1 = QtWidgets.QPushButton("→  Vers Groupe 1"); bg1.setObjectName("dimBtn")
-        bg2 = QtWidgets.QPushButton("←  Vers Groupe 2"); bg2.setObjectName("dimBtn")
+        bg1 = QtWidgets.QPushButton("→  Toward Group 1"); bg1.setObjectName("dimBtn")
+        bg2 = QtWidgets.QPushButton("←  Toward Group 2"); bg2.setObjectName("dimBtn")
         bg1.clicked.connect(lambda: _cg_close_dir(self.dist_field.value(),"g1"))
         bg2.clicked.connect(lambda: _cg_close_dir(self.dist_field.value(),"g2"))
         dr.addWidget(bg1); dr.addWidget(bg2); lay.addLayout(dr)
 
-        note = QtWidgets.QLabel("Seuls les vertex dans la distance max bougent.")
+        note = QtWidgets.QLabel("Only vertices inside the max distance are moved.")
         note.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:10px; font-style:italic;")
         lay.addWidget(note); lay.addStretch()
 
@@ -1720,9 +1643,6 @@ class CloseGapsTab(QtWidgets.QWidget):
         self.dist_slider.setValue(int(d*1000)); self.lbl_dist.setText(f"Distance max: {d:.4f}  (auto)")
 
 
-# ══════════════════════════════════════════════════════════════
-#  MAIN WINDOW
-# ══════════════════════════════════════════════════════════════
 class SmartPanelingUI(QtWidgets.QDialog):
     _instance = None
 
@@ -1733,6 +1653,7 @@ class SmartPanelingUI(QtWidgets.QDialog):
         self.setWindowFlags(QtCore.Qt.Window | QtCore.Qt.WindowCloseButtonHint)
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose)
         self.setMinimumWidth(420)
+        self.setMinimumHeight(520)
         self.setStyleSheet(GLOBAL_STYLE)
         self._build()
 
@@ -1742,7 +1663,6 @@ class SmartPanelingUI(QtWidgets.QDialog):
 
 
 
-        # Tabs
         self.tabs = QtWidgets.QTabWidget(); self.tabs.setDocumentMode(True)
 
         self.tab_panel   = PanelToolTab()
@@ -1757,7 +1677,27 @@ class SmartPanelingUI(QtWidgets.QDialog):
         self.tabs.addTab(scroll,           "⬡  Panel Tool")
         self.tabs.addTab(self.tab_overlay, "◎  Overlay Merge")
         self.tabs.addTab(self.tab_gaps,    "⇔  Close Gaps")
+        self.tabs.currentChanged.connect(self._fit_to_current_tab)
         main.addWidget(self.tabs)
+        self._fit_to_current_tab()
+
+    def _fit_to_current_tab(self):
+        current = self.tabs.currentWidget()
+        if not current:
+            return
+        if isinstance(current, QtWidgets.QScrollArea):
+            target = current.widget() or current
+        else:
+            target = current
+        hint = target.sizeHint()
+        margins = self.layout().contentsMargins()
+        tab_h = self.tabs.tabBar().sizeHint().height()
+        width = max(self.minimumWidth(), hint.width() + margins.left() + margins.right() + 30)
+        height = max(
+            self.minimumHeight(),
+            hint.height() + margins.top() + margins.bottom() + tab_h + 40
+        )
+        self.resize(width, height)
 
     def closeEvent(self, event):
         _om_close_restore()

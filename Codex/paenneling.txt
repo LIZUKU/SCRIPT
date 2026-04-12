@@ -8,7 +8,6 @@ Smart Paneling v2 — Maya Tool Suite
 
 Fixes v2 :
   - Bridge robuste aux ngons (border edges via polyListComponentConversion direct)
-  - Add Side Hard Edges corrigé (ajoute EN PLUS des bevel edges existants)
   - Offset slider 0-0.1 avec step fin + boutons +/- vitesse
   - Segments slider 0-3 par défaut
   - Taille texte légèrement agrandie
@@ -40,8 +39,8 @@ C_BORDER    = "#3a3a3a"
 C_RED       = "#e84d4d"
 C_RED_DIM   = "#5a2a2a"
 C_RED_DARK  = "#3d1818"
-C_TEXT      = "#d0d0d0"       # légèrement plus clair
-C_TEXT_DIM  = "#707070"
+C_TEXT      = "#f0f0f0"
+C_TEXT_DIM  = "#b8b8b8"
 C_GREEN     = "#4ecb71"
 C_ORANGE    = "#e8964d"
 
@@ -58,9 +57,9 @@ QTabWidget::pane {{
     border-radius: 4px;
 }}
 QTabBar::tab {{
-    background: {C_BG};
-    color: {C_TEXT_DIM};
-    border: 1px solid {C_BORDER};
+    background: #3a3a3a;
+    color: {C_TEXT};
+    border: 1px solid #565656;
     border-bottom: none;
     padding: 6px 18px;
     margin-right: 2px;
@@ -69,13 +68,13 @@ QTabBar::tab {{
     letter-spacing: 1px;
 }}
 QTabBar::tab:selected {{
-    background: {C_PANEL};
-    color: {C_RED};
+    background: #494949;
+    color: #ffffff;
     border-top: 2px solid {C_RED};
 }}
 QTabBar::tab:hover:!selected {{
-    background: {C_PANEL2};
-    color: {C_TEXT};
+    background: #4a4a4a;
+    color: #ffffff;
 }}
 QPushButton {{
     background: {C_PANEL2};
@@ -480,45 +479,9 @@ def _pt_bridge(short_name, state):
     cmds.select(clear=True)
 
 
-# ── Side Hard Edges ────────────────────────────────────────────
-def _pt_get_side_hard_edges_by_angle(obj, short_name, threshold):
-    """
-    Retourne les edges des side faces dont l'angle dièdre >= threshold.
-    Ces edges seront AJOUTÉS aux bevel edges déjà calculés (pas remplacés).
-    """
-    all_faces  = cmds.ls(obj + ".f[*]", fl=True) or []
-    front_raw  = cmds.sets(short_name + "_panelFrontFaces_set", q=True) or []
-    back_raw   = cmds.sets(short_name + "_panelBackFaces_set",  q=True) or []
-    front_set  = set(cmds.ls(front_raw, fl=True) or [])
-    back_set   = set(cmds.ls(back_raw,  fl=True) or [])
-    exclude    = front_set | back_set
-    side_faces = [f for f in all_faces if f not in exclude and cmds.objExists(f)]
-    if not side_faces: return []
-
-    side_edges = cmds.ls(
-        cmds.polyListComponentConversion(side_faces, fromFace=True, toEdge=True),
-        fl=True) or []
-    side_edges = [e for e in side_edges if ".e[" in e and cmds.objExists(e)]
-
-    result = []
-    for edge in side_edges:
-        connected = cmds.ls(
-            cmds.polyListComponentConversion(edge, fromEdge=True, toFace=True),
-            fl=True) or []
-        connected = [f for f in connected if ".f[" in f and cmds.objExists(f)]
-        if len(connected) != 2: continue
-        n1 = _pt_face_normal(connected[0])
-        n2 = _pt_face_normal(connected[1])
-        if n1 is None or n2 is None: continue
-        if _pt_angle_between(n1, n2) >= threshold:
-            result.append(edge)
-    return result
-
-
 def _pt_bevel(short_name, state):
     """
-    Bevel sur les edges périmètre du front/back + AJOUT optionnel
-    des hard edges des side faces par angle.
+    Bevel sur les edges périmètre du front/back.
     """
     src_set = (short_name + "_panelBackFaces_set"
                if state["is_negative"] else short_name + "_panelFrontFaces_set")
@@ -543,13 +506,6 @@ def _pt_bevel(short_name, state):
     # Edges de périmètre du front/back (via méthode robuste)
     bevel_edges = _pt_get_border_edges_of_shell(bevel_faces)
     bevel_edges = [e for e in bevel_edges if cmds.objExists(e)]
-
-    # ── AJOUT des hard edges des side faces en PLUS ────────────
-    if state.get("angle_bevel_enabled", False):
-        extra = _pt_get_side_hard_edges_by_angle(
-            state["obj"], short_name, state.get("angle_bevel_threshold", 90.0))
-        # On fusionne sans doublon : ces edges s'ajoutent au bevel
-        bevel_edges = _pt_merge_unique(bevel_edges, extra)
 
     if not bevel_edges: cmds.warning("Aucun edge pour le bevel."); return
 
@@ -959,7 +915,6 @@ class PanelToolTab(QtWidgets.QWidget):
             "bevel_node":None,
             "bevel_offset":0.01,"bevel_segments":1,"bevel_mitering":0,
             "bevel_miter_along":1,"bevel_chamfer":1,
-            "angle_bevel_enabled":False,"angle_bevel_threshold":90.0,
             "ui":{},
         }
         self._build()
@@ -972,8 +927,6 @@ class PanelToolTab(QtWidgets.QWidget):
         s["bevel_mitering"]    = self.w_mitering.currentIndex()
         s["bevel_miter_along"] = int(self.w_miter_along.currentText())
         s["bevel_chamfer"]     = 1 if self.w_chamfer.isChecked() else 0
-        s["angle_bevel_enabled"]   = self.w_angle_check.isChecked()
-        s["angle_bevel_threshold"] = self.w_angle_val.value()
 
     def _apply_bevel_live(self):
         if not self.state["started"]: return
@@ -991,8 +944,7 @@ class PanelToolTab(QtWidgets.QWidget):
         for w in [self.w_extr, self.w_extr_sl,
                   self.w_boff,  self.w_boff_sl,
                   self.w_bseg,  self.w_bseg_sl,
-                  self.w_mitering, self.w_miter_along, self.w_chamfer,
-                  self.w_angle_check, self.w_angle_val, self.w_angle_sl]:
+                  self.w_mitering, self.w_miter_along, self.w_chamfer]:
             w.setEnabled(en)
 
     # ── build UI ─────────────────────────────────────────────
@@ -1072,32 +1024,6 @@ class PanelToolTab(QtWidgets.QWidget):
         self.w_chamfer.toggled.connect(self._apply_bevel_live)
         grid.addWidget(self.w_chamfer,2,0,1,2)
         root.addLayout(grid)
-
-        root.addWidget(_sep())
-        root.addWidget(_section("Side Hard Edges"))
-
-        self.w_angle_check = QtWidgets.QCheckBox("Add Side Hard Edges")
-        self.w_angle_check.setChecked(False); self.w_angle_check.setEnabled(False)
-        self.w_angle_check.toggled.connect(self._rebuild_bevel)
-        root.addWidget(self.w_angle_check)
-
-        self.w_angle_val = QtWidgets.QDoubleSpinBox()
-        self.w_angle_val.setRange(0,180); self.w_angle_val.setValue(90.0)
-        self.w_angle_val.setSingleStep(1.0); self.w_angle_val.setEnabled(False)
-        self.w_angle_sl = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.w_angle_sl.setRange(1,180); self.w_angle_sl.setValue(90)
-        self.w_angle_sl.setEnabled(False)
-        self.w_angle_val.valueChanged.connect(self._on_angle_field)
-        self.w_angle_sl.sliderMoved.connect(self._on_angle_slider)
-        root.addLayout(_slider_row("Angle", self.w_angle_val, self.w_angle_sl,
-                                   step_slow=1.0, step_fast=5.0))
-
-        presets = QtWidgets.QHBoxLayout()
-        for label, angle in [("Preset 90°", 90.0), ("Preset 45°", 45.0)]:
-            b = QtWidgets.QPushButton(label); b.setObjectName("dimBtn")
-            b.clicked.connect(lambda _, a=angle: self._set_angle_preset(a))
-            presets.addWidget(b)
-        root.addLayout(presets)
 
         root.addWidget(_sep())
         root.addWidget(_section("Operations"))
@@ -1261,18 +1187,6 @@ class PanelToolTab(QtWidgets.QWidget):
     def _on_bseg_slider(self, s):
         self.w_bseg.blockSignals(True); self.w_bseg.setValue(s)
         self.w_bseg.blockSignals(False); self._apply_bevel_live()
-
-    # Angle
-    def _on_angle_field(self, v):
-        self.w_angle_sl.blockSignals(True); self.w_angle_sl.setValue(int(v))
-        self.w_angle_sl.blockSignals(False); self._rebuild_bevel()
-    def _on_angle_slider(self, s):
-        self.w_angle_val.blockSignals(True); self.w_angle_val.setValue(float(s))
-        self.w_angle_val.blockSignals(False); self._rebuild_bevel()
-
-    def _set_angle_preset(self, angle):
-        self.w_angle_val.setValue(angle)  # déclenche _on_angle_field → rebuild
-
 
 # ══════════════════════════════════════════════════════════════
 # ██  TAB 2 — Overlay Merge
@@ -1451,7 +1365,7 @@ class SmartPanelingUI(QtWidgets.QDialog):
     def __init__(self, parent=_maya_main_window()):
         super().__init__(parent)
         self.setObjectName("smartPanelingUI")
-        self.setWindowTitle("Smart Paneling")
+        self.setWindowTitle("Paneling Tools")
         self.setWindowFlags(QtCore.Qt.Window | QtCore.Qt.WindowCloseButtonHint)
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose)
         self.setMinimumWidth(420)
@@ -1461,21 +1375,6 @@ class SmartPanelingUI(QtWidgets.QDialog):
     def _build(self):
         main = QtWidgets.QVBoxLayout(self)
         main.setContentsMargins(0,0,0,0); main.setSpacing(0)
-
-        # Header
-        header = QtWidgets.QFrame()
-        header.setStyleSheet(f"background:{C_RED_DARK}; border-bottom:2px solid {C_RED};")
-        hlay = QtWidgets.QHBoxLayout(header); hlay.setContentsMargins(14,8,14,8)
-        title = QtWidgets.QLabel("SMART PANELING")
-        title.setStyleSheet(
-            f"color:{C_RED}; font-size:15px; font-weight:bold; "
-            f"letter-spacing:3px; background:transparent; border:none;")
-        sub = QtWidgets.QLabel("Panel Tool  ·  Overlay Merge  ·  Close Gaps")
-        sub.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:10px; background:transparent; border:none;")
-        v = QtWidgets.QVBoxLayout(); v.setSpacing(1)
-        v.addWidget(title); v.addWidget(sub)
-        hlay.addLayout(v); hlay.addStretch()
-        main.addWidget(header)
 
         # Tabs
         self.tabs = QtWidgets.QTabWidget(); self.tabs.setDocumentMode(True)
@@ -1493,6 +1392,17 @@ class SmartPanelingUI(QtWidgets.QDialog):
         self.tabs.addTab(self.tab_overlay, "◎  Overlay Merge")
         self.tabs.addTab(self.tab_gaps,    "⇔  Close Gaps")
         main.addWidget(self.tabs)
+        self.tabs.currentChanged.connect(self._fit_to_current_tab)
+        QtCore.QTimer.singleShot(0, self._fit_to_current_tab)
+
+    def _fit_to_current_tab(self, *_):
+        current = self.tabs.currentWidget()
+        if current is None:
+            return
+        content_hint = current.sizeHint().height()
+        chrome = 120
+        target_height = max(520, min(980, content_hint + chrome))
+        self.resize(max(self.width(), 420), target_height)
 
     def closeEvent(self, event):
         _om_close_restore()

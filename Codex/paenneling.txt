@@ -362,10 +362,63 @@ def _pt_angle_between(n1, n2):
     return math.degrees(math.acos(dot))
 
 def _pt_get_internal_uv_seam_edges(obj):
-    cmds.select(obj + ".map[*]", r=True)
-    mel.eval("SelectUVBorder;")
-    mel.eval("ConvertSelectionToContainedEdges;")
-    return [e for e in (cmds.ls(sl=True, fl=True) or []) if ".e[" in e]
+    if not obj:
+        return []
+
+    mesh_obj = obj.split(".", 1)[0] if "." in obj else obj
+    if not cmds.objExists(mesh_obj):
+        return []
+
+    try:
+        sel = om2.MSelectionList()
+        sel.add(mesh_obj)
+        dag_path = sel.getDagPath(0)
+        mesh_fn = om2.MFnMesh(dag_path)
+    except Exception:
+        return []
+
+    seams = []
+    edge_it = om2.MItMeshEdge(dag_path)
+    while not edge_it.isDone():
+        edge_index = edge_it.index()
+        faces = edge_it.getConnectedFaces()
+
+        # Skip border / non-manifold edges, we only compare two faces.
+        if len(faces) != 2:
+            edge_it.next()
+            continue
+
+        v1 = edge_it.vertexId(0)
+        v2 = edge_it.vertexId(1)
+        uv_pairs = []
+
+        for face_id in faces:
+            face_vertices = mesh_fn.getPolygonVertices(face_id)
+            i1 = -1
+            i2 = -1
+            for i, vertex_id in enumerate(face_vertices):
+                if vertex_id == v1:
+                    i1 = i
+                if vertex_id == v2:
+                    i2 = i
+
+            if i1 == -1 or i2 == -1:
+                continue
+
+            try:
+                uv_id1 = mesh_fn.getPolygonUVid(face_id, i1)
+                uv_id2 = mesh_fn.getPolygonUVid(face_id, i2)
+            except Exception:
+                continue
+
+            uv_pairs.append((uv_id1, uv_id2))
+
+        if len(uv_pairs) == 2 and uv_pairs[0] != uv_pairs[1]:
+            seams.append(f"{mesh_obj}.e[{edge_index}]")
+
+        edge_it.next()
+
+    return seams
 
 def _pt_get_connected_shells(faces):
     visited = set(); shells = []

@@ -322,6 +322,16 @@ def _pt_merge_unique(base, extra):
         if item not in seen: seen.add(item); out.append(item)
     return out
 
+def _pt_component_set(name, components):
+    if cmds.objExists(name):
+        try:
+            cmds.delete(name)
+        except Exception:
+            pass
+    clean = [c for c in (components or []) if cmds.objExists(c)]
+    if clean:
+        cmds.sets(clean, name=name)
+
 def _pt_face_normal(face):
     try:
         info = cmds.polyInfo(face, faceNormals=True) or []
@@ -408,6 +418,27 @@ def _pt_get_internal_uv_seam_edges(obj):
         edge_it.next()
 
     return seam_edges
+
+
+def _pt_extract_corner_vertices_from_edges(edges):
+    """Guess corner/end vertices from an edge selection."""
+    edge_list = [e for e in (edges or []) if ".e[" in e and cmds.objExists(e)]
+    if not edge_list:
+        return []
+
+    counts = {}
+    for edge in edge_list:
+        verts = cmds.ls(
+            cmds.polyListComponentConversion(edge, fromEdge=True, toVertex=True),
+            fl=True
+        ) or []
+        for v in verts:
+            counts[v] = counts.get(v, 0) + 1
+
+    corners = [v for v, c in counts.items() if c <= 2 and cmds.objExists(v)]
+    if not corners:
+        corners = [v for v, c in counts.items() if c == 1 and cmds.objExists(v)]
+    return corners
 
 
 
@@ -758,6 +789,18 @@ def _pt_get_side_hard_edges_by_angle(obj, short_name, threshold):
         if n1 is None or n2 is None: continue
         if _pt_angle_between(n1, n2) >= threshold:
             result.append(edge)
+
+    corner_set = short_name + "_panelCornerVerts_set"
+    corner_verts = _pt_safe_set_members(corner_set)
+    for vtx in corner_verts:
+        linked = cmds.ls(
+            cmds.polyListComponentConversion(vtx, fromVertex=True, toEdge=True),
+            fl=True
+        ) or []
+        for edge in linked:
+            if edge in side_edges and cmds.objExists(edge):
+                result.append(edge)
+
     return _pt_expand_to_edge_loops(obj, result)
 
 
@@ -836,7 +879,8 @@ def _pt_validate(state):
     obj = state.get("obj"); sn = state.get("short_name"); backup = state.get("backup")
     if not obj or not cmds.objExists(obj): return
     for node in [sn+"_panelEdges_set", sn+"_panelFrontFaces_set",
-                 sn+"_panelBackFaces_set", sn+"_panelSeams_set", sn+"_panelBevelFaces_set"]:
+                 sn+"_panelBackFaces_set", sn+"_panelSeams_set",
+                 sn+"_panelBevelFaces_set", sn+"_panelCornerVerts_set"]:
         if cmds.objExists(node):
             try: cmds.delete(node)
             except Exception: pass
@@ -863,7 +907,8 @@ def _pt_revert(state):
     try: cmds.delete(backup)
     except Exception: pass
     for node in [sn+"_panelEdges_set", sn+"_panelFrontFaces_set",
-                 sn+"_panelBackFaces_set", sn+"_panelSeams_set", sn+"_panelBevelFaces_set"]:
+                 sn+"_panelBackFaces_set", sn+"_panelSeams_set",
+                 sn+"_panelBevelFaces_set", sn+"_panelCornerVerts_set"]:
         if cmds.objExists(node):
             try: cmds.delete(node)
             except Exception: pass
@@ -1191,6 +1236,20 @@ def _cg_close_dir(max_dist,direction):
 
 
 class PanelToolTab(QtWidgets.QWidget):
+    MITERING_OPTIONS = [
+        ("Auto", 0),
+        ("Uniform", 1),
+        ("Patch", 2),
+        ("Radial", 3),
+        ("Proximity", 4),
+    ]
+    MITER_ALONG_OPTIONS = [
+        ("Auto", 0),
+        ("Center", 1),
+        ("Forward", 2),
+        ("Backward", 3),
+    ]
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.state = {
@@ -1199,7 +1258,7 @@ class PanelToolTab(QtWidgets.QWidget):
             "internal_restore":False,"safe_selection":[],"bridge_nodes":[],
             "bevel_node":None,
             "bevel_offset":0.01,"bevel_segments":1,"bevel_mitering":0,
-            "bevel_miter_along":1,"bevel_chamfer":1,
+            "bevel_miter_along":0,"bevel_chamfer":1,
             "angle_bevel_enabled":False,"angle_bevel_threshold":90.0,
             "ui":{},
         }
@@ -1209,8 +1268,8 @@ class PanelToolTab(QtWidgets.QWidget):
         s = self.state
         s["bevel_offset"]      = self.w_boff.value()
         s["bevel_segments"]    = self.w_bseg.value()
-        s["bevel_mitering"]    = self.w_mitering.currentIndex()
-        s["bevel_miter_along"] = int(self.w_miter_along.currentText())
+        s["bevel_mitering"]    = self.w_mitering.currentData()
+        s["bevel_miter_along"] = self.w_miter_along.currentData()
         s["bevel_chamfer"]     = 1 if self.w_chamfer.isChecked() else 0
         s["angle_bevel_enabled"]   = self.w_angle_check.isChecked()
         s["angle_bevel_threshold"] = self.w_angle_val.value()
@@ -1292,12 +1351,14 @@ class PanelToolTab(QtWidgets.QWidget):
         grid = QtWidgets.QGridLayout(); grid.setSpacing(4)
 
         self.w_mitering = QtWidgets.QComboBox(); self.w_mitering.setEnabled(False)
-        for i in range(5): self.w_mitering.addItem(str(i))
+        for label, value in self.MITERING_OPTIONS:
+            self.w_mitering.addItem(label, value)
         self.w_mitering.currentIndexChanged.connect(self._apply_bevel_live)
         grid.addWidget(QtWidgets.QLabel("Mitering"),0,0); grid.addWidget(self.w_mitering,0,1)
 
         self.w_miter_along = QtWidgets.QComboBox(); self.w_miter_along.setEnabled(False)
-        for i in [1,2,3]: self.w_miter_along.addItem(str(i))
+        for label, value in self.MITER_ALONG_OPTIONS:
+            self.w_miter_along.addItem(label, value)
         self.w_miter_along.currentIndexChanged.connect(self._apply_bevel_live)
         grid.addWidget(QtWidgets.QLabel("Miter Along"),1,0); grid.addWidget(self.w_miter_along,1,1)
 
@@ -1399,6 +1460,9 @@ class PanelToolTab(QtWidgets.QWidget):
         _pt_debug(state, "Projection/Unfold/Orient/Layout UV executed.")
 
         stored = cmds.ls(cmds.sets(edge_set, q=True), fl=True) or []
+        corner_verts = _pt_extract_corner_vertices_from_edges(stored)
+        _pt_component_set(short_name + "_panelCornerVerts_set", corner_verts)
+        _pt_debug(state, "Corner verts stored: {}".format(len(corner_verts)))
         if stored:
             cmds.select(stored, r=True)
             try: cmds.polyMapCut(stored)
@@ -1639,11 +1703,11 @@ class CloseGapsTab(QtWidgets.QWidget):
         lay.addLayout(row)
 
         self.dist_field = QtWidgets.QDoubleSpinBox()
-        self.dist_field.setRange(0.00001,100000); self.dist_field.setValue(10.0)
+        self.dist_field.setRange(-10.0,10.0); self.dist_field.setValue(10.0)
         self.dist_field.setDecimals(4); self.dist_field.setSingleStep(0.1)
         self.dist_field.valueChanged.connect(self._on_dist_change)
         self.dist_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.dist_slider.setRange(1,100000); self.dist_slider.setValue(10000)
+        self.dist_slider.setRange(-10000,10000); self.dist_slider.setValue(10000)
         self.dist_slider.sliderMoved.connect(self._on_dist_slider)
 
         frow = QtWidgets.QHBoxLayout()
@@ -1655,14 +1719,14 @@ class CloseGapsTab(QtWidgets.QWidget):
 
         btn_mid = QtWidgets.QPushButton("Close to Midpoint")
         btn_mid.setObjectName("greenBtn"); btn_mid.setMinimumHeight(34)
-        btn_mid.clicked.connect(lambda: _cg_close_gaps(self.dist_field.value()))
+        btn_mid.clicked.connect(lambda: _cg_close_gaps(abs(self.dist_field.value())))
         lay.addWidget(btn_mid)
 
         dr = QtWidgets.QHBoxLayout()
         bg1 = QtWidgets.QPushButton("Toward Group 1"); bg1.setObjectName("dimBtn")
         bg2 = QtWidgets.QPushButton("Toward Group 2"); bg2.setObjectName("dimBtn")
-        bg1.clicked.connect(lambda: _cg_close_dir(self.dist_field.value(),"g1"))
-        bg2.clicked.connect(lambda: _cg_close_dir(self.dist_field.value(),"g2"))
+        bg1.clicked.connect(lambda: _cg_close_dir(abs(self.dist_field.value()),"g1"))
+        bg2.clicked.connect(lambda: _cg_close_dir(abs(self.dist_field.value()),"g2"))
         dr.addWidget(bg1); dr.addWidget(bg2); lay.addLayout(dr)
 
         note = QtWidgets.QLabel("Only vertices inside the max distance are moved.")
@@ -1679,7 +1743,7 @@ class CloseGapsTab(QtWidgets.QWidget):
         self.dist_field.blockSignals(True); self.dist_field.setValue(s/1000.0)
         self.dist_field.blockSignals(False); self._update_lbl(s/1000.0)
     def _on_auto(self):
-        d = _cg_estimate_gap()
+        d = max(-10.0, min(10.0, _cg_estimate_gap()))
         self.dist_field.blockSignals(True); self.dist_field.setValue(d)
         self.dist_field.blockSignals(False)
         self.dist_slider.setValue(int(d*1000)); self.lbl_dist.setText(f"Distance max: {d:.4f}  (auto)")
@@ -1703,41 +1767,52 @@ class SmartPanelingUI(QtWidgets.QDialog):
         main = QtWidgets.QVBoxLayout(self)
         main.setContentsMargins(0,0,0,0); main.setSpacing(0)
 
-
-
-        self.tabs = QtWidgets.QTabWidget(); self.tabs.setDocumentMode(True)
-
         self.tab_panel   = PanelToolTab()
         self.tab_overlay = OverlayMergeTab()
         self.tab_gaps    = CloseGapsTab()
 
+        self.sections = QtWidgets.QToolBox()
+        self.sections.setStyleSheet(f"""
+            QToolBox::tab {{
+                background: {C_BG};
+                color: {C_TEXT_DIM};
+                border: 1px solid {C_BORDER};
+                padding: 6px 10px;
+                font-weight: bold;
+                letter-spacing: 1px;
+            }}
+            QToolBox::tab:selected {{
+                color: {C_RED};
+                background: {C_PANEL};
+            }}
+        """)
+        self.sections.addItem(self.tab_panel,   "Panel Tool")
+        self.sections.addItem(self.tab_overlay, "Overlay Merge")
+        self.sections.addItem(self.tab_gaps,    "Close Gaps")
+        self.sections.setCurrentIndex(0)
+        self.sections.currentChanged.connect(self._fit_to_current_tab)
+
         scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True); scroll.setWidget(self.tab_panel)
+        scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         scroll.setStyleSheet("background:transparent;")
+        scroll.setWidget(self.sections)
 
-        self.tabs.addTab(scroll,           "Panel Tool")
-        self.tabs.addTab(self.tab_overlay, "Overlay Merge")
-        self.tabs.addTab(self.tab_gaps,    "Close Gaps")
-        self.tabs.currentChanged.connect(self._fit_to_current_tab)
-        main.addWidget(self.tabs)
+        main.addWidget(scroll)
         self._fit_to_current_tab()
 
     def _fit_to_current_tab(self):
-        current = self.tabs.currentWidget()
+        current = self.sections.currentWidget()
         if not current:
             return
-        if isinstance(current, QtWidgets.QScrollArea):
-            target = current.widget() or current
-        else:
-            target = current
-        hint = target.sizeHint()
+        hint = self.sections.sizeHint()
+        current_hint = current.sizeHint()
+        hint.setHeight(max(hint.height(), current_hint.height() + 120))
         margins = self.layout().contentsMargins()
-        tab_h = self.tabs.tabBar().sizeHint().height()
         width = max(self.minimumWidth(), hint.width() + margins.left() + margins.right() + 30)
         height = max(
             self.minimumHeight(),
-            hint.height() + margins.top() + margins.bottom() + tab_h + 40
+            hint.height() + margins.top() + margins.bottom() + 40
         )
         self.resize(width, height)
 

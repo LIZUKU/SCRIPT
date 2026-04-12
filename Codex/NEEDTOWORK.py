@@ -509,6 +509,49 @@ def _pt_get_perimeter_edges_from_faces(faces):
 def _pt_get_bridge_source_direction(is_negative):
     return 1 if is_negative else 0
 
+def _pt_debug(state, message, level="INFO"):
+    line = "[PANEL][{}] {}".format(level, message)
+    print(line)
+    if isinstance(state, dict):
+        state.setdefault("debug_log", []).append(line)
+
+
+def _pt_validation_box(title, message, icon="information"):
+    try:
+        cmds.confirmDialog(
+            title=title,
+            message=message,
+            button=["OK"],
+            defaultButton="OK",
+            icon=icon
+        )
+    except Exception:
+        # fallback si l'UI n'est pas dispo
+        print("[PANEL][BOX:{}] {}".format(title, message))
+
+
+def _pt_print_summary(state, context="RUN"):
+    obj = state.get("obj")
+    short_name = state.get("short_name")
+    bridge_nodes = state.get("bridge_nodes", []) or []
+    bevel_node = state.get("bevel_node")
+    debug_lines = state.get("debug_log", []) or []
+
+    print("\n========== PANEL TOOL SUMMARY ({}) ==========".format(context))
+    print("Object          : {}".format(obj))
+    print("Short name      : {}".format(short_name))
+    print("Started         : {}".format(state.get("started")))
+    print("Is negative     : {}".format(state.get("is_negative")))
+    print("Bridge nodes    : {} -> {}".format(len(bridge_nodes), bridge_nodes))
+    print("Bevel node      : {}".format(bevel_node))
+    print("Debug entries   : {}".format(len(debug_lines)))
+    if debug_lines:
+        print("---- Last debug lines ----")
+        for line in debug_lines[-8:]:
+            print(line)
+    print("============================================\n")
+
+
 
 
 
@@ -520,23 +563,44 @@ def _pt_bridge(short_name, state):
 
     if not front or not back:
         cmds.warning("Front/back introuvables.")
+        _pt_debug(state, "Front/back introuvables avant bridge.", "ERROR")
+        _pt_validation_box("Bridge Error", "Front/back introuvables.", icon="warning")
         return
 
     front_shells = _pt_get_connected_shells(front)
     back_shells  = _pt_get_connected_shells(back)
     pairs = _pt_pair_shells_by_center(front_shells, back_shells)
+    _pt_debug(
+        state,
+        "Bridge shells: front={} back={} pairs={}".format(
+            len(front_shells), len(back_shells), len(pairs)
+        )
+    )
 
     created = []
 
-    for f_shell, b_shell in pairs:
+    for i, (f_shell, b_shell) in enumerate(pairs, start=1):
         f_border = _pt_get_perimeter_edges_from_faces(f_shell)
         b_border = _pt_get_perimeter_edges_from_faces(b_shell)
 
         f_border = [e for e in f_border if cmds.objExists(e)]
         b_border = [e for e in b_border if cmds.objExists(e)]
+        _pt_debug(
+            state,
+            "Pair {} -> front edges: {} | back edges: {}".format(
+                i, len(f_border), len(b_border)
+            )
+        )
 
         if not f_border or not b_border:
             cmds.warning("Shell sans perimeter valide, skip.")
+            _pt_validation_box(
+                "Bridge Skip",
+                "Pair {} ignorée: perimeter invalide (front={}, back={}).".format(
+                    i, len(f_border), len(b_border)
+                ),
+                icon="warning"
+            )
             continue
 
         if len(f_border) != len(b_border):
@@ -544,6 +608,13 @@ def _pt_bridge(short_name, state):
                 "Bridge skip : {} edges front vs {} edges back".format(
                     len(f_border), len(b_border)
                 )
+            )
+            _pt_validation_box(
+                "Bridge Mismatch",
+                "Pair {}: {} edges front vs {} edges back.".format(
+                    i, len(f_border), len(b_border)
+                ),
+                icon="warning"
             )
             continue
 
@@ -563,12 +634,25 @@ def _pt_bridge(short_name, state):
                 _pt_get_bridge_source_direction(state["is_negative"])
             )
             created.append(bridge)
+            _pt_validation_box(
+                "Bridge OK",
+                "Pair {} bridgée avec succès.\nNode: {}".format(i, bridge),
+                icon="information"
+            )
+            _pt_debug(state, "Pair {} bridgée avec succès (node: {}).".format(i, bridge), "OK")
 
         except Exception as e:
             cmds.warning("polyBridgeEdge a échoué : {}".format(e))
+            _pt_validation_box(
+                "Bridge Failed",
+                "Pair {}: polyBridgeEdge a échoué.\n{}".format(i, e),
+                icon="critical"
+            )
+            _pt_debug(state, "Pair {} échec bridge: {}".format(i, e), "ERROR")
 
     state["bridge_nodes"] = created
     cmds.select(clear=True)
+    _pt_debug(state, "Bridge terminé. {} node(s) créé(s).".format(len(created)))
 
 
 # ── Side Hard Edges ────────────────────────────────────────────
@@ -690,6 +774,8 @@ def _pt_validate(state):
     except Exception: pass
     state.update({"backup": None, "bridge_nodes": [], "bevel_node": None})
     cmds.select(obj, r=True)
+    _pt_print_summary(state, context="VALIDATE")
+    _pt_validation_box("Validation", "Panel tool validé.\nRésumé imprimé dans le Script Editor.")
     print("Panel tool validé.")
 
 def _pt_revert(state):
@@ -1236,11 +1322,15 @@ class PanelToolTab(QtWidgets.QWidget):
             "is_negative": default_val < 0.0,
             "pending_is_negative": default_val < 0.0,
             "internal_restore":False,"safe_selection":[obj],
-            "bridge_nodes":[],"bevel_node":None,
+            "bridge_nodes":[],"bevel_node":None,"debug_log":[],
         })
+        _pt_debug(state, "Start paneling sur objet '{}'.".format(short_name))
+        _pt_validation_box("Start", "Objet détecté: {}\nDébut du process.".format(short_name))
 
         backup = cmds.duplicate(obj, name=short_name+"_backup#")[0]
         cmds.hide(backup); state["backup"] = backup
+        _pt_debug(state, "Backup créé: {}".format(backup), "OK")
+        _pt_validation_box("Backup", "Backup créé:\n{}".format(backup))
 
         edge_set = short_name+"_panelEdges_set"
         if cmds.objExists(edge_set): cmds.delete(edge_set)
@@ -1250,6 +1340,7 @@ class PanelToolTab(QtWidgets.QWidget):
         for cmd in ["UVCameraBasedProjection;","UnfoldUV;","UVOrientShells;","LayoutUV;"]:
             try: mel.eval(cmd)
             except Exception: pass
+        _pt_debug(state, "Projection/Unfold/Orient/Layout UV exécutés.")
 
         stored = cmds.ls(cmds.sets(edge_set, q=True), fl=True) or []
         if stored:
@@ -1258,10 +1349,14 @@ class PanelToolTab(QtWidgets.QWidget):
             except Exception:
                 try: mel.eval("performPolyMapCut;")
                 except Exception: cmds.warning("Cut UV échoué."); return
+        _pt_debug(state, "Cut UV effectué sur {} edge(s).".format(len(stored)))
+        _pt_validation_box("UV Cut", "Cut UV terminé sur {} edge(s).".format(len(stored)))
 
         cmds.select(obj+".f[*]", r=True)
         extrude_node = cmds.polyExtrudeFacet(localTranslateZ=default_val, keepFacesTogether=True)[0]
         state["extrude_node"] = extrude_node
+        _pt_debug(state, "Extrude créé: {} (offset={})".format(extrude_node, default_val), "OK")
+        _pt_validation_box("Extrude", "Extrude node:\n{}\nOffset: {}".format(extrude_node, default_val))
 
         if state["is_negative"]:
             cmds.select(obj, r=True); mel.eval("ReversePolygonNormals;"); cmds.select(obj, r=True)
@@ -1270,6 +1365,8 @@ class PanelToolTab(QtWidgets.QWidget):
         front_set   = short_name+"_panelFrontFaces_set"
         if cmds.objExists(front_set): cmds.delete(front_set)
         if front_faces: cmds.sets(front_faces, name=front_set)
+        _pt_debug(state, "Front faces: {}".format(len(front_faces)))
+        _pt_validation_box("Front Set", "{} face(s) dans le front set.".format(len(front_faces)))
 
         cmds.select(front_faces, r=True)
         mel.eval("GrowPolygonSelectionRegion;"); mel.eval("InvertSelection;")
@@ -1277,16 +1374,22 @@ class PanelToolTab(QtWidgets.QWidget):
         back_set   = short_name+"_panelBackFaces_set"
         if cmds.objExists(back_set): cmds.delete(back_set)
         if back_faces: cmds.sets(back_faces, name=back_set)
+        _pt_debug(state, "Back faces: {}".format(len(back_faces)))
+        _pt_validation_box("Back Set", "{} face(s) dans le back set.".format(len(back_faces)))
 
         seam_edges = _pt_get_internal_uv_seam_edges(obj)
         seam_set   = short_name+"_panelSeams_set"
         if cmds.objExists(seam_set): cmds.delete(seam_set)
         if seam_edges: cmds.sets(seam_edges, name=seam_set)
+        _pt_debug(state, "Seam edges détectées: {}".format(len(seam_edges)))
+        _pt_validation_box("Seams", "{} seam edge(s) détectée(s).".format(len(seam_edges)))
 
         cmds.select(obj, r=True); state["safe_selection"] = [obj]
 
         _pt_delete_side_faces(short_name)
+        _pt_debug(state, "Side faces supprimées.")
         _pt_detach(short_name)
+        _pt_debug(state, "Detach des seams terminé.")
         _pt_bridge(short_name, state)
 
         state["started"] = True
@@ -1298,6 +1401,8 @@ class PanelToolTab(QtWidgets.QWidget):
             _pt_rebuild_bevel(short_name, state)
 
         cmds.select(obj, r=True)
+        _pt_print_summary(state, context="START")
+        _pt_validation_box("Résumé", "Process terminé.\nRésumé imprimé dans le Script Editor.")
 
     def _on_revert(self):
         _pt_revert(self.state)

@@ -729,7 +729,7 @@ def _pt_bridge(short_name, state):
                 cmds.select(edges, r=True)
                 bridge = cmds.polyBridgeEdge(
                     edges, divisions=0, twist=0, taper=1, curveType=0)[0]
-                cmds.setAttr(bridge + ".sourceDirection", 1)
+                cmds.setAttr(bridge + ".sourceDirection", 0)
                 created.append(bridge)
             except Exception as e:
                 cmds.warning(f"polyBridgeEdge a échoué : {e}")
@@ -793,7 +793,7 @@ def _pt_rebuild_bevel(short_name, state):
 def _pt_bridge_direction_update(state):
     for bn in state["bridge_nodes"]:
         if cmds.objExists(bn):
-            try: cmds.setAttr(bn + ".sourceDirection", 1)
+            try: cmds.setAttr(bn + ".sourceDirection", 0)
             except Exception: pass
 
 

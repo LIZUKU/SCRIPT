@@ -506,6 +506,9 @@ def _pt_get_perimeter_edges_from_faces(faces):
     edges = [e for e in edges if ".e[" in e and cmds.objExists(e)]
     return edges
 
+def _pt_get_bridge_source_direction(is_negative):
+    return 1 if is_negative else 0
+
 
 
 
@@ -555,7 +558,10 @@ def _pt_bridge(short_name, state):
                 curveType=0
             )[0]
 
-            cmds.setAttr(bridge + ".sourceDirection", 1)
+            cmds.setAttr(
+                bridge + ".sourceDirection",
+                _pt_get_bridge_source_direction(state["is_negative"])
+            )
             created.append(bridge)
 
         except Exception as e:
@@ -661,7 +667,7 @@ def _pt_rebuild_bevel(short_name, state):
 
 
 def _pt_bridge_direction_update(state):
-    direction = 0 if state["is_negative"] else 1
+    direction = _pt_get_bridge_source_direction(state["is_negative"])
     for bn in state["bridge_nodes"]:
         if cmds.objExists(bn):
             try: cmds.setAttr(bn + ".sourceDirection", direction)

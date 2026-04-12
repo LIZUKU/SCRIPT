@@ -1133,6 +1133,57 @@ def _om_start_mmb_dragger(get_fn,set_fn,change_fn):
 def _cg_ev(e): return cmds.ls(cmds.polyListComponentConversion(e,fromEdge=True,toVertex=True),flatten=True)
 def _cg_pos(v): p=cmds.pointPosition(v,world=True); return om2.MVector(p[0],p[1],p[2])
 def _cg_dist(v1,v2): return (_cg_pos(v2)-_cg_pos(v1)).length()
+def _cg_dist_vec(p1,p2):
+    d = p2 - p1
+    return d.length()
+def _cg_positions(vertices):
+    out = {}
+    for v in (vertices or []):
+        try:
+            p = cmds.pointPosition(v, world=True)
+            out[v] = om2.MVector(p[0], p[1], p[2])
+        except Exception:
+            continue
+    return out
+def _cg_build_pairs(v1, v2, max_dist, pos):
+    pairs = []
+    for a in v1:
+        pa = pos.get(a)
+        if pa is None:
+            continue
+        best = None
+        best_d = None
+        for b in v2:
+            pb = pos.get(b)
+            if pb is None:
+                continue
+            d = _cg_dist_vec(pa, pb)
+            if best_d is None or d < best_d:
+                best_d = d
+                best = b
+        if best is not None and best_d is not None and best_d <= max_dist:
+            pairs.append((a, best, best_d))
+
+    matched = {p[1] for p in pairs}
+    for b in v2:
+        if b in matched:
+            continue
+        pb = pos.get(b)
+        if pb is None:
+            continue
+        best = None
+        best_d = None
+        for a in v1:
+            pa = pos.get(a)
+            if pa is None:
+                continue
+            d = _cg_dist_vec(pa, pb)
+            if best_d is None or d < best_d:
+                best_d = d
+                best = a
+        if best is not None and best_d is not None and best_d <= max_dist:
+            pairs.append((best, b, best_d))
+    return pairs
 def _cg_edges_conn(e1,e2): return bool(set(_cg_ev(e1))&set(_cg_ev(e2)))
 def _cg_verts_conn(v1,v2):
     e1=set(cmds.ls(cmds.polyListComponentConversion(v1,fromVertex=True,toEdge=True),flatten=True))
@@ -1179,25 +1230,22 @@ def _cg_as_vertices():
 def _cg_estimate_gap():
     v1,v2=_cg_as_vertices()
     if not v1 or not v2: return 10.0
-    md=min(_cg_dist(a,b) for a in v1 for b in v2)
+    pos = _cg_positions(set(v1 + v2))
+    md = min(
+        (_cg_dist_vec(pos[a], pos[b]) for a in v1 for b in v2 if a in pos and b in pos),
+        default=float("inf")
+    )
     return 10.0 if(md==float('inf') or md<0.0001) else md*1.5
 def _cg_close_gaps(max_dist=None):
     v1,v2=_cg_as_vertices()
     if not v1 or not v2: cmds.warning("Two groups are required."); return 0
     if max_dist is None: max_dist=_cg_estimate_gap()
-    pairs=[]
-    for a in v1:
-        best=min(v2,key=lambda b:_cg_dist(a,b))
-        if _cg_dist(a,best)<=max_dist: pairs.append((a,best,_cg_dist(a,best)))
-    matched={p[1] for p in pairs}
-    for b in v2:
-        if b in matched: continue
-        best=min(v1,key=lambda a:_cg_dist(a,b))
-        if _cg_dist(best,b)<=max_dist: pairs.append((best,b,_cg_dist(best,b)))
+    pos = _cg_positions(set(v1 + v2))
+    pairs = _cg_build_pairs(v1, v2, max_dist, pos)
     if not pairs: cmds.warning(f"No pairs found within distance {max_dist:.3f}"); return 0
     vtgt={}
     for a,b,_ in pairs:
-        mid=(_cg_pos(a)+_cg_pos(b))*0.5
+        mid=(pos[a]+pos[b])*0.5
         vtgt.setdefault(a,[]).append(mid); vtgt.setdefault(b,[]).append(mid)
     cmds.undoInfo(openChunk=True)
     try:
@@ -1212,19 +1260,12 @@ def _cg_close_dir(max_dist,direction):
     v1,v2=_cg_as_vertices()
     if not v1 or not v2: return 0
     if max_dist is None: max_dist=_cg_estimate_gap()
-    pairs=[]
-    for a in v1:
-        best=min(v2,key=lambda b:_cg_dist(a,b))
-        if _cg_dist(a,best)<=max_dist: pairs.append((a,best))
-    matched={p[1] for p in pairs}
-    for b in v2:
-        if b in matched: continue
-        best=min(v1,key=lambda a:_cg_dist(a,b))
-        if _cg_dist(best,b)<=max_dist: pairs.append((best,b))
+    pos = _cg_positions(set(v1 + v2))
+    pairs = _cg_build_pairs(v1, v2, max_dist, pos)
     if not pairs: return 0
     vtgt={}
-    for a,b in pairs:
-        tgt=_cg_pos(a) if direction=="g1" else _cg_pos(b)
+    for a,b,_ in pairs:
+        tgt=pos[a] if direction=="g1" else pos[b]
         vtgt.setdefault(a,[]).append(tgt); vtgt.setdefault(b,[]).append(tgt)
     cmds.undoInfo(openChunk=True)
     try:

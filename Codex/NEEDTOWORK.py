@@ -1303,6 +1303,13 @@ class PanelToolTab(QtWidgets.QWidget):
             "angle_bevel_enabled":False,"angle_bevel_threshold":90.0,
             "ui":{},
         }
+        self._live_apply_timer = QtCore.QTimer(self)
+        self._live_apply_timer.setSingleShot(True)
+        self._live_apply_timer.timeout.connect(self._apply_bevel_live_now)
+
+        self._rebuild_timer = QtCore.QTimer(self)
+        self._rebuild_timer.setSingleShot(True)
+        self._rebuild_timer.timeout.connect(self._rebuild_bevel_now)
         self._build()
 
     def _sync_bevel_state(self):
@@ -1316,6 +1323,9 @@ class PanelToolTab(QtWidgets.QWidget):
         s["angle_bevel_threshold"] = self.w_angle_val.value()
 
     def _apply_bevel_live(self):
+        self._live_apply_timer.start(30)
+
+    def _apply_bevel_live_now(self):
         if not self.state["started"]: return
         self._sync_bevel_state()
         bn = self.state.get("bevel_node")
@@ -1323,6 +1333,9 @@ class PanelToolTab(QtWidgets.QWidget):
             _pt_apply_bevel_state(bn, self.state)
 
     def _rebuild_bevel(self):
+        self._rebuild_timer.start(120)
+
+    def _rebuild_bevel_now(self):
         if not self.state["started"]: return
         self._sync_bevel_state()
         _pt_rebuild_bevel(self.state["short_name"], self.state)
@@ -1375,6 +1388,7 @@ class PanelToolTab(QtWidgets.QWidget):
         self.w_boff_sl.setEnabled(False)
         self.w_boff.valueChanged.connect(self._on_boff_field)
         self.w_boff_sl.sliderMoved.connect(self._on_boff_slider)
+        self.w_boff_sl.sliderReleased.connect(self._apply_bevel_live)
         root.addLayout(_slider_row("Offset", self.w_boff, self.w_boff_sl,
                                    step_slow=0.001, step_fast=0.01))
 
@@ -1386,6 +1400,7 @@ class PanelToolTab(QtWidgets.QWidget):
         self.w_bseg_sl.setEnabled(False)
         self.w_bseg.valueChanged.connect(self._on_bseg_field)
         self.w_bseg_sl.sliderMoved.connect(self._on_bseg_slider)
+        self.w_bseg_sl.sliderReleased.connect(self._apply_bevel_live)
         root.addLayout(_slider_row("Segments", self.w_bseg, self.w_bseg_sl,
                                    step_slow=1, step_fast=2))
 
@@ -1425,6 +1440,7 @@ class PanelToolTab(QtWidgets.QWidget):
         self.w_angle_sl.setEnabled(False)
         self.w_angle_val.valueChanged.connect(self._on_angle_field)
         self.w_angle_sl.sliderMoved.connect(self._on_angle_slider)
+        self.w_angle_sl.sliderReleased.connect(self._rebuild_bevel)
         root.addLayout(_slider_row("Angle", self.w_angle_val, self.w_angle_sl,
                                    step_slow=1.0, step_fast=5.0))
 
@@ -1485,85 +1501,85 @@ class PanelToolTab(QtWidgets.QWidget):
         _pt_debug(state, "Starting paneling on object '{}'.".format(short_name))
         _pt_validation_box("Start", "Detected object: {}\nStarting process.".format(short_name))
 
-        backup = cmds.duplicate(obj, name=short_name+"_backup#")[0]
-        cmds.hide(backup); state["backup"] = backup
-        _pt_debug(state, "Backup created: {}".format(backup), "OK")
-        _pt_validation_box("Backup", "Backup created:\n{}".format(backup))
+        cmds.waitCursor(state=True)
+        cmds.refresh(suspend=True)
+        try:
+            backup = cmds.duplicate(obj, name=short_name+"_backup#")[0]
+            cmds.hide(backup); state["backup"] = backup
+            _pt_debug(state, "Backup created: {}".format(backup), "OK")
+            _pt_validation_box("Backup", "Backup created:\n{}".format(backup))
 
-        edge_set = short_name+"_panelEdges_set"
-        if cmds.objExists(edge_set): cmds.delete(edge_set)
-        cmds.sets(edges, name=edge_set)
+            edge_set = short_name+"_panelEdges_set"
+            if cmds.objExists(edge_set): cmds.delete(edge_set)
+            cmds.sets(edges, name=edge_set)
 
-        cmds.select(obj, r=True)
-        for cmd in ["UVCameraBasedProjection;","UnfoldUV;","UVOrientShells;","LayoutUV;"]:
-            try: mel.eval(cmd)
-            except Exception: pass
-        _pt_debug(state, "Projection/Unfold/Orient/Layout UV executed.")
+            stored = cmds.ls(cmds.sets(edge_set, q=True), fl=True) or []
+            corner_verts = _pt_extract_corner_vertices_from_edges(stored)
+            _pt_component_set(short_name + "_panelCornerVerts_set", corner_verts)
+            _pt_debug(state, "Corner verts stored: {}".format(len(corner_verts)))
+            if stored:
+                cmds.select(stored, r=True)
+                try: cmds.polyMapCut(stored)
+                except Exception:
+                    try: mel.eval("performPolyMapCut;")
+                    except Exception: cmds.warning("UV cut failed."); return
+            _pt_debug(state, "UV cut applied to {} edge(s).".format(len(stored)))
+            _pt_validation_box("UV Cut", "UV cut completed on {} edge(s).".format(len(stored)))
 
-        stored = cmds.ls(cmds.sets(edge_set, q=True), fl=True) or []
-        corner_verts = _pt_extract_corner_vertices_from_edges(stored)
-        _pt_component_set(short_name + "_panelCornerVerts_set", corner_verts)
-        _pt_debug(state, "Corner verts stored: {}".format(len(corner_verts)))
-        if stored:
-            cmds.select(stored, r=True)
-            try: cmds.polyMapCut(stored)
-            except Exception:
-                try: mel.eval("performPolyMapCut;")
-                except Exception: cmds.warning("UV cut failed."); return
-        _pt_debug(state, "UV cut applied to {} edge(s).".format(len(stored)))
-        _pt_validation_box("UV Cut", "UV cut completed on {} edge(s).".format(len(stored)))
+            cmds.select(obj+".f[*]", r=True)
+            extrude_node = cmds.polyExtrudeFacet(localTranslateZ=default_val, keepFacesTogether=True)[0]
+            state["extrude_node"] = extrude_node
+            _pt_debug(state, "Extrude created: {} (offset={})".format(extrude_node, default_val), "OK")
+            _pt_validation_box("Extrude", "Extrude node:\n{}\nOffset: {}".format(extrude_node, default_val))
 
-        cmds.select(obj+".f[*]", r=True)
-        extrude_node = cmds.polyExtrudeFacet(localTranslateZ=default_val, keepFacesTogether=True)[0]
-        state["extrude_node"] = extrude_node
-        _pt_debug(state, "Extrude created: {} (offset={})".format(extrude_node, default_val), "OK")
-        _pt_validation_box("Extrude", "Extrude node:\n{}\nOffset: {}".format(extrude_node, default_val))
+            if state["is_negative"]:
+                cmds.select(obj, r=True); mel.eval("ReversePolygonNormals;"); cmds.select(obj, r=True)
 
-        if state["is_negative"]:
-            cmds.select(obj, r=True); mel.eval("ReversePolygonNormals;"); cmds.select(obj, r=True)
+            front_faces = cmds.ls(sl=True, fl=True) or []
+            front_set   = short_name+"_panelFrontFaces_set"
+            if cmds.objExists(front_set): cmds.delete(front_set)
+            if front_faces: cmds.sets(front_faces, name=front_set)
+            _pt_debug(state, "Front faces: {}".format(len(front_faces)))
+            _pt_validation_box("Front Set", "{} face(s) stored in the front set.".format(len(front_faces)))
 
-        front_faces = cmds.ls(sl=True, fl=True) or []
-        front_set   = short_name+"_panelFrontFaces_set"
-        if cmds.objExists(front_set): cmds.delete(front_set)
-        if front_faces: cmds.sets(front_faces, name=front_set)
-        _pt_debug(state, "Front faces: {}".format(len(front_faces)))
-        _pt_validation_box("Front Set", "{} face(s) stored in the front set.".format(len(front_faces)))
+            cmds.select(front_faces, r=True)
+            mel.eval("GrowPolygonSelectionRegion;"); mel.eval("InvertSelection;")
+            back_faces = cmds.ls(sl=True, fl=True) or []
+            back_set   = short_name+"_panelBackFaces_set"
+            if cmds.objExists(back_set): cmds.delete(back_set)
+            if back_faces: cmds.sets(back_faces, name=back_set)
+            _pt_debug(state, "Back faces: {}".format(len(back_faces)))
+            _pt_validation_box("Back Set", "{} face(s) stored in the back set.".format(len(back_faces)))
 
-        cmds.select(front_faces, r=True)
-        mel.eval("GrowPolygonSelectionRegion;"); mel.eval("InvertSelection;")
-        back_faces = cmds.ls(sl=True, fl=True) or []
-        back_set   = short_name+"_panelBackFaces_set"
-        if cmds.objExists(back_set): cmds.delete(back_set)
-        if back_faces: cmds.sets(back_faces, name=back_set)
-        _pt_debug(state, "Back faces: {}".format(len(back_faces)))
-        _pt_validation_box("Back Set", "{} face(s) stored in the back set.".format(len(back_faces)))
+            seam_edges = _pt_get_internal_uv_seam_edges(obj)
+            seam_set   = short_name+"_panelSeams_set"
+            if cmds.objExists(seam_set): cmds.delete(seam_set)
+            if seam_edges: cmds.sets(seam_edges, name=seam_set)
+            _pt_debug(state, "Seam edges detected: {}".format(len(seam_edges)))
+            _pt_validation_box("Seams", "{} seam edge(s) detected.".format(len(seam_edges)))
 
-        seam_edges = _pt_get_internal_uv_seam_edges(obj)
-        seam_set   = short_name+"_panelSeams_set"
-        if cmds.objExists(seam_set): cmds.delete(seam_set)
-        if seam_edges: cmds.sets(seam_edges, name=seam_set)
-        _pt_debug(state, "Seam edges detected: {}".format(len(seam_edges)))
-        _pt_validation_box("Seams", "{} seam edge(s) detected.".format(len(seam_edges)))
+            cmds.select(obj, r=True); state["safe_selection"] = [obj]
 
-        cmds.select(obj, r=True); state["safe_selection"] = [obj]
+            _pt_delete_side_faces(short_name)
+            _pt_debug(state, "Side faces deleted.")
+            _pt_detach(short_name)
+            _pt_debug(state, "Seam detach complete.")
+            _pt_bridge(short_name, state)
 
-        _pt_delete_side_faces(short_name)
-        _pt_debug(state, "Side faces deleted.")
-        _pt_detach(short_name)
-        _pt_debug(state, "Seam detach complete.")
-        _pt_bridge(short_name, state)
+            state["started"] = True
+            self._enable_controls(True)
 
-        state["started"] = True
-        self._enable_controls(True)
+            if auto_bevel:
+                self._sync_bevel_state()
+                _pt_bevel(short_name, state)
 
-        if auto_bevel:
-            self._sync_bevel_state()
-            _pt_bevel(short_name, state)
-            _pt_rebuild_bevel(short_name, state)
-
-        cmds.select(obj, r=True)
-        _pt_print_summary(state, context="START")
-        _pt_validation_box("Summary", "Process complete.\nSummary printed in the Script Editor.")
+            cmds.select(obj, r=True)
+            _pt_print_summary(state, context="START")
+            _pt_validation_box("Summary", "Process complete.\nSummary printed in the Script Editor.")
+        finally:
+            cmds.refresh(suspend=False)
+            cmds.refresh(f=True)
+            cmds.waitCursor(state=False)
 
     def _on_revert(self):
         _pt_revert(self.state)

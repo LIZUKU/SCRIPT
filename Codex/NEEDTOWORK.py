@@ -1436,17 +1436,31 @@ class PanelToolTab(QtWidgets.QWidget):
         root.addWidget(_sep())
         root.addWidget(_section("Bevel"))
 
+        self._boff_slider_scale = 1000.0
+        self._boff_range_limit = 0.05
         self.w_boff = QtWidgets.QDoubleSpinBox()
-        self.w_boff.setRange(0,1000); self.w_boff.setValue(0.01)
+        self.w_boff.setRange(0, self._boff_range_limit); self.w_boff.setValue(0.01)
         self.w_boff.setSingleStep(0.001); self.w_boff.setDecimals(4)
         self.w_boff.setEnabled(False)
         self.w_boff_sl = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.w_boff_sl.setRange(0,50); self.w_boff_sl.setValue(10)
+        self.w_boff_sl.setRange(0, int(self._boff_range_limit * self._boff_slider_scale)); self.w_boff_sl.setValue(10)
         self.w_boff_sl.setEnabled(False)
         self.w_boff.valueChanged.connect(self._on_boff_field)
         self.w_boff_sl.sliderMoved.connect(self._on_boff_slider)
         root.addLayout(_slider_row("Offset", self.w_boff, self.w_boff_sl,
                                    step_slow=0.001, step_fast=0.01))
+        boff_range_row = QtWidgets.QHBoxLayout()
+        boff_range_row.addWidget(QtWidgets.QLabel("Range"))
+        self.w_boff_range_minus = _step_btn("-")
+        self.w_boff_range_plus = _step_btn("+")
+        self.w_boff_range_lbl = QtWidgets.QLabel("0 → {:.4f}".format(self._boff_range_limit))
+        self.w_boff_range_minus.clicked.connect(lambda: self._change_boff_range(0.5))
+        self.w_boff_range_plus.clicked.connect(lambda: self._change_boff_range(2.0))
+        boff_range_row.addWidget(self.w_boff_range_minus)
+        boff_range_row.addWidget(self.w_boff_range_plus)
+        boff_range_row.addWidget(self.w_boff_range_lbl)
+        boff_range_row.addStretch()
+        root.addLayout(boff_range_row)
 
         self.w_bseg = QtWidgets.QSpinBox()
         self.w_bseg.setRange(0,100); self.w_bseg.setValue(1)
@@ -1711,11 +1725,25 @@ class PanelToolTab(QtWidgets.QWidget):
         _pt_restore_mesh_selection(obj)
 
     def _on_boff_field(self, v):
-        self.w_boff_sl.blockSignals(True); self.w_boff_sl.setValue(int(v*1000))
+        if v > self._boff_range_limit:
+            self._change_boff_range(max(1.0, v / max(self._boff_range_limit, 1e-8)))
+        self.w_boff_sl.blockSignals(True); self.w_boff_sl.setValue(int(v * self._boff_slider_scale))
         self.w_boff_sl.blockSignals(False); self._apply_bevel_live()
     def _on_boff_slider(self, s):
-        self.w_boff.blockSignals(True); self.w_boff.setValue(s/1000.0)
+        self.w_boff.blockSignals(True); self.w_boff.setValue(s / self._boff_slider_scale)
         self.w_boff.blockSignals(False); self._apply_bevel_live()
+    def _change_boff_range(self, factor):
+        new_limit = max(0.001, min(1000.0, self._boff_range_limit * factor))
+        if abs(new_limit - self._boff_range_limit) < 1e-12:
+            return
+        self._boff_range_limit = new_limit
+        cur = max(0.0, min(self._boff_range_limit, self.w_boff.value()))
+        self.w_boff.setRange(0.0, self._boff_range_limit)
+        self.w_boff_sl.setRange(0, int(self._boff_range_limit * self._boff_slider_scale))
+        self.w_boff.blockSignals(True); self.w_boff.setValue(cur); self.w_boff.blockSignals(False)
+        self.w_boff_sl.blockSignals(True); self.w_boff_sl.setValue(int(cur * self._boff_slider_scale)); self.w_boff_sl.blockSignals(False)
+        self.w_boff_range_lbl.setText("0 → {:.4f}".format(self._boff_range_limit))
+        self._apply_bevel_live()
 
     def _on_bseg_field(self, v):
         self.w_bseg_sl.blockSignals(True); self.w_bseg_sl.setValue(v)
@@ -1832,7 +1860,7 @@ class OverlayMergeTab(QtWidgets.QWidget):
 class CloseGapsTab(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._dist_limit = 10.0
+        self._dist_limit = 1.0
         self._build()
 
     def _build(self):
@@ -1844,7 +1872,7 @@ class CloseGapsTab(QtWidgets.QWidget):
         lay.addWidget(info)
 
         lay.addWidget(_section("Distance max"))
-        self.lbl_dist = QtWidgets.QLabel("Distance max: 10.0000")
+        self.lbl_dist = QtWidgets.QLabel("Distance max: 0.1000")
         self.lbl_dist.setStyleSheet(f"color:{C_RED}; font-weight:bold;")
         btn_auto = QtWidgets.QPushButton("Auto Detect"); btn_auto.setObjectName("dimBtn")
         btn_auto.clicked.connect(self._on_auto)
@@ -1852,12 +1880,12 @@ class CloseGapsTab(QtWidgets.QWidget):
         lay.addLayout(row)
 
         self.dist_field = QtWidgets.QDoubleSpinBox()
-        self.dist_field.setRange(-self._dist_limit, self._dist_limit); self.dist_field.setValue(self._dist_limit)
+        self.dist_field.setRange(-self._dist_limit, self._dist_limit); self.dist_field.setValue(0.1)
         self.dist_field.setDecimals(4); self.dist_field.setSingleStep(0.1)
         self.dist_field.valueChanged.connect(self._on_dist_change)
         self.dist_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.dist_slider.setRange(int(-self._dist_limit * 1000), int(self._dist_limit * 1000))
-        self.dist_slider.setValue(int(self._dist_limit * 1000))
+        self.dist_slider.setValue(100)
         self.dist_slider.sliderMoved.connect(self._on_dist_slider)
 
         frow = QtWidgets.QHBoxLayout()
@@ -1891,6 +1919,7 @@ class CloseGapsTab(QtWidgets.QWidget):
         lay.addWidget(note); lay.addStretch()
 
         if cmds.ls(selection=True): self._on_auto()
+        self._update_dist_step()
 
     def _update_lbl(self,v): self.lbl_dist.setText(f"Distance max: {v:.4f}")
     def _on_dist_change(self,v):
@@ -1915,7 +1944,12 @@ class CloseGapsTab(QtWidgets.QWidget):
         cur = max(-self._dist_limit, min(self._dist_limit, self.dist_field.value()))
         self.dist_field.blockSignals(True); self.dist_field.setValue(cur); self.dist_field.blockSignals(False)
         self.dist_slider.blockSignals(True); self.dist_slider.setValue(int(cur * 1000)); self.dist_slider.blockSignals(False)
+        self._update_dist_step()
         self._update_lbl(cur)
+
+    def _update_dist_step(self):
+        step = max(0.0001, self._dist_limit / 100.0)
+        self.dist_field.setSingleStep(step)
 
 
 class SmartPanelingUI(QtWidgets.QDialog):

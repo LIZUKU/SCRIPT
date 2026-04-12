@@ -458,6 +458,13 @@ def _pt_get_connected_shells(faces):
         shells.append(shell)
     return shells
 
+def _pt_connected_face_shells(faces):
+    """
+    Backward-compatible alias used by older callbacks that still reference
+    `_pt_connected_face_shells`.
+    """
+    return _pt_get_connected_shells(faces)
+
 def _pt_center(faces):
     verts = cmds.ls(cmds.polyListComponentConversion(faces, tv=True), fl=True) or []
     if not verts: return [0.0, 0.0, 0.0]

@@ -361,6 +361,51 @@ def _pt_angle_between(n1, n2):
     dot = max(-1.0, min(1.0, sum(a[i]*b[i] for i in range(3))))
     return math.degrees(math.acos(dot))
 
+def _pt_face_center(face):
+    verts = cmds.ls(cmds.polyListComponentConversion(face, ff=True, tv=True), fl=True) or []
+    if not verts:
+        return [0.0, 0.0, 0.0]
+    pts = [cmds.xform(v, q=True, ws=True, t=True) for v in verts]
+    return [
+        sum(p[0] for p in pts) / len(pts),
+        sum(p[1] for p in pts) / len(pts),
+        sum(p[2] for p in pts) / len(pts),
+    ]
+
+def _pt_distance_sq(a, b):
+    return ((a[0]-b[0])**2) + ((a[1]-b[1])**2) + ((a[2]-b[2])**2)
+
+def _pt_get_front_back_side_faces(obj, faces_before):
+    """
+    Détection topologique stable:
+      - back_faces = faces avant extrude
+      - nouvelles faces = front + side
+      - front = nouvelle face la plus proche de chaque face d'origine
+      - side = reste
+    """
+    all_faces_now = cmds.ls(obj + ".f[*]", fl=True) or []
+    before_set = set(faces_before or [])
+    new_faces = [f for f in all_faces_now if f not in before_set]
+    if not new_faces:
+        return list(faces_before or []), [], []
+
+    before_centers = {f: _pt_face_center(f) for f in (faces_before or [])}
+    new_centers = {f: _pt_face_center(f) for f in new_faces}
+
+    remaining_new = set(new_faces)
+    front_faces = []
+    for old_face in (faces_before or []):
+        if not remaining_new:
+            break
+        oc = before_centers[old_face]
+        best = min(remaining_new, key=lambda nf: _pt_distance_sq(oc, new_centers[nf]))
+        front_faces.append(best)
+        remaining_new.remove(best)
+
+    side_faces = list(remaining_new)
+    back_faces = list(faces_before or [])
+    return back_faces, front_faces, side_faces
+
 def _pt_get_internal_uv_seam_edges(obj):
     if not obj:
         return []
@@ -450,13 +495,14 @@ def _pt_pair_shells_by_center(front, back):
     return pairs
 
 def _pt_delete_side_faces(short_name):
-    front = cmds.ls(cmds.sets(short_name + "_panelFrontFaces_set", q=True), fl=True) or []
-    back  = cmds.ls(cmds.sets(short_name + "_panelBackFaces_set",  q=True), fl=True) or []
-    if not front or not back: return
-    cmds.select(front + back, r=True)
-    mel.eval("InvertSelection;")
-    side = cmds.ls(sl=True, fl=True) or []
-    if side: cmds.delete(side)
+    side_set = short_name + "_panelSideFaces_set"
+    if not cmds.objExists(side_set):
+        return
+    side = cmds.ls(cmds.sets(side_set, q=True), fl=True) or []
+    side = [f for f in side if ".f[" in f and cmds.objExists(f)]
+    if side:
+        cmds.select(side, r=True)
+        cmds.delete(side)
 
 def _pt_detach(short_name):
     edges = cmds.ls(cmds.sets(short_name + "_panelSeams_set", q=True), fl=True) or []
@@ -683,7 +729,7 @@ def _pt_bridge(short_name, state):
                 cmds.select(edges, r=True)
                 bridge = cmds.polyBridgeEdge(
                     edges, divisions=0, twist=0, taper=1, curveType=0)[0]
-                cmds.setAttr(bridge + ".sourceDirection", 0 if state["is_negative"] else 1)
+                cmds.setAttr(bridge + ".sourceDirection", 1)
                 created.append(bridge)
             except Exception as e:
                 cmds.warning(f"polyBridgeEdge a échoué : {e}")
@@ -745,10 +791,9 @@ def _pt_rebuild_bevel(short_name, state):
 
 
 def _pt_bridge_direction_update(state):
-    direction = 0 if state["is_negative"] else 1
     for bn in state["bridge_nodes"]:
         if cmds.objExists(bn):
-            try: cmds.setAttr(bn + ".sourceDirection", direction)
+            try: cmds.setAttr(bn + ".sourceDirection", 1)
             except Exception: pass
 
 
@@ -757,7 +802,8 @@ def _pt_validate(state):
     obj = state.get("obj"); sn = state.get("short_name"); backup = state.get("backup")
     if not obj or not cmds.objExists(obj): return
     for node in [sn+"_panelEdges_set", sn+"_panelFrontFaces_set",
-                 sn+"_panelBackFaces_set", sn+"_panelSeams_set", sn+"_panelBevelFaces_set"]:
+                 sn+"_panelBackFaces_set", sn+"_panelSideFaces_set",
+                 sn+"_panelSeams_set", sn+"_panelBevelFaces_set"]:
         if cmds.objExists(node):
             try: cmds.delete(node)
             except Exception: pass
@@ -782,7 +828,8 @@ def _pt_revert(state):
     try: cmds.delete(backup)
     except Exception: pass
     for node in [sn+"_panelEdges_set", sn+"_panelFrontFaces_set",
-                 sn+"_panelBackFaces_set", sn+"_panelSeams_set", sn+"_panelBevelFaces_set"]:
+                 sn+"_panelBackFaces_set", sn+"_panelSideFaces_set",
+                 sn+"_panelSeams_set", sn+"_panelBevelFaces_set"]:
         if cmds.objExists(node):
             try: cmds.delete(node)
             except Exception: pass
@@ -1319,6 +1366,7 @@ class PanelToolTab(QtWidgets.QWidget):
                 try: mel.eval("performPolyMapCut;")
                 except Exception: cmds.warning("Cut UV échoué."); return
 
+        faces_before = cmds.ls(obj + ".f[*]", fl=True) or []
         cmds.select(obj+".f[*]", r=True)
         extrude_node = cmds.polyExtrudeFacet(localTranslateZ=default_val, keepFacesTogether=True)[0]
         state["extrude_node"] = extrude_node
@@ -1326,17 +1374,16 @@ class PanelToolTab(QtWidgets.QWidget):
         if state["is_negative"]:
             cmds.select(obj, r=True); mel.eval("ReversePolygonNormals;"); cmds.select(obj, r=True)
 
-        front_faces = cmds.ls(sl=True, fl=True) or []
+        back_faces, front_faces, side_faces = _pt_get_front_back_side_faces(obj, faces_before)
         front_set   = short_name+"_panelFrontFaces_set"
+        back_set    = short_name+"_panelBackFaces_set"
+        side_set    = short_name+"_panelSideFaces_set"
         if cmds.objExists(front_set): cmds.delete(front_set)
-        if front_faces: cmds.sets(front_faces, name=front_set)
-
-        cmds.select(front_faces, r=True)
-        mel.eval("GrowPolygonSelectionRegion;"); mel.eval("InvertSelection;")
-        back_faces = cmds.ls(sl=True, fl=True) or []
-        back_set   = short_name+"_panelBackFaces_set"
         if cmds.objExists(back_set): cmds.delete(back_set)
+        if cmds.objExists(side_set): cmds.delete(side_set)
+        if front_faces: cmds.sets(front_faces, name=front_set)
         if back_faces: cmds.sets(back_faces, name=back_set)
+        if side_faces: cmds.sets(side_faces, name=side_set)
 
         seam_edges = _pt_get_internal_uv_seam_edges(obj)
         seam_set   = short_name+"_panelSeams_set"

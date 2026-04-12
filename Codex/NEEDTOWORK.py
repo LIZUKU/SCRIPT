@@ -340,6 +340,25 @@ def _pt_angle_between(n1, n2):
     return math.degrees(math.acos(dot))
 
 
+def _pt_safe_set_members(set_name):
+    """Return members of a Maya set without raising if the set is missing/corrupted."""
+    if not set_name or not cmds.objExists(set_name):
+        return []
+    try:
+        return cmds.ls(cmds.sets(set_name, q=True), fl=True) or []
+    except Exception:
+        return []
+
+
+def _pt_restore_mesh_selection(obj):
+    """Restore transform selection to keep tool UX stable."""
+    if obj and cmds.objExists(obj):
+        try:
+            cmds.select(obj, r=True)
+        except Exception:
+            pass
+
+
 
 def _pt_get_internal_uv_seam_edges(obj):
     selection_list = om2.MSelectionList()
@@ -714,8 +733,8 @@ def _pt_expand_to_edge_loops(obj, edges):
 def _pt_get_side_hard_edges_by_angle(obj, short_name, threshold):
     """Return side-related hard edges and expand them to complete loops."""
     all_faces  = cmds.ls(obj + ".f[*]", fl=True) or []
-    front_raw  = cmds.sets(short_name + "_panelFrontFaces_set", q=True) or []
-    back_raw   = cmds.sets(short_name + "_panelBackFaces_set",  q=True) or []
+    front_raw  = _pt_safe_set_members(short_name + "_panelFrontFaces_set")
+    back_raw   = _pt_safe_set_members(short_name + "_panelBackFaces_set")
     front_set  = set(cmds.ls(front_raw, fl=True) or [])
     back_set   = set(cmds.ls(back_raw,  fl=True) or [])
     exclude    = front_set | back_set
@@ -746,9 +765,12 @@ def _pt_bevel(short_name, state):
     """Bevel front/back perimeter edges with optional extra side hard edges."""
     src_set = (short_name + "_panelBackFaces_set"
                if state["is_negative"] else short_name + "_panelFrontFaces_set")
-    faces = [f for f in (cmds.ls(cmds.sets(src_set, q=True), fl=True) or [])
+    faces = [f for f in _pt_safe_set_members(src_set)
              if ".f[" in f and cmds.objExists(f)]
-    if not faces: cmds.warning("No faces available for bevel."); return
+    if not faces:
+        cmds.warning("No faces available for bevel.")
+        _pt_restore_mesh_selection(state.get("obj"))
+        return
 
     base_faces = list(faces)
     cmds.select(base_faces, r=True)
@@ -772,7 +794,10 @@ def _pt_bevel(short_name, state):
             state["obj"], short_name, state.get("angle_bevel_threshold", 90.0))
         bevel_edges = _pt_merge_unique(bevel_edges, extra)
 
-    if not bevel_edges: cmds.warning("No edges available for bevel."); return
+    if not bevel_edges:
+        cmds.warning("No edges available for bevel.")
+        _pt_restore_mesh_selection(state.get("obj"))
+        return
 
     try:
         if state.get("bevel_node") and cmds.objExists(state["bevel_node"]):
@@ -782,9 +807,11 @@ def _pt_bevel(short_name, state):
         state["bevel_node"] = bevel_node
         _pt_apply_bevel_state(bevel_node, state)
     except Exception as e:
-        cmds.warning(f"Bevel failed: {e}"); return
+        cmds.warning(f"Bevel failed: {e}")
+        _pt_restore_mesh_selection(state.get("obj"))
+        return
 
-    cmds.select(clear=True)
+    _pt_restore_mesh_selection(state.get("obj"))
 
 
 def _pt_rebuild_bevel(short_name, state):
@@ -852,7 +879,7 @@ def _pt_delete_opposite_faces(state):
     if not state["started"]: return
     sn = state["short_name"]
     set_name = (sn+"_panelFrontFaces_set" if state["is_negative"] else sn+"_panelBackFaces_set")
-    faces = [f for f in (cmds.ls(cmds.sets(set_name, q=True), fl=True) or [])
+    faces = [f for f in _pt_safe_set_members(set_name)
              if ".f[" in f and cmds.objExists(f)]
     if not faces: return
     cmds.select(faces, r=True)
@@ -866,7 +893,7 @@ def _pt_grow_delete_opposite_faces(state):
     if not state["started"]: return
     sn = state["short_name"]
     set_name = (sn+"_panelFrontFaces_set" if state["is_negative"] else sn+"_panelBackFaces_set")
-    faces = [f for f in (cmds.ls(cmds.sets(set_name, q=True), fl=True) or [])
+    faces = [f for f in _pt_safe_set_members(set_name)
              if ".f[" in f and cmds.objExists(f)]
     if not faces: return
     cmds.select(faces, r=True)
@@ -1244,7 +1271,7 @@ class PanelToolTab(QtWidgets.QWidget):
         self.w_boff.setSingleStep(0.001); self.w_boff.setDecimals(4)
         self.w_boff.setEnabled(False)
         self.w_boff_sl = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.w_boff_sl.setRange(0,5000); self.w_boff_sl.setValue(10)
+        self.w_boff_sl.setRange(0,50); self.w_boff_sl.setValue(10)
         self.w_boff_sl.setEnabled(False)
         self.w_boff.valueChanged.connect(self._on_boff_field)
         self.w_boff_sl.sliderMoved.connect(self._on_boff_slider)
@@ -1252,10 +1279,10 @@ class PanelToolTab(QtWidgets.QWidget):
                                    step_slow=0.001, step_fast=0.01))
 
         self.w_bseg = QtWidgets.QSpinBox()
-        self.w_bseg.setRange(1,100); self.w_bseg.setValue(1)
+        self.w_bseg.setRange(0,100); self.w_bseg.setValue(1)
         self.w_bseg.setEnabled(False)
         self.w_bseg_sl = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.w_bseg_sl.setRange(1,20); self.w_bseg_sl.setValue(1)
+        self.w_bseg_sl.setRange(0,3); self.w_bseg_sl.setValue(1)
         self.w_bseg_sl.setEnabled(False)
         self.w_bseg.valueChanged.connect(self._on_bseg_field)
         self.w_bseg_sl.sliderMoved.connect(self._on_bseg_slider)
@@ -1469,6 +1496,7 @@ class PanelToolTab(QtWidgets.QWidget):
             self._sync_bevel_state(); _pt_rebuild_bevel(sn, state)
         else:
             state["is_negative"] = new_neg; state["pending_is_negative"] = new_neg
+        _pt_restore_mesh_selection(obj)
 
     def _on_boff_field(self, v):
         self.w_boff_sl.blockSignals(True); self.w_boff_sl.setValue(int(v*1000))

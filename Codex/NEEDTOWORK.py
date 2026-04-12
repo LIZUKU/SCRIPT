@@ -557,7 +557,7 @@ def _pt_remove_useless_vertices_per_shell(obj, tolerance=0.0001):
     Returns number of deleted vertices.
     """
     all_faces = cmds.ls(obj + ".f[*]", fl=True) or []
-    shells = _pt_connected_face_shells(all_faces)
+    shells = _pt_get_connected_shells(all_faces)
     to_delete = set()
 
     for shell_faces in shells:

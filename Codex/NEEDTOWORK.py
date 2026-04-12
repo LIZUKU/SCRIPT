@@ -489,6 +489,60 @@ def _pt_detach(short_name):
     mel.eval("performDetachComponents;")
 
 
+def _pt_remove_useless_vertices(obj, tolerance=0.0001):
+    """
+    Remove collinear vertices (2-edge vertices aligned on a straight segment).
+    Returns number of deleted vertices.
+    """
+    if not obj or not cmds.objExists(obj):
+        return 0
+    shapes = cmds.listRelatives(obj, shapes=True, type='mesh', fullPath=True) or []
+    if not shapes:
+        return 0
+
+    mesh = shapes[0]
+    verts = cmds.ls(mesh + ".vtx[*]", flatten=True) or []
+    to_delete = []
+
+    for v in verts:
+        edges = cmds.polyListComponentConversion(v, toEdge=True, fromVertex=True)
+        edges = cmds.ls(edges, flatten=True) or []
+        if len(edges) != 2:
+            continue
+
+        voisins = []
+        for edge in edges:
+            edge_verts = cmds.polyListComponentConversion(edge, toVertex=True)
+            edge_verts = cmds.ls(edge_verts, flatten=True) or []
+            other = [ev for ev in edge_verts if ev != v]
+            if other:
+                voisins.append(other[0])
+
+        if len(voisins) != 2:
+            continue
+
+        pos_v = cmds.pointPosition(v, world=True)
+        pos_a = cmds.pointPosition(voisins[0], world=True)
+        pos_c = cmds.pointPosition(voisins[1], world=True)
+
+        vec1 = [pos_v[i] - pos_a[i] for i in range(3)]
+        vec2 = [pos_c[i] - pos_v[i] for i in range(3)]
+        cross = [
+            vec1[1] * vec2[2] - vec1[2] * vec2[1],
+            vec1[2] * vec2[0] - vec1[0] * vec2[2],
+            vec1[0] * vec2[1] - vec1[1] * vec2[0]
+        ]
+
+        if all(abs(val) < tolerance for val in cross):
+            to_delete.append(v)
+
+    if to_delete:
+        cmds.select(to_delete, replace=True)
+        cmds.polyDelVertex()
+    cmds.select(obj, r=True)
+    return len(to_delete)
+
+
 def _pt_get_border_edges_of_shell(faces):
     """Return robust border edges for a shell of faces."""
     face_set = set(faces)
@@ -1449,6 +1503,15 @@ class PanelToolTab(QtWidgets.QWidget):
         _pt_debug(state, "Backup created: {}".format(backup), "OK")
         _pt_validation_box("Backup", "Backup created:\n{}".format(backup))
 
+        deleted_vtx = _pt_remove_useless_vertices(obj, tolerance=0.0001)
+        if deleted_vtx:
+            _pt_debug(state, "Cleanup: {} useless collinear vertex/vertices removed.".format(deleted_vtx), "OK")
+            _pt_validation_box("Cleanup", "{} useless vertex/vertices removed before UV steps.".format(deleted_vtx))
+            edges = [e for e in edges if cmds.objExists(e)]
+            if not edges:
+                cmds.warning("Cleanup removed selected edges. Re-select edges and restart.")
+                return
+
         edge_set = short_name+"_panelEdges_set"
         if cmds.objExists(edge_set): cmds.delete(edge_set)
         cmds.sets(edges, name=edge_set)
@@ -1560,6 +1623,9 @@ class PanelToolTab(QtWidgets.QWidget):
             self._sync_bevel_state(); _pt_rebuild_bevel(sn, state)
         else:
             state["is_negative"] = new_neg; state["pending_is_negative"] = new_neg
+            self._sync_bevel_state()
+            if state.get("started", False):
+                _pt_rebuild_bevel(sn, state)
         _pt_restore_mesh_selection(obj)
 
     def _on_boff_field(self, v):
@@ -1684,6 +1750,7 @@ class OverlayMergeTab(QtWidgets.QWidget):
 class CloseGapsTab(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._dist_limit = 10.0
         self._build()
 
     def _build(self):
@@ -1703,15 +1770,23 @@ class CloseGapsTab(QtWidgets.QWidget):
         lay.addLayout(row)
 
         self.dist_field = QtWidgets.QDoubleSpinBox()
-        self.dist_field.setRange(-10.0,10.0); self.dist_field.setValue(10.0)
+        self.dist_field.setRange(-self._dist_limit, self._dist_limit); self.dist_field.setValue(self._dist_limit)
         self.dist_field.setDecimals(4); self.dist_field.setSingleStep(0.1)
         self.dist_field.valueChanged.connect(self._on_dist_change)
         self.dist_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.dist_slider.setRange(-10000,10000); self.dist_slider.setValue(10000)
+        self.dist_slider.setRange(int(-self._dist_limit * 1000), int(self._dist_limit * 1000))
+        self.dist_slider.setValue(int(self._dist_limit * 1000))
         self.dist_slider.sliderMoved.connect(self._on_dist_slider)
 
         frow = QtWidgets.QHBoxLayout()
         frow.addWidget(QtWidgets.QLabel("Value")); frow.addWidget(self.dist_field)
+        self.btn_limit_minus = _step_btn("-")
+        self.btn_limit_plus = _step_btn("+")
+        self.btn_limit_minus.clicked.connect(lambda: self._on_limit_scale(0.1))
+        self.btn_limit_plus.clicked.connect(lambda: self._on_limit_scale(10.0))
+        frow.addWidget(QtWidgets.QLabel("Max"))
+        frow.addWidget(self.btn_limit_minus)
+        frow.addWidget(self.btn_limit_plus)
         lay.addLayout(frow); lay.addWidget(self.dist_slider)
 
         lay.addWidget(_sep())
@@ -1743,10 +1818,22 @@ class CloseGapsTab(QtWidgets.QWidget):
         self.dist_field.blockSignals(True); self.dist_field.setValue(s/1000.0)
         self.dist_field.blockSignals(False); self._update_lbl(s/1000.0)
     def _on_auto(self):
-        d = max(-10.0, min(10.0, _cg_estimate_gap()))
+        d = max(-self._dist_limit, min(self._dist_limit, _cg_estimate_gap()))
         self.dist_field.blockSignals(True); self.dist_field.setValue(d)
         self.dist_field.blockSignals(False)
         self.dist_slider.setValue(int(d*1000)); self.lbl_dist.setText(f"Distance max: {d:.4f}  (auto)")
+
+    def _on_limit_scale(self, factor):
+        new_limit = max(0.001, min(1000000.0, self._dist_limit * factor))
+        if abs(new_limit - self._dist_limit) < 1e-12:
+            return
+        self._dist_limit = new_limit
+        self.dist_field.setRange(-self._dist_limit, self._dist_limit)
+        self.dist_slider.setRange(int(-self._dist_limit * 1000), int(self._dist_limit * 1000))
+        cur = max(-self._dist_limit, min(self._dist_limit, self.dist_field.value()))
+        self.dist_field.blockSignals(True); self.dist_field.setValue(cur); self.dist_field.blockSignals(False)
+        self.dist_slider.blockSignals(True); self.dist_slider.setValue(int(cur * 1000)); self.dist_slider.blockSignals(False)
+        self._update_lbl(cur)
 
 
 class SmartPanelingUI(QtWidgets.QDialog):

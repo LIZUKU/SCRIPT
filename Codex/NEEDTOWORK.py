@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Smart Paneling v2 — Maya Tool Suite."""
+"""Smart Paneling v2 - Maya Tool Suite."""
 
 import maya.cmds as cmds
 import maya.mel  as mel
@@ -268,9 +268,9 @@ def _slider_row(label, spinbox, slider, step_slow=None, step_fast=None):
     top.addWidget(QtWidgets.QLabel(label))
     top.addStretch()
     if step_slow is not None:
-        bm_slow = _step_btn("−")
+        bm_slow = _step_btn("-")
         bp_slow = _step_btn("+")
-        bm_fast = _step_btn("−−")
+        bm_fast = _step_btn("--")
         bp_fast = _step_btn("++")
         for b in [bm_fast, bm_slow]: top.addWidget(b)
         top.addWidget(spinbox)
@@ -548,16 +548,7 @@ def _pt_debug(state, message, level="INFO"):
 
 
 def _pt_validation_box(title, message, icon="information"):
-    try:
-        cmds.confirmDialog(
-            title=title,
-            message=message,
-            button=["OK"],
-            defaultButton="OK",
-            icon=icon
-        )
-    except Exception:
-        print("[PANEL][BOX:{}] {}".format(title, message))
+    print("[PANEL][{}] {}".format(title, message))
 
 
 def _pt_print_summary(state, context="RUN"):
@@ -697,8 +688,31 @@ def _pt_bridge(short_name, state):
     _pt_debug(state, "Bridge complete. {} node(s) created.".format(len(created)))
 
 
+def _pt_edge_index(edge):
+    match = re.search(r"\.e\[(\d+)\]$", edge or "")
+    return int(match.group(1)) if match else None
+
+
+def _pt_expand_to_edge_loops(obj, edges):
+    """Expand edge candidates to their full edge loops."""
+    expanded = set(e for e in (edges or []) if cmds.objExists(e))
+    for edge in list(expanded):
+        edge_idx = _pt_edge_index(edge)
+        if edge_idx is None:
+            continue
+        try:
+            loop_indices = cmds.polySelect(obj, edgeLoop=edge_idx, ns=True) or []
+        except Exception:
+            loop_indices = []
+        for idx in loop_indices:
+            loop_edge = "{}.e[{}]".format(obj, idx)
+            if cmds.objExists(loop_edge):
+                expanded.add(loop_edge)
+    return list(expanded)
+
+
 def _pt_get_side_hard_edges_by_angle(obj, short_name, threshold):
-    """Return side-face edges whose dihedral angle is above the threshold."""
+    """Return side-related hard edges and expand them to complete loops."""
     all_faces  = cmds.ls(obj + ".f[*]", fl=True) or []
     front_raw  = cmds.sets(short_name + "_panelFrontFaces_set", q=True) or []
     back_raw   = cmds.sets(short_name + "_panelBackFaces_set",  q=True) or []
@@ -725,7 +739,7 @@ def _pt_get_side_hard_edges_by_angle(obj, short_name, threshold):
         if n1 is None or n2 is None: continue
         if _pt_angle_between(n1, n2) >= threshold:
             result.append(edge)
-    return result
+    return _pt_expand_to_edge_loops(obj, result)
 
 
 def _pt_bevel(short_name, state):
@@ -1198,7 +1212,7 @@ class PanelToolTab(QtWidgets.QWidget):
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(10,10,10,10); root.setSpacing(5)
 
-        self.btn_start = QtWidgets.QPushButton("▶  START")
+        self.btn_start = QtWidgets.QPushButton("START")
         self.btn_start.setObjectName("redBtn"); self.btn_start.setMinimumHeight(34)
         self.btn_start.clicked.connect(self._on_start)
         root.addWidget(self.btn_start)
@@ -1286,7 +1300,7 @@ class PanelToolTab(QtWidgets.QWidget):
                                    step_slow=1.0, step_fast=5.0))
 
         presets = QtWidgets.QHBoxLayout()
-        for label, angle in [("Preset 90°", 90.0), ("Preset 45°", 45.0)]:
+        for label, angle in [("Preset 90", 90.0), ("Preset 45", 45.0)]:
             b = QtWidgets.QPushButton(label); b.setObjectName("dimBtn")
             b.clicked.connect(lambda _, a=angle: self._set_angle_preset(a))
             presets.addWidget(b)
@@ -1310,8 +1324,8 @@ class PanelToolTab(QtWidgets.QWidget):
 
         root.addWidget(_sep())
         vrow = QtWidgets.QHBoxLayout()
-        bval = QtWidgets.QPushButton("✓  Validate"); bval.setObjectName("greenBtn")
-        brev = QtWidgets.QPushButton("↩  Revert");   brev.setObjectName("orangeBtn")
+        bval = QtWidgets.QPushButton("Validate"); bval.setObjectName("greenBtn")
+        brev = QtWidgets.QPushButton("Revert");   brev.setObjectName("orangeBtn")
         bval.clicked.connect(lambda: _pt_validate(self.state))
         brev.clicked.connect(self._on_revert)
         vrow.addWidget(bval); vrow.addWidget(brev)
@@ -1512,8 +1526,8 @@ class OverlayMergeTab(QtWidgets.QWidget):
 
         lay.addWidget(_section("Actions"))
         brow = QtWidgets.QHBoxLayout(); brow.setSpacing(6)
-        self.btn_start   = _icon_btn("play",  "START — preview live")
-        self.btn_stop    = _icon_btn("stop",  "STOP — keep current result")
+        self.btn_start   = _icon_btn("play",  "START - preview live")
+        self.btn_stop    = _icon_btn("stop",  "STOP - keep current result")
         self.btn_reset   = _icon_btn("reset", "Reset to baseline")
         self.btn_close_o = _icon_btn("close", "Close / restore")
         for b in [self.btn_start,self.btn_stop,self.btn_reset,self.btn_close_o]: brow.addWidget(b)
@@ -1566,7 +1580,7 @@ class OverlayMergeTab(QtWidgets.QWidget):
     def _on_start(self):
         _OM_STATE["running"]=True; self._set_status("RUNNING","statusLabel"); _om_preview_update()
     def _on_stop(self):
-        _om_stop_keep(); self._set_status("STOPPED — result kept","statusOk")
+        _om_stop_keep(); self._set_status("STOPPED - result kept","statusOk")
     def _on_reset(self):
         _om_reset()
         if _OM_STATE["running"]: _om_preview_update()
@@ -1611,14 +1625,14 @@ class CloseGapsTab(QtWidgets.QWidget):
         lay.addWidget(_sep())
         lay.addWidget(_section("Actions"))
 
-        btn_mid = QtWidgets.QPushButton("⇔  Close to Midpoint")
+        btn_mid = QtWidgets.QPushButton("Close to Midpoint")
         btn_mid.setObjectName("greenBtn"); btn_mid.setMinimumHeight(34)
         btn_mid.clicked.connect(lambda: _cg_close_gaps(self.dist_field.value()))
         lay.addWidget(btn_mid)
 
         dr = QtWidgets.QHBoxLayout()
-        bg1 = QtWidgets.QPushButton("→  Toward Group 1"); bg1.setObjectName("dimBtn")
-        bg2 = QtWidgets.QPushButton("←  Toward Group 2"); bg2.setObjectName("dimBtn")
+        bg1 = QtWidgets.QPushButton("Toward Group 1"); bg1.setObjectName("dimBtn")
+        bg2 = QtWidgets.QPushButton("Toward Group 2"); bg2.setObjectName("dimBtn")
         bg1.clicked.connect(lambda: _cg_close_dir(self.dist_field.value(),"g1"))
         bg2.clicked.connect(lambda: _cg_close_dir(self.dist_field.value(),"g2"))
         dr.addWidget(bg1); dr.addWidget(bg2); lay.addLayout(dr)
@@ -1674,9 +1688,9 @@ class SmartPanelingUI(QtWidgets.QDialog):
         scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         scroll.setStyleSheet("background:transparent;")
 
-        self.tabs.addTab(scroll,           "⬡  Panel Tool")
-        self.tabs.addTab(self.tab_overlay, "◎  Overlay Merge")
-        self.tabs.addTab(self.tab_gaps,    "⇔  Close Gaps")
+        self.tabs.addTab(scroll,           "Panel Tool")
+        self.tabs.addTab(self.tab_overlay, "Overlay Merge")
+        self.tabs.addTab(self.tab_gaps,    "Close Gaps")
         self.tabs.currentChanged.connect(self._fit_to_current_tab)
         main.addWidget(self.tabs)
         self._fit_to_current_tab()

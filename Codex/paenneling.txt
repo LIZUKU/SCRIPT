@@ -477,6 +477,7 @@ def _pt_get_border_edges_of_shell(faces):
     all_edges = cmds.ls(
         cmds.polyListComponentConversion(faces, fromFace=True, toEdge=True),
         fl=True) or []
+    all_edges = list(dict.fromkeys(all_edges))
 
     border = []
     for e in all_edges:
@@ -487,7 +488,7 @@ def _pt_get_border_edges_of_shell(faces):
         inside = sum(1 for f in adj_faces if f in face_set)
         if inside == 1:   # edge partagé par une seule face du groupe -> bordure
             border.append(e)
-    return border
+    return list(dict.fromkeys(border))
 
 def _pt_edge_vertices(edge):
     verts = cmds.ls(cmds.polyListComponentConversion(edge, fromEdge=True, toVertex=True), fl=True) or []
@@ -544,6 +545,78 @@ def _pt_order_border_edges(edges):
             ordered.append(e)
     return ordered
 
+def _pt_split_border_edges_into_loops(edges):
+    """
+    Sépare une liste d'edges de bordure en boucles indépendantes.
+    Utile quand un shell contient plusieurs frontières (trous / ngons complexes).
+    """
+    edges = [e for e in (edges or []) if cmds.objExists(e)]
+    if not edges:
+        return []
+
+    edge_to_verts = {}
+    v_to_edges = {}
+    for e in edges:
+        verts = _pt_edge_vertices(e)
+        if len(verts) != 2:
+            continue
+        edge_to_verts[e] = verts
+        for v in verts:
+            v_to_edges.setdefault(v, []).append(e)
+
+    loops = []
+    unvisited = set(edge_to_verts.keys())
+    while unvisited:
+        seed = next(iter(unvisited))
+        stack = [seed]
+        chunk = []
+        while stack:
+            cur = stack.pop()
+            if cur not in unvisited:
+                continue
+            unvisited.remove(cur)
+            chunk.append(cur)
+            for v in edge_to_verts[cur]:
+                for nxt in v_to_edges.get(v, []):
+                    if nxt in unvisited:
+                        stack.append(nxt)
+        if chunk:
+            loops.append(_pt_order_border_edges(chunk))
+    return loops
+
+def _pt_loop_center(edges):
+    if not edges:
+        return (0.0, 0.0, 0.0)
+    mids = [_pt_edge_midpoint(e) for e in edges]
+    count = float(len(mids))
+    return (
+        sum(p[0] for p in mids) / count,
+        sum(p[1] for p in mids) / count,
+        sum(p[2] for p in mids) / count,
+    )
+
+def _pt_pair_loops_by_center(front_loops, back_loops):
+    """
+    Pairing greedy des boucles front/back par proximité de centre.
+    """
+    pairs = []
+    remaining = list(back_loops)
+    for f_loop in front_loops:
+        if not remaining:
+            break
+        fc = _pt_loop_center(f_loop)
+        best = min(
+            remaining,
+            key=lambda b: (
+                (_pt_loop_center(b)[0] - fc[0]) ** 2 +
+                (_pt_loop_center(b)[1] - fc[1]) ** 2 +
+                (_pt_loop_center(b)[2] - fc[2]) ** 2
+            ),
+        )
+        pairs.append((f_loop, best))
+        remaining.remove(best)
+    return pairs
+
 def _pt_align_bridge_loops(front_edges, back_edges):
     if len(front_edges) != len(back_edges):
         return front_edges, back_edges
@@ -583,30 +656,37 @@ def _pt_bridge(short_name, state):
     created      = []
 
     for f_shell, b_shell in pairs:
-        f_border = _pt_order_border_edges(_pt_get_border_edges_of_shell(f_shell))
-        b_border = _pt_order_border_edges(_pt_get_border_edges_of_shell(b_shell))
+        f_border = _pt_get_border_edges_of_shell(f_shell)
+        b_border = _pt_get_border_edges_of_shell(b_shell)
 
         if not f_border or not b_border:
             cmds.warning("Aucun edge de bordure pour ce shell, skip.")
             continue
 
-        # Vérification : même nombre d'edges de chaque côté (requis par polyBridgeEdge)
-        if len(f_border) != len(b_border):
-            cmds.warning(
-                f"Bridge: {len(f_border)} edges front vs {len(b_border)} edges back — "
-                "topologies différentes, bridge skippé pour cette paire.")
+        f_loops = _pt_split_border_edges_into_loops(f_border)
+        b_loops = _pt_split_border_edges_into_loops(b_border)
+        if not f_loops or not b_loops:
+            cmds.warning("Impossible d'extraire les boucles de bordure, skip.")
             continue
-        f_border, b_border = _pt_align_bridge_loops(f_border, b_border)
-        edges = f_border + b_border
 
-        try:
-            cmds.select(edges, r=True)
-            bridge = cmds.polyBridgeEdge(
-                edges, divisions=0, twist=0, taper=1, curveType=0)[0]
-            cmds.setAttr(bridge + ".sourceDirection", 0 if state["is_negative"] else 1)
-            created.append(bridge)
-        except Exception as e:
-            cmds.warning(f"polyBridgeEdge a échoué : {e}")
+        for f_loop, b_loop in _pt_pair_loops_by_center(f_loops, b_loops):
+            if len(f_loop) != len(b_loop):
+                cmds.warning(
+                    f"Bridge loop: {len(f_loop)} edges front vs {len(b_loop)} edges back — "
+                    "topologies différentes, loop skippée.")
+                continue
+
+            f_loop, b_loop = _pt_align_bridge_loops(f_loop, b_loop)
+            edges = f_loop + b_loop
+
+            try:
+                cmds.select(edges, r=True)
+                bridge = cmds.polyBridgeEdge(
+                    edges, divisions=0, twist=0, taper=1, curveType=0)[0]
+                cmds.setAttr(bridge + ".sourceDirection", 0 if state["is_negative"] else 1)
+                created.append(bridge)
+            except Exception as e:
+                cmds.warning(f"polyBridgeEdge a échoué : {e}")
 
     state["bridge_nodes"] = created
     cmds.select(clear=True)

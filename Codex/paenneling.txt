@@ -436,6 +436,86 @@ def _pt_get_border_edges_of_shell(faces):
             border.append(e)
     return border
 
+def _pt_edge_vertices(edge):
+    verts = cmds.ls(cmds.polyListComponentConversion(edge, fromEdge=True, toVertex=True), fl=True) or []
+    return verts[:2]
+
+def _pt_edge_midpoint(edge):
+    verts = _pt_edge_vertices(edge)
+    if len(verts) < 2:
+        return (0.0, 0.0, 0.0)
+    p0 = cmds.xform(verts[0], q=True, ws=True, t=True)
+    p1 = cmds.xform(verts[1], q=True, ws=True, t=True)
+    return ((p0[0] + p1[0]) * 0.5, (p0[1] + p1[1]) * 0.5, (p0[2] + p1[2]) * 0.5)
+
+def _pt_order_border_edges(edges):
+    """Retourne les edges triés en boucle continue (plus stable pour polyBridgeEdge)."""
+    edges = [e for e in (edges or []) if cmds.objExists(e)]
+    if len(edges) < 2:
+        return edges
+
+    edge_to_verts = {}
+    v_to_edges = {}
+    for e in edges:
+        verts = _pt_edge_vertices(e)
+        if len(verts) != 2:
+            continue
+        edge_to_verts[e] = verts
+        for v in verts:
+            v_to_edges.setdefault(v, []).append(e)
+
+    if not edge_to_verts:
+        return edges
+
+    start = next(iter(edge_to_verts))
+    ordered = [start]
+    used = {start}
+    cur_vert = edge_to_verts[start][1]
+
+    while len(ordered) < len(edge_to_verts):
+        nxt = None
+        for candidate in v_to_edges.get(cur_vert, []):
+            if candidate in used:
+                continue
+            nxt = candidate
+            break
+        if not nxt:
+            break
+        ordered.append(nxt)
+        used.add(nxt)
+        v0, v1 = edge_to_verts[nxt]
+        cur_vert = v1 if v0 == cur_vert else v0
+
+    for e in edges:
+        if e not in used:
+            ordered.append(e)
+    return ordered
+
+def _pt_align_bridge_loops(front_edges, back_edges):
+    if len(front_edges) != len(back_edges):
+        return front_edges, back_edges
+    n = len(front_edges)
+    if n < 2:
+        return front_edges, back_edges
+
+    front_mid = [_pt_edge_midpoint(e) for e in front_edges]
+    back_mid = [_pt_edge_midpoint(e) for e in back_edges]
+
+    def score(a, b):
+        return sum((a[i][0]-b[i][0])**2 + (a[i][1]-b[i][1])**2 + (a[i][2]-b[i][2])**2 for i in range(n))
+
+    best_edges = back_edges
+    best_score = None
+    variants = [(back_edges, back_mid), (list(reversed(back_edges)), list(reversed(back_mid)))]
+    for edges_var, mids_var in variants:
+        for shift in range(n):
+            mids_shift = mids_var[shift:] + mids_var[:shift]
+            cur_score = score(front_mid, mids_shift)
+            if best_score is None or cur_score < best_score:
+                best_score = cur_score
+                best_edges = edges_var[shift:] + edges_var[:shift]
+    return front_edges, best_edges
+
 
 def _pt_bridge(short_name, state):
     """Bridge robuste : border edges via comptage, pas via MEL select."""
@@ -450,12 +530,10 @@ def _pt_bridge(short_name, state):
     created      = []
 
     for f_shell, b_shell in pairs:
-        f_border = _pt_get_border_edges_of_shell(f_shell)
-        b_border = _pt_get_border_edges_of_shell(b_shell)
-        edges    = _pt_merge_unique(f_border, b_border)
-        edges    = [e for e in edges if cmds.objExists(e)]
+        f_border = _pt_order_border_edges(_pt_get_border_edges_of_shell(f_shell))
+        b_border = _pt_order_border_edges(_pt_get_border_edges_of_shell(b_shell))
 
-        if not edges:
+        if not f_border or not b_border:
             cmds.warning("Aucun edge de bordure pour ce shell, skip.")
             continue
 
@@ -465,6 +543,8 @@ def _pt_bridge(short_name, state):
                 f"Bridge: {len(f_border)} edges front vs {len(b_border)} edges back — "
                 "topologies différentes, bridge skippé pour cette paire.")
             continue
+        f_border, b_border = _pt_align_bridge_loops(f_border, b_border)
+        edges = f_border + b_border
 
         try:
             cmds.select(edges, r=True)
@@ -915,6 +995,7 @@ class PanelToolTab(QtWidgets.QWidget):
             "bevel_node":None,
             "bevel_offset":0.01,"bevel_segments":1,"bevel_mitering":0,
             "bevel_miter_along":1,"bevel_chamfer":1,
+            "bevel_offset_unlocked":False,
             "ui":{},
         }
         self._build()
@@ -924,8 +1005,8 @@ class PanelToolTab(QtWidgets.QWidget):
         s = self.state
         s["bevel_offset"]      = self.w_boff.value()
         s["bevel_segments"]    = self.w_bseg.value()
-        s["bevel_mitering"]    = self.w_mitering.currentIndex()
-        s["bevel_miter_along"] = int(self.w_miter_along.currentText())
+        s["bevel_mitering"]    = self.w_mitering.currentData()
+        s["bevel_miter_along"] = self.w_miter_along.currentData()
         s["bevel_chamfer"]     = 1 if self.w_chamfer.isChecked() else 0
 
     def _apply_bevel_live(self):
@@ -944,7 +1025,8 @@ class PanelToolTab(QtWidgets.QWidget):
         for w in [self.w_extr, self.w_extr_sl,
                   self.w_boff,  self.w_boff_sl,
                   self.w_bseg,  self.w_bseg_sl,
-                  self.w_mitering, self.w_miter_along, self.w_chamfer]:
+                  self.w_mitering, self.w_miter_along, self.w_chamfer,
+                  self.w_boff_unlock]:
             w.setEnabled(en)
 
     # ── build UI ─────────────────────────────────────────────
@@ -965,13 +1047,13 @@ class PanelToolTab(QtWidgets.QWidget):
         root.addWidget(_sep())
         root.addWidget(_section("Extrude"))
 
-        # Extrude : range -5 / +5, step 0.01
+        # Extrude : range -10 / +10, précision fine
         self.w_extr = QtWidgets.QDoubleSpinBox()
         self.w_extr.setRange(-1000,1000); self.w_extr.setValue(1.0)
-        self.w_extr.setSingleStep(0.01); self.w_extr.setDecimals(3)
+        self.w_extr.setSingleStep(0.001); self.w_extr.setDecimals(4)
         self.w_extr.setEnabled(False)
         self.w_extr_sl = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.w_extr_sl.setRange(-500,500); self.w_extr_sl.setValue(100)
+        self.w_extr_sl.setRange(-10000,10000); self.w_extr_sl.setValue(1000)
         self.w_extr_sl.setEnabled(False)
         self.w_extr_sl.sliderMoved.connect(self._on_extr_drag)
         self.w_extr_sl.sliderReleased.connect(self._on_extr_release)
@@ -981,18 +1063,22 @@ class PanelToolTab(QtWidgets.QWidget):
         root.addWidget(_sep())
         root.addWidget(_section("Bevel"))
 
-        # Bevel offset : 0 – 0.5 visible, step fin 0.001 / step rapide 0.01
+        # Bevel offset : 0 – 0.05 par défaut + unlock range étendu
         self.w_boff = QtWidgets.QDoubleSpinBox()
-        self.w_boff.setRange(0,1000); self.w_boff.setValue(0.01)
+        self.w_boff.setRange(0,0.05); self.w_boff.setValue(0.01)
         self.w_boff.setSingleStep(0.001); self.w_boff.setDecimals(4)
         self.w_boff.setEnabled(False)
         self.w_boff_sl = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.w_boff_sl.setRange(0,5000); self.w_boff_sl.setValue(10)   # /1000 → 0.01
+        self.w_boff_sl.setRange(0,50); self.w_boff_sl.setValue(10)   # /1000 → 0.01
         self.w_boff_sl.setEnabled(False)
         self.w_boff.valueChanged.connect(self._on_boff_field)
         self.w_boff_sl.sliderMoved.connect(self._on_boff_slider)
         root.addLayout(_slider_row("Offset", self.w_boff, self.w_boff_sl,
                                    step_slow=0.001, step_fast=0.01))
+        self.w_boff_unlock = QtWidgets.QCheckBox("Unlock offset range (0 → 1.0)")
+        self.w_boff_unlock.setEnabled(False)
+        self.w_boff_unlock.toggled.connect(self._on_boff_unlock)
+        root.addWidget(self.w_boff_unlock)
 
         # Bevel segments : 0 – 3 par défaut (max 20)
         self.w_bseg = QtWidgets.QSpinBox()
@@ -1010,12 +1096,18 @@ class PanelToolTab(QtWidgets.QWidget):
         grid = QtWidgets.QGridLayout(); grid.setSpacing(4)
 
         self.w_mitering = QtWidgets.QComboBox(); self.w_mitering.setEnabled(False)
-        for i in range(5): self.w_mitering.addItem(str(i))
+        self.w_mitering.addItem("Auto", 0)
+        self.w_mitering.addItem("Uniform", 1)
+        self.w_mitering.addItem("Patch", 2)
+        self.w_mitering.addItem("Radial", 3)
+        self.w_mitering.addItem("Proximity", 4)
         self.w_mitering.currentIndexChanged.connect(self._apply_bevel_live)
         grid.addWidget(QtWidgets.QLabel("Mitering"),0,0); grid.addWidget(self.w_mitering,0,1)
 
         self.w_miter_along = QtWidgets.QComboBox(); self.w_miter_along.setEnabled(False)
-        for i in [1,2,3]: self.w_miter_along.addItem(str(i))
+        self.w_miter_along.addItem("Auto", 1)
+        self.w_miter_along.addItem("Center", 2)
+        self.w_miter_along.addItem("Edge", 3)
         self.w_miter_along.currentIndexChanged.connect(self._apply_bevel_live)
         grid.addWidget(QtWidgets.QLabel("Miter Along"),1,0); grid.addWidget(self.w_miter_along,1,1)
 
@@ -1140,18 +1232,18 @@ class PanelToolTab(QtWidgets.QWidget):
 
     # Extrude
     def _on_extr_drag(self, val):
-        v = val/100.0
+        v = val/1000.0
         self.w_extr.blockSignals(True); self.w_extr.setValue(v); self.w_extr.blockSignals(False)
         en = self.state.get("extrude_node")
         if en and cmds.objExists(en): cmds.setAttr(en+".localTranslateZ", v)
         self.state["pending_is_negative"] = v < 0.0
 
     def _on_extr_release(self):
-        v = self.w_extr_sl.value()/100.0
+        v = self.w_extr_sl.value()/1000.0
         self._finalize_extrude(v)
 
     def _on_extr_field(self, v):
-        self.w_extr_sl.blockSignals(True); self.w_extr_sl.setValue(int(v*100))
+        self.w_extr_sl.blockSignals(True); self.w_extr_sl.setValue(int(v*1000))
         self.w_extr_sl.blockSignals(False)
         en = self.state.get("extrude_node")
         if en and cmds.objExists(en): cmds.setAttr(en+".localTranslateZ", v)
@@ -1179,6 +1271,14 @@ class PanelToolTab(QtWidgets.QWidget):
     def _on_boff_slider(self, s):
         self.w_boff.blockSignals(True); self.w_boff.setValue(s/1000.0)
         self.w_boff.blockSignals(False); self._apply_bevel_live()
+
+    def _on_boff_unlock(self, unlocked):
+        self.state["bevel_offset_unlocked"] = bool(unlocked)
+        max_v = 1.0 if unlocked else 0.05
+        self.w_boff.setMaximum(max_v)
+        self.w_boff_sl.setRange(0, int(max_v * 1000))
+        if self.w_boff.value() > max_v:
+            self.w_boff.setValue(max_v)
 
     # Bevel segments
     def _on_bseg_field(self, v):

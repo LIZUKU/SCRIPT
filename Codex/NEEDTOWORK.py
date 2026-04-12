@@ -490,6 +490,76 @@ def _pt_get_border_edges_of_shell(faces):
             border.append(e)
     return border
 
+def _pt_filter_open_border_edges(edges):
+    """
+    Garde uniquement les edges qui sont de vraies borders de mesh
+    (adjacentes à une seule face dans le mesh complet).
+    """
+    out = []
+    for e in (edges or []):
+        if not cmds.objExists(e):
+            continue
+        adj_faces = cmds.ls(
+            cmds.polyListComponentConversion(e, fromEdge=True, toFace=True),
+            fl=True
+        ) or []
+        adj_faces = [f for f in adj_faces if ".f[" in f and cmds.objExists(f)]
+        if len(adj_faces) == 1:
+            out.append(e)
+    return out
+
+def _pt_split_edges_into_loops(edges):
+    """
+    Découpe une liste d'edges en composantes connexes (loops/boucles).
+    """
+    remaining = set(edges or [])
+    loops = []
+    while remaining:
+        seed = next(iter(remaining))
+        stack = [seed]
+        loop = []
+        while stack:
+            cur = stack.pop()
+            if cur not in remaining:
+                continue
+            remaining.remove(cur)
+            loop.append(cur)
+            linked = cmds.ls(
+                cmds.polyListComponentConversion(cur, fromEdge=True, toEdge=True),
+                fl=True
+            ) or []
+            for e in linked:
+                if e in remaining:
+                    stack.append(e)
+        if loop:
+            loops.append(loop)
+    return loops
+
+def _pt_center_from_edges(edges):
+    verts = cmds.ls(
+        cmds.polyListComponentConversion(edges or [], fromEdge=True, toVertex=True),
+        fl=True
+    ) or []
+    if not verts:
+        return [0.0, 0.0, 0.0]
+    pts = [cmds.xform(v, q=True, ws=True, t=True) for v in verts]
+    return [sum(c)/len(c) for c in zip(*pts)]
+
+def _pt_pair_edge_loops_by_center(front_loops, back_loops):
+    pairs = []
+    remaining = list(back_loops)
+    for fl in front_loops:
+        if not remaining:
+            break
+        fc = _pt_center_from_edges(fl)
+        best = min(
+            remaining,
+            key=lambda bl: sum((_pt_center_from_edges(bl)[i] - fc[i]) ** 2 for i in range(3))
+        )
+        pairs.append((fl, best))
+        remaining.remove(best)
+    return pairs
+
 def _pt_get_perimeter_edges_from_faces(faces):
     faces = [f for f in (faces or []) if ".f[" in f and cmds.objExists(f)]
     if not faces:
@@ -580,11 +650,13 @@ def _pt_bridge(short_name, state):
     created = []
 
     for i, (f_shell, b_shell) in enumerate(pairs, start=1):
-        f_border = _pt_get_perimeter_edges_from_faces(f_shell)
-        b_border = _pt_get_perimeter_edges_from_faces(b_shell)
+        f_border = _pt_get_border_edges_of_shell(f_shell)
+        b_border = _pt_get_border_edges_of_shell(b_shell)
 
         f_border = [e for e in f_border if cmds.objExists(e)]
         b_border = [e for e in b_border if cmds.objExists(e)]
+        f_border = _pt_filter_open_border_edges(f_border)
+        b_border = _pt_filter_open_border_edges(b_border)
         _pt_debug(
             state,
             "Pair {} -> front edges: {} | back edges: {}".format(
@@ -603,52 +675,62 @@ def _pt_bridge(short_name, state):
             )
             continue
 
-        if len(f_border) != len(b_border):
-            cmds.warning(
-                "Bridge skip : {} edges front vs {} edges back".format(
-                    len(f_border), len(b_border)
+        f_loops = _pt_split_edges_into_loops(f_border)
+        b_loops = _pt_split_edges_into_loops(b_border)
+        loop_pairs = _pt_pair_edge_loops_by_center(f_loops, b_loops)
+        _pt_debug(
+            state,
+            "Pair {} -> loops front: {} | back: {} | appariées: {}".format(
+                i, len(f_loops), len(b_loops), len(loop_pairs)
+            )
+        )
+
+        for j, (f_loop, b_loop) in enumerate(loop_pairs, start=1):
+            if len(f_loop) != len(b_loop):
+                cmds.warning(
+                    "Bridge skip pair {} loop {} : {} edges front vs {} edges back".format(
+                        i, j, len(f_loop), len(b_loop)
+                    )
                 )
-            )
-            _pt_validation_box(
-                "Bridge Mismatch",
-                "Pair {}: {} edges front vs {} edges back.".format(
-                    i, len(f_border), len(b_border)
-                ),
-                icon="warning"
-            )
-            continue
+                _pt_debug(
+                    state,
+                    "Pair {} loop {} ignorée: {} vs {} edges.".format(
+                        i, j, len(f_loop), len(b_loop)
+                    ),
+                    "WARNING"
+                )
+                continue
 
-        try:
-            cmds.select(f_border + b_border, r=True)
+            try:
+                cmds.select(f_loop + b_loop, r=True)
 
-            bridge = cmds.polyBridgeEdge(
-                f_border + b_border,
-                divisions=0,
-                twist=0,
-                taper=1,
-                curveType=0
-            )[0]
+                bridge = cmds.polyBridgeEdge(
+                    f_loop + b_loop,
+                    divisions=0,
+                    twist=0,
+                    taper=1,
+                    curveType=0
+                )[0]
 
-            cmds.setAttr(
-                bridge + ".sourceDirection",
-                _pt_get_bridge_source_direction(state["is_negative"])
-            )
-            created.append(bridge)
-            _pt_validation_box(
-                "Bridge OK",
-                "Pair {} bridgée avec succès.\nNode: {}".format(i, bridge),
-                icon="information"
-            )
-            _pt_debug(state, "Pair {} bridgée avec succès (node: {}).".format(i, bridge), "OK")
+                cmds.setAttr(
+                    bridge + ".sourceDirection",
+                    _pt_get_bridge_source_direction(state["is_negative"])
+                )
+                created.append(bridge)
+                _pt_debug(
+                    state,
+                    "Pair {} loop {} bridgée (node: {}).".format(i, j, bridge),
+                    "OK"
+                )
 
-        except Exception as e:
-            cmds.warning("polyBridgeEdge a échoué : {}".format(e))
-            _pt_validation_box(
-                "Bridge Failed",
-                "Pair {}: polyBridgeEdge a échoué.\n{}".format(i, e),
-                icon="critical"
-            )
-            _pt_debug(state, "Pair {} échec bridge: {}".format(i, e), "ERROR")
+            except Exception as e:
+                cmds.warning("polyBridgeEdge a échoué : {}".format(e))
+                _pt_validation_box(
+                    "Bridge Failed",
+                    "Pair {} loop {}: polyBridgeEdge a échoué.\n{}".format(i, j, e),
+                    icon="critical"
+                )
+                _pt_debug(state, "Pair {} loop {} échec bridge: {}".format(i, j, e), "ERROR")
 
     state["bridge_nodes"] = created
     cmds.select(clear=True)

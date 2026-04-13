@@ -1453,7 +1453,7 @@ class PanelToolTab(QtWidgets.QWidget):
         boff_range_row.addWidget(QtWidgets.QLabel("Range"))
         self.w_boff_range_minus = _step_btn("-")
         self.w_boff_range_plus = _step_btn("+")
-        self.w_boff_range_lbl = QtWidgets.QLabel("0 → {:.4f}".format(self._boff_range_limit))
+        self.w_boff_range_lbl = QtWidgets.QLabel("0 ? {:.4f}".format(self._boff_range_limit))
         self.w_boff_range_minus.clicked.connect(lambda: self._change_boff_range(0.5))
         self.w_boff_range_plus.clicked.connect(lambda: self._change_boff_range(2.0))
         boff_range_row.addWidget(self.w_boff_range_minus)
@@ -1742,7 +1742,7 @@ class PanelToolTab(QtWidgets.QWidget):
         self.w_boff_sl.setRange(0, int(self._boff_range_limit * self._boff_slider_scale))
         self.w_boff.blockSignals(True); self.w_boff.setValue(cur); self.w_boff.blockSignals(False)
         self.w_boff_sl.blockSignals(True); self.w_boff_sl.setValue(int(cur * self._boff_slider_scale)); self.w_boff_sl.blockSignals(False)
-        self.w_boff_range_lbl.setText("0 → {:.4f}".format(self._boff_range_limit))
+        self.w_boff_range_lbl.setText("0 ? {:.4f}".format(self._boff_range_limit))
         self._apply_bevel_live()
 
     def _on_bseg_field(self, v):

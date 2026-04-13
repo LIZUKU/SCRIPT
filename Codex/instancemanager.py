@@ -1,35 +1,23 @@
 # -*- coding: utf-8 -*-
 """
 =============================================================================
-INSTANCE ORGANIZER PRO v1.0
+INSTANCE ORGANIZER PRO v1.1
 -----------------------------------------------------------------------------
 Tool Maya pour organiser un mesh source + ses instances liées.
 Pensé pour les gros assets, paneling, répétitions, modular kits.
-
-Fonctions:
-- Sélection du mesh source
-- Création automatique de la structure Outliner
-- Création d'instances liées (duplicate special / instance)
-- Sélection rapide du source / des instances / du groupe asset
-- Hide / Show base et instances
-- Recentrage du source au monde
-- Rename auto des instances
-- Bake des instances en meshes réels
-- UI PySide inspirée d'un tool de prod Maya
-
-Compatible: Maya 2022 - 2025
 =============================================================================
 """
+
+import contextlib
+import math
 
 import maya.cmds as cmds
 
 # Qt imports - Maya 2022-2024 use PySide2, Maya 2025+ uses PySide6
 try:
-    from PySide2 import QtWidgets, QtCore, QtGui
-    PYSIDE_VERSION = 2
+    from PySide2 import QtWidgets, QtCore
 except ImportError:
-    from PySide6 import QtWidgets, QtCore, QtGui
-    PYSIDE_VERSION = 6
+    from PySide6 import QtWidgets, QtCore
 
 try:
     from shiboken2 import wrapInstance
@@ -39,13 +27,13 @@ except ImportError:
 import maya.OpenMayaUI as omui
 
 
-# ============================================================
-# GLOBAL CONSTANTS
-# ============================================================
 WINDOW_TITLE = "Instance Organizer Pro"
 ACCENT_RED_BG = "#5a2a2a"
 ACCENT_RED_BORDER = "#e84d4d"
 ACCENT_RED_TEXT = "#e84d4d"
+
+SOURCE_COLOR_INDEX = 13   # red
+INSTANCE_COLOR_INDEX = 18  # cyan
 
 
 # ============================================================
@@ -55,7 +43,7 @@ def get_maya_main_window():
     try:
         main_window_ptr = omui.MQtUtil.mainWindow()
         return wrapInstance(int(main_window_ptr), QtWidgets.QWidget)
-    except:
+    except Exception:
         return None
 
 
@@ -64,7 +52,7 @@ def _safe_exists(obj):
         return False
     try:
         return cmds.objExists(obj)
-    except:
+    except Exception:
         return False
 
 
@@ -74,7 +62,7 @@ def _safe_delete(obj):
     try:
         if cmds.objExists(obj):
             cmds.delete(obj)
-    except:
+    except Exception:
         pass
 
 
@@ -86,14 +74,14 @@ def _warning(msg):
     cmds.warning(msg)
     try:
         cmds.inViewMessage(amg=msg, pos='botLeft', fade=True)
-    except:
+    except Exception:
         pass
 
 
 def _info(msg):
     try:
         cmds.inViewMessage(amg=msg, pos='botLeft', fade=True)
-    except:
+    except Exception:
         pass
 
 
@@ -103,7 +91,7 @@ def _is_transform_with_shape(obj):
     if cmds.nodeType(obj) != "transform":
         return False
     shapes = cmds.listRelatives(obj, s=True, f=True) or []
-    return len(shapes) > 0
+    return bool(shapes)
 
 
 def _find_first_valid_transform(selection):
@@ -113,6 +101,79 @@ def _find_first_valid_transform(selection):
         if _safe_exists(obj) and cmds.nodeType(obj) == "transform":
             return obj
     return None
+
+
+def _set_override_color(transform, color_index):
+    if not _safe_exists(transform):
+        return
+    shapes = cmds.listRelatives(transform, s=True, f=True) or []
+    for shape in shapes:
+        try:
+            cmds.setAttr(shape + ".overrideEnabled", 1)
+            cmds.setAttr(shape + ".overrideRGBColors", 0)
+            cmds.setAttr(shape + ".overrideColor", color_index)
+        except Exception:
+            pass
+
+
+def _lock_transform_channels(transform, lock=True):
+    if not _safe_exists(transform):
+        return
+    for attr in ["tx", "ty", "tz", "rx", "ry", "rz"]:
+        plug = "{}.{}".format(transform, attr)
+        try:
+            cmds.setAttr(plug, lock=lock, keyable=not lock, channelBox=not lock)
+        except Exception:
+            pass
+
+
+def _safe_name(base_name):
+    candidate = base_name
+    if not _safe_exists(candidate):
+        return candidate
+    i = 1
+    while _safe_exists("{}_{}".format(base_name, i)):
+        i += 1
+    return "{}_{}".format(base_name, i)
+
+
+def _ensure_attr(node, attr, attr_type="bool", default_value=None):
+    if not _safe_exists(node):
+        return
+    if cmds.attributeQuery(attr, node=node, exists=True):
+        return
+    if attr_type == "string":
+        cmds.addAttr(node, ln=attr, dt="string")
+        if default_value is not None:
+            cmds.setAttr("{}.{}".format(node, attr), str(default_value), type="string")
+    elif attr_type == "bool":
+        cmds.addAttr(node, ln=attr, at="bool", dv=1 if default_value else 0)
+    else:
+        cmds.addAttr(node, ln=attr, at=attr_type)
+
+
+def _tag_node(node, is_source=False, is_instance=False, asset_name=""):
+    _ensure_attr(node, "isSource", "bool", is_source)
+    _ensure_attr(node, "isInstance", "bool", is_instance)
+    _ensure_attr(node, "assetName", "string", asset_name)
+    try:
+        cmds.setAttr("{}.isSource".format(node), 1 if is_source else 0)
+        cmds.setAttr("{}.isInstance".format(node), 1 if is_instance else 0)
+        cmds.setAttr("{}.assetName".format(node), asset_name, type="string")
+    except Exception:
+        pass
+
+
+@contextlib.contextmanager
+def _undo_chunk():
+    try:
+        cmds.undoInfo(openChunk=True)
+        yield
+    finally:
+        try:
+            cmds.undoInfo(closeChunk=True)
+        except Exception:
+            pass
 
 
 # ============================================================
@@ -166,10 +227,6 @@ def apply_shared_style(widget):
             background-color: #454545;
         }}
 
-        QPushButton:pressed {{
-            background-color: #2a2a2a;
-        }}
-
         QPushButton#primaryBtn {{
             background-color: {ACCENT_RED_BG};
             color: #ffffff;
@@ -189,7 +246,7 @@ def apply_shared_style(widget):
             background-color: #4a5a6a;
         }}
 
-        QLineEdit, QSpinBox, QDoubleSpinBox {{
+        QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
             background-color: #252525;
             color: #b0b0b0;
             border: 1px solid #3a3a3a;
@@ -214,27 +271,6 @@ def apply_shared_style(widget):
         QCheckBox::indicator:checked {{
             background-color: {ACCENT_RED_BG};
             border-color: {ACCENT_RED_BORDER};
-        }}
-
-        QSlider::groove:horizontal {{
-            height: 3px;
-            background: #1a1a1a;
-            border-radius: 1px;
-        }}
-
-        QSlider::handle:horizontal {{
-            background: #888888;
-            width: 12px;
-            margin: -5px 0;
-            border-radius: 6px;
-        }}
-
-        QSlider::handle:horizontal:hover {{
-            background: #aaaaaa;
-        }}
-
-        QFrame {{
-            border: none;
         }}
     """)
 
@@ -309,20 +345,28 @@ class InstanceAssetManager(object):
 
     def _sanitize_asset_name(self, text):
         text = (text or "Asset").strip()
-        text = text.replace(" ", "_")
-        return text
+        return text.replace(" ", "_")
 
     def set_asset_name(self, text):
         self.asset_name = self._sanitize_asset_name(text)
 
-    def set_source_from_selection(self):
+    def auto_pick_source_from_selection(self):
         sel = cmds.ls(sl=True, long=True, transforms=True) or []
-        src = _find_first_valid_transform(sel)
+        valid = [obj for obj in sel if _find_first_valid_transform([obj])]
+        if not valid:
+            return None, "Sélectionne un mesh ou un transform valide."
+        if len(valid) > 1:
+            self.source_transform = valid[0]
+            return valid[0], "Plusieurs objets détectés, 1er utilisé comme source."
+        self.source_transform = valid[0]
+        return valid[0], None
+
+    def set_source_from_selection(self):
+        src, warning_msg = self.auto_pick_source_from_selection()
         if not src:
             _warning("Sélectionne un mesh ou un groupe transform valide.")
-            return None
-        self.source_transform = src
-        return src
+            return None, warning_msg
+        return src, warning_msg
 
     def get_asset_nodes(self):
         n = self.asset_name
@@ -331,11 +375,11 @@ class InstanceAssetManager(object):
             "base_grp": "{}_BASE_GRP".format(n),
             "inst_grp": "{}_INSTANCES_GRP".format(n),
             "baked_grp": "{}_BAKED_GRP".format(n),
+            "export_grp": "{}_EXPORT_GRP".format(n),
         }
 
     def structure_exists(self):
-        nodes = self.get_asset_nodes()
-        return _safe_exists(nodes["asset_grp"])
+        return _safe_exists(self.get_asset_nodes()["asset_grp"])
 
     def get_source_in_base(self):
         nodes = self.get_asset_nodes()
@@ -354,32 +398,37 @@ class InstanceAssetManager(object):
             _warning("La structure existe déjà pour cet asset.")
             return nodes
 
-        asset_grp = cmds.group(em=True, n=nodes["asset_grp"])
-        base_grp = cmds.group(em=True, n=nodes["base_grp"], p=asset_grp)
-        inst_grp = cmds.group(em=True, n=nodes["inst_grp"], p=asset_grp)
+        with _undo_chunk():
+            asset_grp = cmds.group(em=True, n=_safe_name(nodes["asset_grp"]))
+            base_grp = cmds.group(em=True, n=_safe_name(nodes["base_grp"]), p=asset_grp)
+            cmds.group(em=True, n=_safe_name(nodes["inst_grp"]), p=asset_grp)
 
-        try:
-            new_source = cmds.parent(self.source_transform, base_grp)[0]
-        except:
-            new_source = self.source_transform
-
-        self.source_transform = new_source
-
-        if center_world:
             try:
+                new_source = cmds.parent(self.source_transform, base_grp)[0]
+            except Exception:
+                new_source = self.source_transform
+
+            self.source_transform = new_source
+            if center_world:
                 cmds.xform(self.source_transform, ws=True, t=(0, 0, 0))
-            except:
-                pass
+
+            _set_override_color(self.source_transform, SOURCE_COLOR_INDEX)
+            _tag_node(self.source_transform, is_source=True, asset_name=self.asset_name)
 
         _info("Structure créée : <hl>{}</hl>".format(self.asset_name))
-        return nodes
+        return self.get_asset_nodes()
 
     def ensure_structure(self, center_world=False):
         if self.structure_exists():
             return self.get_asset_nodes()
         return self.create_structure(center_world=center_world)
 
-    def create_instance(self):
+    def _make_duplicate(self, source, duplicate_mode):
+        if duplicate_mode == "duplicate":
+            return cmds.duplicate(source, rr=True)[0]
+        return cmds.instance(source)[0]
+
+    def create_instance(self, duplicate_mode="instance"):
         nodes = self.get_asset_nodes()
         if not _safe_exists(nodes["inst_grp"]):
             _warning("Crée d'abord la structure.")
@@ -390,29 +439,83 @@ class InstanceAssetManager(object):
             _warning("Source introuvable dans BASE_GRP.")
             return None
 
-        inst = cmds.instance(source)[0]
+        inst = self._make_duplicate(source, duplicate_mode)
         inst = cmds.parent(inst, nodes["inst_grp"])[0]
         inst = self.rename_instance(inst)
-        cmds.select(inst, r=True)
+        _set_override_color(inst, INSTANCE_COLOR_INDEX)
+        _tag_node(inst, is_instance=True, asset_name=self.asset_name)
         return inst
 
-    def create_instances_count(self, count):
+    def create_instances_count(self, count, duplicate_mode="instance"):
         created = []
-        count = max(1, int(count))
-        for _ in range(count):
-            inst = self.create_instance()
+        for _ in range(max(1, int(count))):
+            inst = self.create_instance(duplicate_mode=duplicate_mode)
             if inst:
                 created.append(inst)
+        return created
+
+    def _apply_offset(self, node, pos=(0, 0, 0), rot=(0, 0, 0), scl=(1, 1, 1)):
+        try:
+            cmds.xform(node, r=True, t=pos)
+            cmds.xform(node, r=True, ro=rot)
+            cmds.xform(node, r=True, s=scl)
+        except Exception:
+            pass
+
+    def create_instances_on_selected(self, targets, duplicate_mode="instance", offset_pos=(0, 0, 0), offset_rot=(0, 0, 0), offset_scl=(1, 1, 1)):
+        nodes = self.get_asset_nodes()
+        source = self.get_source_in_base()
+        if not source:
+            _warning("Source introuvable.")
+            return []
+
+        created = []
+        for target in targets:
+            if not _safe_exists(target):
+                continue
+            inst = self._make_duplicate(source, duplicate_mode)
+            inst = cmds.parent(inst, nodes["inst_grp"])[0]
+            try:
+                m = cmds.xform(target, q=True, ws=True, m=True)
+                cmds.xform(inst, ws=True, m=m)
+            except Exception:
+                pass
+            self._apply_offset(inst, offset_pos, offset_rot, offset_scl)
+            inst = self.rename_instance(inst)
+            _set_override_color(inst, INSTANCE_COLOR_INDEX)
+            _tag_node(inst, is_instance=True, asset_name=self.asset_name)
+            created.append(inst)
+        return created
+
+    def create_instances_pattern(self, mode, count=5, spacing=1.0, radius=5.0, duplicate_mode="instance"):
+        created = self.create_instances_count(count, duplicate_mode=duplicate_mode)
+        if not created:
+            return []
+
+        if mode == "Line":
+            for i, inst in enumerate(created):
+                cmds.xform(inst, ws=True, t=(i * spacing, 0, 0))
+        elif mode == "Grid":
+            side = int(math.ceil(math.sqrt(len(created))))
+            for i, inst in enumerate(created):
+                x = (i % side) * spacing
+                z = (i // side) * spacing
+                cmds.xform(inst, ws=True, t=(x, 0, z))
+        elif mode == "Circle":
+            n = max(1, len(created))
+            for i, inst in enumerate(created):
+                a = (float(i) / n) * math.pi * 2.0
+                cmds.xform(inst, ws=True, t=(math.cos(a) * radius, 0, math.sin(a) * radius))
         return created
 
     def rename_instance(self, inst):
         nodes = self.get_asset_nodes()
         children = cmds.listRelatives(nodes["inst_grp"], c=True, f=True) or []
         idx = len(children)
-        target_name = "{}_INST_{:03d}".format(self.asset_name, idx)
+        target_name = _safe_name("{}_INST_{:03d}".format(self.asset_name, idx))
         try:
             inst = cmds.rename(inst, target_name)
-        except:
+        except Exception:
             pass
         return inst
 
@@ -424,9 +527,9 @@ class InstanceAssetManager(object):
         count = 0
         for i, child in enumerate(children, 1):
             try:
-                cmds.rename(child, "{}_INST_{:03d}".format(self.asset_name, i))
+                cmds.rename(child, _safe_name("{}_INST_{:03d}".format(self.asset_name, i)))
                 count += 1
-            except:
+            except Exception:
                 pass
         return count
 
@@ -460,6 +563,13 @@ class InstanceAssetManager(object):
         _warning("Asset group introuvable.")
         return None
 
+    def toggle_source_lock(self, lock=True):
+        src = self.get_source_in_base()
+        if not src:
+            _warning("Source introuvable.")
+            return
+        _lock_transform_channels(src, lock=lock)
+
     def toggle_visibility(self, node):
         if not _safe_exists(node):
             return None
@@ -467,7 +577,7 @@ class InstanceAssetManager(object):
             state = cmds.getAttr(node + ".visibility")
             cmds.setAttr(node + ".visibility", not state)
             return not state
-        except:
+        except Exception:
             return None
 
     def toggle_base_visibility(self):
@@ -482,7 +592,7 @@ class InstanceAssetManager(object):
             if _safe_exists(nodes[key]):
                 try:
                     cmds.setAttr(nodes[key] + ".visibility", 1)
-                except:
+                except Exception:
                     pass
 
     def center_source(self):
@@ -511,38 +621,50 @@ class InstanceAssetManager(object):
         cmds.delete(to_delete)
         return len(to_delete)
 
-    def create_display_layer_for_instances(self):
-        instances = self.get_all_instances()
-        if not instances:
-            _warning("Aucune instance trouvée.")
-            return None
-        layer_name = "{}_instances_LYR".format(self.asset_name)
-        if not _safe_exists(layer_name):
-            cmds.createDisplayLayer(name=layer_name, empty=True)
-        cmds.editDisplayLayerMembers(layer_name, instances, noRecurse=True)
-        return layer_name
-
-    def bake_instances_to_real_meshes(self):
+    def bake_instances_to_real_meshes(self, freeze=True, delete_history=True, combine=False):
         nodes = self.get_asset_nodes()
         instances = self.get_all_instances()
         if not instances:
             _warning("Aucune instance à baker.")
-            return None
+            return []
 
         if not _safe_exists(nodes["baked_grp"]):
-            cmds.group(em=True, n=nodes["baked_grp"], p=nodes["asset_grp"] if _safe_exists(nodes["asset_grp"]) else None)
+            cmds.group(em=True, n=_safe_name(nodes["baked_grp"]), p=nodes["asset_grp"] if _safe_exists(nodes["asset_grp"]) else None)
 
         baked = []
         for i, inst in enumerate(instances, 1):
             try:
-                dup = cmds.duplicate(inst, rr=True, n="{}_BAKED_{:03d}".format(self.asset_name, i))[0]
+                dup = cmds.duplicate(inst, rr=True, n=_safe_name("{}_BAKED_{:03d}".format(self.asset_name, i)))[0]
                 dup = cmds.parent(dup, nodes["baked_grp"])[0]
+                if freeze:
+                    cmds.makeIdentity(dup, apply=True, t=1, r=1, s=1, n=0)
+                if delete_history:
+                    cmds.delete(dup, ch=True)
                 baked.append(dup)
-            except:
+            except Exception:
                 pass
+
+        if combine and baked:
+            try:
+                combined = cmds.polyUnite(baked, n=_safe_name("{}_BAKED_COMBINED".format(self.asset_name)), ch=False)[0]
+                combined = cmds.parent(combined, nodes["baked_grp"])[0]
+                for mesh in baked:
+                    _safe_delete(mesh)
+                baked = [combined]
+            except Exception:
+                pass
+
         if baked:
             cmds.select(baked, r=True)
         return baked
+
+    def ensure_export_group(self):
+        nodes = self.get_asset_nodes()
+        grp = nodes["export_grp"]
+        if _safe_exists(grp):
+            return grp
+        parent = nodes["asset_grp"] if _safe_exists(nodes["asset_grp"]) else None
+        return cmds.group(em=True, n=_safe_name(grp), p=parent)
 
 
 # ============================================================
@@ -558,7 +680,8 @@ class InstanceOrganizerUI(QtWidgets.QDialog, SliderMixin):
         self.manager = InstanceAssetManager()
         self._build_ui()
         apply_shared_style(self)
-        self.resize(410, 560)
+        self.resize(430, 760)
+        self._auto_source_on_open()
 
     def _build_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
@@ -593,7 +716,7 @@ class InstanceOrganizerUI(QtWidgets.QDialog, SliderMixin):
         layout.addWidget(self.source_label)
 
         select_row = QtWidgets.QHBoxLayout()
-        self.btn_pick_source = QtWidgets.QPushButton("Pick Selected Source")
+        self.btn_pick_source = QtWidgets.QPushButton("Pick / Auto Source")
         self.btn_pick_source.setObjectName("primaryBtn")
         self.btn_pick_source.clicked.connect(self._on_pick_source)
         select_row.addWidget(self.btn_pick_source)
@@ -605,6 +728,16 @@ class InstanceOrganizerUI(QtWidgets.QDialog, SliderMixin):
         self.btn_select_source.clicked.connect(self._on_select_source)
         select_row.addWidget(self.btn_select_source)
         layout.addLayout(select_row)
+
+        self.chk_lock_source = QtWidgets.QCheckBox("Lock source TR after structure creation")
+        self.chk_lock_source.setChecked(True)
+        self.chk_lock_source.toggled.connect(self._on_toggle_lock_mode)
+        layout.addWidget(self.chk_lock_source)
+
+        self.chk_edit_mode = QtWidgets.QCheckBox("Edit Mode (unlock source)")
+        self.chk_edit_mode.setChecked(False)
+        self.chk_edit_mode.toggled.connect(self._on_toggle_edit_mode)
+        layout.addWidget(self.chk_edit_mode)
 
         setup_label = QtWidgets.QLabel("SETUP")
         setup_label.setObjectName("sectionLabel")
@@ -618,6 +751,15 @@ class InstanceOrganizerUI(QtWidgets.QDialog, SliderMixin):
         self.chk_auto_select_new.setChecked(True)
         layout.addWidget(self.chk_auto_select_new)
 
+        dup_row = QtWidgets.QHBoxLayout()
+        dup_lbl = QtWidgets.QLabel("Create mode")
+        dup_lbl.setFixedWidth(115)
+        dup_row.addWidget(dup_lbl)
+        self.duplicate_mode_combo = QtWidgets.QComboBox()
+        self.duplicate_mode_combo.addItems(["instance", "duplicate"])
+        dup_row.addWidget(self.duplicate_mode_combo)
+        layout.addLayout(dup_row)
+
         self.btn_create_structure = QtWidgets.QPushButton("Create Outliner Structure")
         self.btn_create_structure.clicked.connect(self._on_create_structure)
         layout.addWidget(self.btn_create_structure)
@@ -626,18 +768,40 @@ class InstanceOrganizerUI(QtWidgets.QDialog, SliderMixin):
         inst_label.setObjectName("sectionLabel")
         layout.addWidget(inst_label)
 
-        self.instance_count_slider, self.instance_count_spin = self._add_slider(
-            layout, "Instance Count", 1, 100, 1, 0
-        )
+        self.instance_count_slider, self.instance_count_spin = self._add_slider(layout, "Instance Count", 1, 200, 1, 0)
+
+        pattern_row = QtWidgets.QHBoxLayout()
+        pat_lbl = QtWidgets.QLabel("Pattern")
+        pat_lbl.setFixedWidth(115)
+        pattern_row.addWidget(pat_lbl)
+        self.pattern_combo = QtWidgets.QComboBox()
+        self.pattern_combo.addItems(["None", "Line", "Grid", "Circle"])
+        pattern_row.addWidget(self.pattern_combo)
+        layout.addLayout(pattern_row)
+
+        self.pattern_spacing_slider, self.pattern_spacing_spin = self._add_slider(layout, "Pattern Spacing", 0.1, 50.0, 2.0, 2)
+        self.pattern_radius_slider, self.pattern_radius_spin = self._add_slider(layout, "Circle Radius", 0.1, 100.0, 5.0, 2)
+
+        self.offset_px_slider, self.offset_px_spin = self._add_slider(layout, "Offset Pos X", -50.0, 50.0, 0.0, 2)
+        self.offset_py_slider, self.offset_py_spin = self._add_slider(layout, "Offset Pos Y", -50.0, 50.0, 0.0, 2)
+        self.offset_pz_slider, self.offset_pz_spin = self._add_slider(layout, "Offset Pos Z", -50.0, 50.0, 0.0, 2)
+        self.offset_rx_slider, self.offset_rx_spin = self._add_slider(layout, "Offset Rot X", -180.0, 180.0, 0.0, 2)
+        self.offset_ry_slider, self.offset_ry_spin = self._add_slider(layout, "Offset Rot Y", -180.0, 180.0, 0.0, 2)
+        self.offset_rz_slider, self.offset_rz_spin = self._add_slider(layout, "Offset Rot Z", -180.0, 180.0, 0.0, 2)
+        self.offset_scale_slider, self.offset_scale_spin = self._add_slider(layout, "Offset Uniform Scale", 0.01, 5.0, 1.0, 2)
 
         self.btn_create_instances = QtWidgets.QPushButton("Create Instance(s)")
         self.btn_create_instances.setObjectName("primaryBtn")
         self.btn_create_instances.clicked.connect(self._on_create_instances)
         layout.addWidget(self.btn_create_instances)
 
-        select_tools_label = QtWidgets.QLabel("SELECTION TOOLS")
-        select_tools_label.setObjectName("sectionLabel")
-        layout.addWidget(select_tools_label)
+        self.btn_create_on_selected = QtWidgets.QPushButton("Create on Selected Objects")
+        self.btn_create_on_selected.clicked.connect(self._on_create_on_selected)
+        layout.addWidget(self.btn_create_on_selected)
+
+        utility_label = QtWidgets.QLabel("VISIBILITY / CLEANUP / EXPORT")
+        utility_label.setObjectName("sectionLabel")
+        layout.addWidget(utility_label)
 
         row1 = QtWidgets.QHBoxLayout()
         self.btn_sel_source = QtWidgets.QPushButton("Select Source")
@@ -649,17 +813,13 @@ class InstanceOrganizerUI(QtWidgets.QDialog, SliderMixin):
         layout.addLayout(row1)
 
         row2 = QtWidgets.QHBoxLayout()
-        self.btn_sel_asset = QtWidgets.QPushButton("Select Asset Group")
-        self.btn_sel_asset.clicked.connect(self._on_select_asset)
-        row2.addWidget(self.btn_sel_asset)
         self.btn_rename_instances = QtWidgets.QPushButton("Rename Instances")
         self.btn_rename_instances.clicked.connect(self._on_rename_instances)
         row2.addWidget(self.btn_rename_instances)
+        self.btn_delete_selected_instances = QtWidgets.QPushButton("Delete Selected Instances")
+        self.btn_delete_selected_instances.clicked.connect(self._on_delete_selected_instances)
+        row2.addWidget(self.btn_delete_selected_instances)
         layout.addLayout(row2)
-
-        vis_label = QtWidgets.QLabel("VISIBILITY / CLEANUP")
-        vis_label.setObjectName("sectionLabel")
-        layout.addWidget(vis_label)
 
         row3 = QtWidgets.QHBoxLayout()
         self.btn_toggle_base = QtWidgets.QPushButton("Toggle Base")
@@ -670,37 +830,26 @@ class InstanceOrganizerUI(QtWidgets.QDialog, SliderMixin):
         row3.addWidget(self.btn_toggle_inst)
         layout.addLayout(row3)
 
+        self.chk_bake_freeze = QtWidgets.QCheckBox("Bake: Freeze transforms")
+        self.chk_bake_freeze.setChecked(True)
+        layout.addWidget(self.chk_bake_freeze)
+        self.chk_bake_history = QtWidgets.QCheckBox("Bake: Delete history")
+        self.chk_bake_history.setChecked(True)
+        layout.addWidget(self.chk_bake_history)
+        self.chk_bake_combine = QtWidgets.QCheckBox("Bake: Combine output")
+        self.chk_bake_combine.setChecked(False)
+        layout.addWidget(self.chk_bake_combine)
+
         row4 = QtWidgets.QHBoxLayout()
-        self.btn_show_all = QtWidgets.QPushButton("Show All")
-        self.btn_show_all.clicked.connect(self._on_show_all)
-        row4.addWidget(self.btn_show_all)
-        self.btn_delete_selected_instances = QtWidgets.QPushButton("Delete Selected Instances")
-        self.btn_delete_selected_instances.clicked.connect(self._on_delete_selected_instances)
-        row4.addWidget(self.btn_delete_selected_instances)
-        layout.addLayout(row4)
-
-        utility_label = QtWidgets.QLabel("UTILITY")
-        utility_label.setObjectName("sectionLabel")
-        layout.addWidget(utility_label)
-
-        row5 = QtWidgets.QHBoxLayout()
-        self.btn_center_source = QtWidgets.QPushButton("Center Source")
-        self.btn_center_source.clicked.connect(self._on_center_source)
-        row5.addWidget(self.btn_center_source)
-        self.btn_freeze_source = QtWidgets.QPushButton("Freeze Source")
-        self.btn_freeze_source.clicked.connect(self._on_freeze_source)
-        row5.addWidget(self.btn_freeze_source)
-        layout.addLayout(row5)
-
-        row6 = QtWidgets.QHBoxLayout()
-        self.btn_create_layer = QtWidgets.QPushButton("Create Layer for Instances")
-        self.btn_create_layer.clicked.connect(self._on_create_layer)
-        row6.addWidget(self.btn_create_layer)
         self.btn_bake = QtWidgets.QPushButton("Bake Instances")
         self.btn_bake.setObjectName("primaryBtn")
         self.btn_bake.clicked.connect(self._on_bake)
-        row6.addWidget(self.btn_bake)
-        layout.addLayout(row6)
+        row4.addWidget(self.btn_bake)
+
+        self.btn_export_grp = QtWidgets.QPushButton("Create EXPORT_GRP")
+        self.btn_export_grp.clicked.connect(self._on_create_export_group)
+        row4.addWidget(self.btn_export_grp)
+        layout.addLayout(row4)
 
         self.stats_label = QtWidgets.QLabel("Instances : 0")
         layout.addWidget(self.stats_label)
@@ -717,14 +866,28 @@ class InstanceOrganizerUI(QtWidgets.QDialog, SliderMixin):
         count = len(self.manager.get_all_instances())
         self.stats_label.setText("Instances : {}".format(count))
 
+    def _auto_source_on_open(self):
+        src, warning_msg = self.manager.auto_pick_source_from_selection()
+        if src:
+            self._refresh_source_label()
+            if warning_msg:
+                self._set_status(warning_msg)
+                _warning(warning_msg)
+            else:
+                self._set_status("Source auto-detected: {}".format(_short(src)))
+
     def _on_asset_name_changed(self, text):
         self.manager.set_asset_name(text)
 
     def _on_pick_source(self):
-        src = self.manager.set_source_from_selection()
+        src, warning_msg = self.manager.set_source_from_selection()
         if src:
             self._refresh_source_label()
-            self._set_status("Source selected: {}".format(_short(src)))
+            if warning_msg:
+                _warning(warning_msg)
+                self._set_status(warning_msg)
+            else:
+                self._set_status("Source selected: {}".format(_short(src)))
 
     def _on_create_structure(self):
         self.manager.set_asset_name(self.asset_name_edit.text())
@@ -732,18 +895,70 @@ class InstanceOrganizerUI(QtWidgets.QDialog, SliderMixin):
         if result:
             self._refresh_source_label()
             self._set_status("Structure created for {}".format(self.manager.asset_name))
+            if self.chk_lock_source.isChecked() and not self.chk_edit_mode.isChecked():
+                self.manager.toggle_source_lock(lock=True)
+
+    def _duplicate_mode(self):
+        return self.duplicate_mode_combo.currentText().strip().lower()
+
+    def _offset_values(self):
+        pos = (self.offset_px_spin.value(), self.offset_py_spin.value(), self.offset_pz_spin.value())
+        rot = (self.offset_rx_spin.value(), self.offset_ry_spin.value(), self.offset_rz_spin.value())
+        s = self.offset_scale_spin.value()
+        scl = (s, s, s)
+        return pos, rot, scl
 
     def _on_create_instances(self):
-        self.manager.set_asset_name(self.asset_name_edit.text())
-        self.manager.ensure_structure(center_world=self.chk_center_on_create.isChecked())
-        count = int(self.instance_count_spin.value())
-        created = self.manager.create_instances_count(count)
-        if created:
-            if self.chk_auto_select_new.isChecked():
+        with _undo_chunk():
+            self.manager.set_asset_name(self.asset_name_edit.text())
+            self.manager.ensure_structure(center_world=self.chk_center_on_create.isChecked())
+            count = int(self.instance_count_spin.value())
+            mode = self.pattern_combo.currentText()
+            duplicate_mode = self._duplicate_mode()
+
+            if mode == "None":
+                created = self.manager.create_instances_count(count, duplicate_mode=duplicate_mode)
+            else:
+                created = self.manager.create_instances_pattern(
+                    mode=mode,
+                    count=count,
+                    spacing=float(self.pattern_spacing_spin.value()),
+                    radius=float(self.pattern_radius_spin.value()),
+                    duplicate_mode=duplicate_mode,
+                )
+
+            pos, rot, scl = self._offset_values()
+            for node in created:
+                self.manager._apply_offset(node, pos, rot, scl)
+
+            if created:
+                if self.chk_auto_select_new.isChecked():
+                    cmds.select(created, r=True)
+                self._set_status("{} object(s) created in {} mode".format(len(created), duplicate_mode))
+            else:
+                self._set_status("No object created")
+
+    def _on_create_on_selected(self):
+        with _undo_chunk():
+            self.manager.set_asset_name(self.asset_name_edit.text())
+            self.manager.ensure_structure(center_world=self.chk_center_on_create.isChecked())
+            targets = cmds.ls(sl=True, long=True, transforms=True) or []
+            if not targets:
+                _warning("Sélectionne les objets cibles.")
+                return
+            source = self.manager.get_source_in_base()
+            targets = [t for t in targets if t != source]
+            pos, rot, scl = self._offset_values()
+            created = self.manager.create_instances_on_selected(
+                targets,
+                duplicate_mode=self._duplicate_mode(),
+                offset_pos=pos,
+                offset_rot=rot,
+                offset_scl=scl,
+            )
+            if created:
                 cmds.select(created, r=True)
-            self._set_status("{} instance(s) created".format(len(created)))
-        else:
-            self._set_status("No instance created")
+                self._set_status("{} object(s) created on selected targets".format(len(created)))
 
     def _on_select_source(self):
         src = self.manager.select_source()
@@ -754,11 +969,6 @@ class InstanceOrganizerUI(QtWidgets.QDialog, SliderMixin):
         inst = self.manager.select_instances()
         if inst:
             self._set_status("{} instance(s) selected".format(len(inst)))
-
-    def _on_select_asset(self):
-        asset = self.manager.select_asset_group()
-        if asset:
-            self._set_status("Asset group selected")
 
     def _on_rename_instances(self):
         count = self.manager.rename_all_instances()
@@ -772,31 +982,32 @@ class InstanceOrganizerUI(QtWidgets.QDialog, SliderMixin):
         self.manager.toggle_instances_visibility()
         self._set_status("Instances visibility toggled")
 
-    def _on_show_all(self):
-        self.manager.show_all()
-        self._set_status("Base and instances visible")
-
     def _on_delete_selected_instances(self):
         count = self.manager.delete_selected_instances()
         self._set_status("{} instance(s) deleted".format(count))
 
-    def _on_center_source(self):
-        self.manager.center_source()
-        self._set_status("Source centered to world")
-
-    def _on_freeze_source(self):
-        self.manager.freeze_source()
-        self._set_status("Source frozen")
-
-    def _on_create_layer(self):
-        layer = self.manager.create_display_layer_for_instances()
-        if layer:
-            self._set_status("Layer created: {}".format(layer))
-
     def _on_bake(self):
-        baked = self.manager.bake_instances_to_real_meshes()
-        if baked:
-            self._set_status("{} baked mesh(es) created".format(len(baked)))
+        with _undo_chunk():
+            baked = self.manager.bake_instances_to_real_meshes(
+                freeze=self.chk_bake_freeze.isChecked(),
+                delete_history=self.chk_bake_history.isChecked(),
+                combine=self.chk_bake_combine.isChecked(),
+            )
+            if baked:
+                self._set_status("{} baked mesh(es) created".format(len(baked)))
+
+    def _on_create_export_group(self):
+        grp = self.manager.ensure_export_group()
+        self._set_status("Export group ready: {}".format(_short(grp)))
+
+    def _on_toggle_lock_mode(self, checked):
+        if self.chk_edit_mode.isChecked():
+            return
+        self.manager.toggle_source_lock(lock=checked)
+
+    def _on_toggle_edit_mode(self, checked):
+        self.manager.toggle_source_lock(lock=not checked and self.chk_lock_source.isChecked())
+        self._set_status("Edit mode ON" if checked else "Edit mode OFF")
 
     @classmethod
     def show_ui(cls):
@@ -804,7 +1015,7 @@ class InstanceOrganizerUI(QtWidgets.QDialog, SliderMixin):
             try:
                 cls._instance.close()
                 cls._instance.deleteLater()
-            except:
+            except Exception:
                 pass
         cls._instance = cls()
         cls._instance.show()

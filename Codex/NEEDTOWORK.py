@@ -322,6 +322,42 @@ def _pt_merge_unique(base, extra):
         if item not in seen: seen.add(item); out.append(item)
     return out
 
+
+def _pt_cleanup_selection_sets(short_name):
+    """Delete panel-related temporary sets to keep scene lightweight."""
+    if not short_name:
+        return
+    suffixes = [
+        "_panelEdges_set",
+        "_panelFrontFaces_set",
+        "_panelBackFaces_set",
+        "_panelSeams_set",
+        "_panelBevelFaces_set",
+        "_panelCornerVerts_set",
+    ]
+    for suffix in suffixes:
+        node = short_name + suffix
+        if cmds.objExists(node):
+            try:
+                cmds.delete(node)
+            except Exception:
+                pass
+
+
+def _pt_merge_vertices_prepass(obj, distance):
+    """Optional pre-pass merge to stabilize topology before paneling."""
+    if not obj or not cmds.objExists(obj):
+        return 0
+    merge_dist = max(0.0, float(distance))
+    if merge_dist <= 0.0:
+        return 0
+    try:
+        cmds.select(obj, r=True)
+        cmds.polyMergeVertex(d=merge_dist, am=True, ch=False)
+        return 1
+    except Exception:
+        return 0
+
 def _pt_component_set(name, components):
     if cmds.objExists(name):
         try:
@@ -854,7 +890,7 @@ def _pt_expand_to_edge_loops(obj, edges):
     return list(expanded)
 
 
-def _pt_get_side_hard_edges_by_angle(obj, short_name, threshold):
+def _pt_get_side_hard_edges_by_angle(obj, short_name, threshold, bevel_faces):
     """Return side-related hard edges and expand them to complete loops."""
     all_faces  = cmds.ls(obj + ".f[*]", fl=True) or []
     front_raw  = _pt_safe_set_members(short_name + "_panelFrontFaces_set")
@@ -862,6 +898,7 @@ def _pt_get_side_hard_edges_by_angle(obj, short_name, threshold):
     front_set  = set(cmds.ls(front_raw, fl=True) or [])
     back_set   = set(cmds.ls(back_raw,  fl=True) or [])
     exclude    = front_set | back_set
+    bevel_face_set = set(bevel_faces or [])
     side_faces = [f for f in all_faces if f not in exclude and cmds.objExists(f)]
     if not side_faces: return []
 
@@ -876,7 +913,11 @@ def _pt_get_side_hard_edges_by_angle(obj, short_name, threshold):
             cmds.polyListComponentConversion(edge, fromEdge=True, toFace=True),
             fl=True) or []
         connected = [f for f in connected if ".f[" in f and cmds.objExists(f)]
-        if len(connected) != 2: continue
+        if len(connected) != 2:
+            continue
+        # Keep only "true side" edges (not front/back boundaries)
+        if any(face in exclude for face in connected):
+            continue
         n1 = _pt_face_normal(connected[0])
         n2 = _pt_face_normal(connected[1])
         if n1 is None or n2 is None: continue
@@ -894,7 +935,26 @@ def _pt_get_side_hard_edges_by_angle(obj, short_name, threshold):
             if edge in side_edges and cmds.objExists(edge):
                 result.append(edge)
 
-    return _pt_expand_to_edge_loops(obj, result)
+    if not result:
+        return []
+
+    bevel_boundary_verts = set(cmds.ls(
+        cmds.polyListComponentConversion(bevel_face_set, fromFace=True, toVertex=True),
+        fl=True
+    ) or [])
+
+    expanded = _pt_expand_to_edge_loops(obj, result)
+    filtered = []
+    for edge in expanded:
+        edge_verts = set(cmds.ls(
+            cmds.polyListComponentConversion(edge, fromEdge=True, toVertex=True),
+            fl=True
+        ) or [])
+        if bevel_boundary_verts and not (edge_verts & bevel_boundary_verts):
+            continue
+        filtered.append(edge)
+
+    return filtered
 
 
 def _pt_bevel(short_name, state):
@@ -927,7 +987,11 @@ def _pt_bevel(short_name, state):
 
     if state.get("angle_bevel_enabled", False):
         extra = _pt_get_side_hard_edges_by_angle(
-            state["obj"], short_name, state.get("angle_bevel_threshold", 90.0))
+            state["obj"],
+            short_name,
+            state.get("angle_bevel_threshold", 50.0),
+            bevel_faces
+        )
         bevel_edges = _pt_merge_unique(bevel_edges, extra)
 
     if not bevel_edges:
@@ -971,12 +1035,7 @@ def _pt_validate(state):
     if not state["started"]: return
     obj = state.get("obj"); sn = state.get("short_name"); backup = state.get("backup")
     if not obj or not cmds.objExists(obj): return
-    for node in [sn+"_panelEdges_set", sn+"_panelFrontFaces_set",
-                 sn+"_panelBackFaces_set", sn+"_panelSeams_set",
-                 sn+"_panelBevelFaces_set", sn+"_panelCornerVerts_set"]:
-        if cmds.objExists(node):
-            try: cmds.delete(node)
-            except Exception: pass
+    _pt_cleanup_selection_sets(sn)
     if backup and cmds.objExists(backup):
         try: cmds.delete(backup)
         except Exception: pass
@@ -999,12 +1058,7 @@ def _pt_revert(state):
     except Exception: pass
     try: cmds.delete(backup)
     except Exception: pass
-    for node in [sn+"_panelEdges_set", sn+"_panelFrontFaces_set",
-                 sn+"_panelBackFaces_set", sn+"_panelSeams_set",
-                 sn+"_panelBevelFaces_set", sn+"_panelCornerVerts_set"]:
-        if cmds.objExists(node):
-            try: cmds.delete(node)
-            except Exception: pass
+    _pt_cleanup_selection_sets(sn)
     state.update({
         "started": False, "obj": restored, "short_name": restored.split("|")[-1],
         "backup": None, "extrude_node": None, "bridge_nodes": [], "bevel_node": None,
@@ -1352,9 +1406,12 @@ class PanelToolTab(QtWidgets.QWidget):
             "bevel_node":None,
             "bevel_offset":0.01,"bevel_segments":1,"bevel_mitering":0,
             "bevel_miter_along":0,"bevel_chamfer":1,
-            "angle_bevel_enabled":False,"angle_bevel_threshold":90.0,
+            "angle_bevel_enabled":False,"angle_bevel_threshold":50.0,
             "ui":{},
         }
+        self._extrude_commit_timer = QtCore.QTimer(self)
+        self._extrude_commit_timer.setSingleShot(True)
+        self._extrude_commit_timer.timeout.connect(self._on_extrude_commit_timeout)
         self._build()
 
     def _sync_bevel_state(self):
@@ -1395,6 +1452,21 @@ class PanelToolTab(QtWidgets.QWidget):
         self.btn_start.setObjectName("redBtn"); self.btn_start.setMinimumHeight(34)
         self.btn_start.clicked.connect(self._on_start)
         root.addWidget(self.btn_start)
+
+        mini = QtWidgets.QHBoxLayout()
+        self.w_pre_merge = QtWidgets.QCheckBox("Pre-Merge Vertices")
+        self.w_pre_merge.setChecked(True)
+        self.w_pre_merge_dist = QtWidgets.QDoubleSpinBox()
+        self.w_pre_merge_dist.setRange(0.0, 0.1)
+        self.w_pre_merge_dist.setDecimals(5)
+        self.w_pre_merge_dist.setSingleStep(0.0001)
+        self.w_pre_merge_dist.setValue(0.0001)
+        self.w_pre_merge_dist.setFixedWidth(95)
+        mini.addWidget(self.w_pre_merge)
+        mini.addStretch()
+        mini.addWidget(QtWidgets.QLabel("Dist"))
+        mini.addWidget(self.w_pre_merge_dist)
+        root.addLayout(mini)
 
         self.w_auto_bevel = QtWidgets.QCheckBox("Auto Bevel on Start")
         self.w_auto_bevel.setChecked(True)
@@ -1502,10 +1574,10 @@ class PanelToolTab(QtWidgets.QWidget):
         root.addWidget(self.w_angle_check)
 
         self.w_angle_val = QtWidgets.QDoubleSpinBox()
-        self.w_angle_val.setRange(0,180); self.w_angle_val.setValue(90.0)
+        self.w_angle_val.setRange(0,180); self.w_angle_val.setValue(50.0)
         self.w_angle_val.setSingleStep(1.0); self.w_angle_val.setEnabled(False)
         self.w_angle_sl = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.w_angle_sl.setRange(1,180); self.w_angle_sl.setValue(90)
+        self.w_angle_sl.setRange(1,180); self.w_angle_sl.setValue(50)
         self.w_angle_sl.setEnabled(False)
         self.w_angle_val.valueChanged.connect(self._on_angle_field)
         self.w_angle_sl.sliderMoved.connect(self._on_angle_slider)
@@ -1513,7 +1585,7 @@ class PanelToolTab(QtWidgets.QWidget):
                                    step_slow=1.0, step_fast=5.0))
 
         presets = QtWidgets.QHBoxLayout()
-        for label, angle in [("Preset 90", 90.0), ("Preset 45", 45.0)]:
+        for label, angle in [("Preset 50", 50.0), ("Preset 90", 90.0), ("Preset 45", 45.0)]:
             b = QtWidgets.QPushButton(label); b.setObjectName("dimBtn")
             b.clicked.connect(lambda _, a=angle: self._set_angle_preset(a))
             presets.addWidget(b)
@@ -1526,6 +1598,11 @@ class PanelToolTab(QtWidgets.QWidget):
         btn_bevel.clicked.connect(lambda: (self._sync_bevel_state(),
                                            _pt_bevel(self.state["short_name"], self.state)))
         root.addWidget(btn_bevel)
+
+        btn_clean = QtWidgets.QPushButton("Clean Temp Sets")
+        btn_clean.setObjectName("dimBtn")
+        btn_clean.clicked.connect(self._on_clean_sets)
+        root.addWidget(btn_clean)
 
         btn_del = QtWidgets.QPushButton("Delete Opposite Faces"); btn_del.setObjectName("dimBtn")
         btn_del.clicked.connect(lambda: _pt_delete_opposite_faces(self.state))
@@ -1568,6 +1645,15 @@ class PanelToolTab(QtWidgets.QWidget):
         })
         _pt_debug(state, "Starting paneling on object '{}'.".format(short_name))
         _pt_validation_box("Start", "Detected object: {}\nStarting process.".format(short_name))
+
+        if self.w_pre_merge.isChecked():
+            merged = _pt_merge_vertices_prepass(obj, self.w_pre_merge_dist.value())
+            if merged:
+                _pt_debug(
+                    state,
+                    "Pre-merge vertices applied (distance={}).".format(self.w_pre_merge_dist.value()),
+                    "OK"
+                )
 
         backup = cmds.duplicate(obj, name=short_name+"_backup#")[0]
         cmds.hide(backup); state["backup"] = backup
@@ -1679,6 +1765,7 @@ class PanelToolTab(QtWidgets.QWidget):
         en = self.state.get("extrude_node")
         if en and cmds.objExists(en): cmds.setAttr(en+".localTranslateZ", v)
         self.state["pending_is_negative"] = v < 0.0
+        self._extrude_commit_timer.start(150)
 
     def _on_extr_release(self):
         v = self.w_extr_sl.value() / self._extr_slider_scale
@@ -1690,6 +1777,10 @@ class PanelToolTab(QtWidgets.QWidget):
         en = self.state.get("extrude_node")
         if en and cmds.objExists(en): cmds.setAttr(en+".localTranslateZ", v)
         self.state["pending_is_negative"] = v < 0.0
+        self._extrude_commit_timer.start(150)
+
+    def _on_extrude_commit_timeout(self):
+        self._finalize_extrude(self.w_extr.value())
 
     def _change_extrude_range(self, delta):
         new_limit = max(10.0, self._extr_range_limit + delta)
@@ -1761,6 +1852,20 @@ class PanelToolTab(QtWidgets.QWidget):
 
     def _set_angle_preset(self, angle):
         self.w_angle_val.setValue(angle)
+
+    def _on_clean_sets(self):
+        obj = self.state.get("obj")
+        short_name = self.state.get("short_name")
+        if not short_name and obj:
+            short_name = obj.split("|")[-1]
+        if short_name:
+            _pt_cleanup_selection_sets(short_name)
+            cmds.inViewMessage(
+                amg='<span style="color:#66FF66;">Temp sets cleaned.</span>',
+                pos='midCenter',
+                fade=True,
+                fadeStayTime=1000
+            )
 
 
 class OverlayMergeTab(QtWidgets.QWidget):

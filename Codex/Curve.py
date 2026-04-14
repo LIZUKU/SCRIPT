@@ -33,6 +33,19 @@ RADIUS_MAX_SPINBOX = 99999
 SWEEP_PREVIEW_SHADER = "PR_SweepPreview_Mat"
 SWEEP_PREVIEW_SG = "PR_SweepPreview_SG"
 SWEEP_PREVIEW_TRANSPARENCY = 0.7
+SWEEP_UI_SPECS = {
+    "profilePolySides": {"label": "Sides", "min": 3, "max": 64, "default": 14, "decimals": 0},
+    "scaleProfileX": {"label": "Scale X", "min": 0.01, "max": 5.0, "default": 1.0, "decimals": 3},
+    "rotateProfile": {"label": "Rotate", "min": -180.0, "max": 180.0, "default": 0.0, "decimals": 3},
+    "twist": {"label": "Twist", "min": -360.0, "max": 360.0, "default": 0.0, "decimals": 3},
+    "taper": {"label": "Taper", "min": -5.0, "max": 5.0, "default": 1.0, "decimals": 3},
+    "interpolationPrecision": {"label": "Precision", "min": 1.0, "max": 50.0, "default": 20.0, "decimals": 3},
+    "interpolationMode": {"label": "Interp Mode", "min": 0, "max": 3, "default": 0, "decimals": 0},
+    "interpolationOptimize": {"label": "Optimize", "min": 0, "max": 1, "default": 0, "decimals": 0},
+}
+SWEEP_DEFAULT_SETTINGS = {
+    attr: spec["default"] for attr, spec in SWEEP_UI_SPECS.items()
+}
 
 AUTO_CURVE_LENGTH_DEFAULT = 15.0
 
@@ -72,7 +85,7 @@ _sweep_preview_meshes = []
 _sweep_preview_active = False
 _sweep_preview_curves = []
 _sweep_refresh_in_progress = False
-_sweep_preview_settings = {}
+_sweep_preview_settings = dict(SWEEP_DEFAULT_SETTINGS)
 
 _sweep_original_select_mode = None
 _sweep_original_select_type = {}
@@ -451,7 +464,7 @@ def _find_sweep_creator_from_mesh(mesh_transform):
 
 def _capture_sweep_settings_from_current_preview():
     global _sweep_preview_settings
-    _sweep_preview_settings = {}
+    _sweep_preview_settings = dict(SWEEP_DEFAULT_SETTINGS)
     for mesh in (_sweep_preview_meshes or []):
         if not _safe_obj_exists(mesh):
             continue
@@ -476,9 +489,11 @@ def _capture_sweep_settings_from_current_preview():
             except Exception:
                 pass
         if captured:
-            _sweep_preview_settings = captured
+            merged = dict(SWEEP_DEFAULT_SETTINGS)
+            merged.update(captured)
+            _sweep_preview_settings = merged
             return
-    _sweep_preview_settings = {}
+    _sweep_preview_settings = dict(SWEEP_DEFAULT_SETTINGS)
 
 
 def _apply_sweep_settings_to_meshes(meshes):
@@ -512,6 +527,52 @@ def _apply_sweep_settings_to_meshes(meshes):
                         cmds.setAttr(plug, val[0])
             except Exception:
                 pass
+
+
+def _set_sweep_attr_on_creator(sc, attr, val):
+    plug = sc + "." + attr
+    if not cmds.objExists(plug):
+        return False
+    try:
+        if not cmds.getAttr(plug, se=True):
+            return False
+        if cmds.listConnections(plug, s=True, d=False):
+            return False
+        decimals = SWEEP_UI_SPECS.get(attr, {}).get("decimals", 3)
+        if decimals == 0:
+            cmds.setAttr(plug, int(round(float(val))))
+        else:
+            cmds.setAttr(plug, float(val))
+        return True
+    except Exception:
+        return False
+
+
+def set_sweep_preview_setting(attr, val):
+    global _sweep_preview_settings
+    spec = SWEEP_UI_SPECS.get(attr)
+    if not spec:
+        return
+    min_val = spec["min"]
+    max_val = spec["max"]
+    decimals = spec.get("decimals", 3)
+    clamped = max(min_val, min(max_val, float(val)))
+    final_val = int(round(clamped)) if decimals == 0 else float(clamped)
+    _sweep_preview_settings[attr] = final_val
+
+    if not _sweep_preview_active:
+        return
+    for mesh in (_sweep_preview_meshes or []):
+        if not _safe_obj_exists(mesh):
+            continue
+        sc = _find_sweep_creator_from_mesh(mesh)
+        if not sc:
+            continue
+        _set_sweep_attr_on_creator(sc, attr, final_val)
+    try:
+        cmds.refresh(f=True)
+    except Exception:
+        pass
 
 
 # ============================================================
@@ -1716,7 +1777,8 @@ def sweep_mesh_preview():
         return
 
     _sweep_preview_curves = curves[:]
-    _sweep_preview_settings = {}
+    if not _sweep_preview_settings:
+        _sweep_preview_settings = dict(SWEEP_DEFAULT_SETTINGS)
     _set_cv_size_temp(10)
     _set_wireframe_on_shaded_preview(True)
 
@@ -1747,6 +1809,7 @@ def sweep_mesh_preview():
 
         add_to_isolate(meshes)
         _sweep_preview_meshes = meshes
+        _apply_sweep_settings_to_meshes(meshes)
         _capture_sweep_settings_from_current_preview()
         preview_sg = _ensure_sweep_preview_shader()
         for mesh in meshes:
@@ -1800,7 +1863,6 @@ def sweep_bake():
         _sweep_preview_meshes = []
         _sweep_preview_curves = []
         _sweep_preview_active = False
-        _sweep_preview_settings = {}
         for node in (SWEEP_PREVIEW_SG, SWEEP_PREVIEW_SHADER):
             try:
                 if cmds.objExists(node):
@@ -1825,7 +1887,6 @@ def sweep_cancel():
         _sweep_preview_meshes = []
         _sweep_preview_curves = []
         _sweep_preview_active = False
-        _sweep_preview_settings = {}
 
 
 def is_sweep_preview_active():
@@ -2371,6 +2432,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         self._attach_auto_reverse = True
         self._attach_clean_mode = False
         self._auto_curve_length = AUTO_CURVE_LENGTH_DEFAULT
+        self._sweep_controls = {}
 
         self.setObjectName(WINDOW_OBJECT_NAME)
         self.setWindowTitle(WINDOW_TITLE)
@@ -2547,6 +2609,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         row.addWidget(self.sweep_btn)
         row.addWidget(self.bake_btn)
         layout.addLayout(row)
+        self._add_sweep_settings_rows(layout)
 
         layout.addStretch()
         self._connect_signals()
@@ -2727,6 +2790,74 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         parent_layout.addLayout(row)
         return slider, spinbox
 
+    def _add_sweep_settings_rows(self, parent_layout):
+        for attr, spec in SWEEP_UI_SPECS.items():
+            slider, spinbox = self._add_sweep_slider(
+                parent_layout,
+                spec["label"],
+                spec["min"],
+                spec["max"],
+                spec["default"],
+                spec["decimals"],
+                attr
+            )
+            self._sweep_controls[attr] = (slider, spinbox)
+
+    def _add_sweep_slider(self, parent_layout, label, min_val, max_val, default, decimals, attr):
+        row = QtWidgets.QHBoxLayout()
+        row.setSpacing(5)
+
+        lbl = QtWidgets.QLabel(label)
+        lbl.setFixedWidth(62)
+        row.addWidget(lbl)
+
+        slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        slider.setMinimum(0)
+        slider.setMaximum(1000)
+        row.addWidget(slider)
+
+        if decimals > 0:
+            spinbox = QtWidgets.QDoubleSpinBox()
+            spinbox.setDecimals(decimals)
+            spinbox.setMinimum(min_val)
+            spinbox.setMaximum(max_val)
+            spinbox.setKeyboardTracking(False)
+        else:
+            spinbox = QtWidgets.QSpinBox()
+            spinbox.setMinimum(int(min_val))
+            spinbox.setMaximum(int(max_val))
+            spinbox.setKeyboardTracking(False)
+
+        spinbox.setFixedWidth(62)
+        spinbox.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+        spinbox.setValue(default if decimals > 0 else int(default))
+        row.addWidget(spinbox)
+
+        def update_spinbox(val):
+            ratio = val / 1000.0
+            real_val = min_val + ratio * (max_val - min_val)
+            final_val = real_val if decimals > 0 else int(round(real_val))
+            spinbox.blockSignals(True)
+            spinbox.setValue(final_val)
+            spinbox.blockSignals(False)
+            set_sweep_preview_setting(attr, final_val)
+
+        def update_slider(val):
+            clamped = max(min_val, min(max_val, float(val)))
+            ratio = (clamped - min_val) / (max_val - min_val)
+            slider.blockSignals(True)
+            slider.setValue(int(ratio * 1000))
+            slider.blockSignals(False)
+            set_sweep_preview_setting(attr, clamped)
+
+        slider.valueChanged.connect(update_spinbox)
+        spinbox.valueChanged.connect(update_slider)
+
+        ratio = (default - min_val) / (max_val - min_val)
+        slider.setValue(int(ratio * 1000))
+        parent_layout.addLayout(row)
+        return slider, spinbox
+
     # ------------------------------------------------------------------
     # GLOBAL STYLE
     # ------------------------------------------------------------------
@@ -2822,6 +2953,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
 
         self.snap_chk.toggled.connect(self._on_snap_toggled)
         self.on_top_chk.toggled.connect(self._on_always_on_top_toggled)
+        self._sync_sweep_ui_from_settings()
 
     # ------------------------------------------------------------------
     # CONTEXT MENUS
@@ -2918,6 +3050,29 @@ class PRCurveToolsUI(QtWidgets.QDialog):
             reset_chamfer()
         self._update_bake_button()
 
+    def _sync_sweep_ui_from_settings(self):
+        for attr, control in self._sweep_controls.items():
+            spec = SWEEP_UI_SPECS.get(attr, {})
+            decimals = spec.get("decimals", 3)
+            cur_val = _sweep_preview_settings.get(attr, spec.get("default", 0))
+            slider, spinbox = control
+            min_val = spec.get("min", 0.0)
+            max_val = spec.get("max", 1.0)
+            try:
+                ratio = (float(cur_val) - min_val) / (max_val - min_val)
+            except Exception:
+                ratio = 0.0
+            ratio = max(0.0, min(1.0, ratio))
+            spinbox.blockSignals(True)
+            slider.blockSignals(True)
+            if decimals == 0:
+                spinbox.setValue(int(round(float(cur_val))))
+            else:
+                spinbox.setValue(float(cur_val))
+            slider.setValue(int(ratio * 1000))
+            spinbox.blockSignals(False)
+            slider.blockSignals(False)
+
     def _update_bake_button(self):
         self.bake_btn.setEnabled(is_sweep_preview_active())
 
@@ -3000,6 +3155,8 @@ class PRCurveToolsUI(QtWidgets.QDialog):
 
     def _do_sweep(self):
         sweep_mesh_preview()
+        for attr, spec in SWEEP_UI_SPECS.items():
+            set_sweep_preview_setting(attr, _sweep_preview_settings.get(attr, spec["default"]))
         self._update_bake_button()
 
     def _do_bake(self):

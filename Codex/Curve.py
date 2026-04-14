@@ -3133,7 +3133,21 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         is_active = is_sweep_preview_active()
         self.bake_btn.setEnabled(is_active)
         if hasattr(self, "sweep_settings_widget"):
+            was_visible = self.sweep_settings_widget.isVisible()
             self.sweep_settings_widget.setVisible(is_active)
+            if was_visible != is_active:
+                self._fit_to_content_height()
+
+    def _fit_to_content_height(self):
+        try:
+            self.layout().activate()
+        except Exception:
+            pass
+        try:
+            self.adjustSize()
+            self.setFixedHeight(self.sizeHint().height())
+        except Exception:
+            pass
 
     def _on_chamfer_changed(self):
         if _chamfer_active and is_chamfer_curve_selected():

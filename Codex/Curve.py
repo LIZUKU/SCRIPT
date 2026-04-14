@@ -34,12 +34,12 @@ SWEEP_PREVIEW_SHADER = "PR_SweepPreview_Mat"
 SWEEP_PREVIEW_SG = "PR_SweepPreview_SG"
 SWEEP_PREVIEW_TRANSPARENCY = 0.7
 SWEEP_UI_SPECS = {
-    "profilePolySides": {"label": "Sides", "min": 3, "max": 64, "default": 14, "decimals": 0},
+    "profilePolySides": {"label": "Sides", "min": 3, "max": 64, "default": 16, "decimals": 0},
     "scaleProfileX": {"label": "Scale X", "min": 0.01, "max": 5.0, "default": 1.0, "decimals": 3},
     "rotateProfile": {"label": "Rotate", "min": -180.0, "max": 180.0, "default": 0.0, "decimals": 3},
     "twist": {"label": "Twist", "min": -360.0, "max": 360.0, "default": 0.0, "decimals": 3},
     "taper": {"label": "Taper", "min": -5.0, "max": 5.0, "default": 1.0, "decimals": 3},
-    "interpolationPrecision": {"label": "Precision", "min": 1.0, "max": 50.0, "default": 20.0, "decimals": 3},
+    "interpolationPrecision": {"label": "Precision", "min": 1.0, "max": 100.0, "default": 75.0, "decimals": 3},
     "interpolationMode": {"label": "Interp Mode", "min": 0, "max": 3, "default": 0, "decimals": 0},
     "interpolationOptimize": {"label": "Optimize", "min": 0, "max": 1, "default": 0, "decimals": 0},
 }
@@ -96,6 +96,7 @@ _sweep_original_ep_size = None
 
 _always_on_top_enabled = True
 _always_on_top_draw_job = None
+SWEEP_MODE_ITEMS = ["Precision", "Start to End", "EP to EP", "Distance"]
 
 
 # ============================================================
@@ -2240,8 +2241,9 @@ def _pr_set_ui_values(radius, segments):
 
 
 def _stop_chamfer_drag_tool():
-    global _chamfer_prev_ctx, _chamfer_drag_anchor, _chamfer_drag_job
+    global _chamfer_prev_ctx, _chamfer_drag_anchor, _chamfer_drag_job, _last_drag_update_time
     _chamfer_drag_anchor = None
+    _last_drag_update_time = 0.0
     if _chamfer_prev_ctx:
         try:
             if cmds.contextInfo(_chamfer_prev_ctx, exists=True):
@@ -2267,9 +2269,10 @@ def _on_tool_changed_kill_if_not_ours():
 
 
 def _pr_drag_press():
-    global _chamfer_drag_anchor, _chamfer_drag_start_radius, _chamfer_drag_start_segments
+    global _chamfer_drag_anchor, _chamfer_drag_start_radius, _chamfer_drag_start_segments, _last_drag_update_time
     try:
         _chamfer_drag_anchor = cmds.draggerContext(_chamfer_drag_ctx, q=True, anchorPoint=True)
+        _last_drag_update_time = 0.0
         ui = _pr_get_ui()
         if ui:
             _chamfer_drag_start_radius = ui.rad_spin.value()
@@ -2281,9 +2284,11 @@ def _pr_drag_press():
 def _pr_drag_move():
     global _chamfer_drag_anchor, _chamfer_drag_start_radius, _chamfer_drag_start_segments
     global _last_drag_update_time
-    if not _chamfer_drag_anchor:
-        return
     try:
+        if not _chamfer_drag_anchor:
+            _chamfer_drag_anchor = cmds.draggerContext(_chamfer_drag_ctx, q=True, anchorPoint=True)
+            if not _chamfer_drag_anchor:
+                return
         now = time.time()
         if (now - _last_drag_update_time) < (1.0 / float(DRAG_MAX_FPS)):
             return
@@ -2329,7 +2334,7 @@ def _pr_ensure_drag_ctx():
 def start_chamfer_viewport_drag(auto=False):
     global _chamfer_prev_ctx, _chamfer_drag_anchor
     global _chamfer_drag_start_radius, _chamfer_drag_start_segments
-    global _chamfer_drag_job
+    global _chamfer_drag_job, _last_drag_update_time
 
     if not _chamfer_active or not is_chamfer_curve_selected():
         if not auto:
@@ -2339,6 +2344,7 @@ def start_chamfer_viewport_drag(auto=False):
     _pr_ensure_drag_ctx()
     _chamfer_prev_ctx = cmds.currentCtx()
     _chamfer_drag_anchor = None
+    _last_drag_update_time = 0.0
 
     ui = _pr_get_ui()
     if ui:
@@ -2609,7 +2615,13 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         row.addWidget(self.sweep_btn)
         row.addWidget(self.bake_btn)
         layout.addLayout(row)
-        self._add_sweep_settings_rows(layout)
+        self.sweep_settings_widget = QtWidgets.QWidget()
+        self.sweep_settings_layout = QtWidgets.QVBoxLayout(self.sweep_settings_widget)
+        self.sweep_settings_layout.setContentsMargins(0, 0, 0, 0)
+        self.sweep_settings_layout.setSpacing(4)
+        self._add_sweep_settings_rows(self.sweep_settings_layout)
+        layout.addWidget(self.sweep_settings_widget)
+        self.sweep_settings_widget.setVisible(False)
 
         layout.addStretch()
         self._connect_signals()
@@ -2792,16 +2804,36 @@ class PRCurveToolsUI(QtWidgets.QDialog):
 
     def _add_sweep_settings_rows(self, parent_layout):
         for attr, spec in SWEEP_UI_SPECS.items():
-            slider, spinbox = self._add_sweep_slider(
-                parent_layout,
-                spec["label"],
-                spec["min"],
-                spec["max"],
-                spec["default"],
-                spec["decimals"],
-                attr
-            )
-            self._sweep_controls[attr] = (slider, spinbox)
+            if attr == "interpolationMode":
+                self._sweep_controls[attr] = self._add_sweep_mode_combo(parent_layout)
+            else:
+                slider, spinbox = self._add_sweep_slider(
+                    parent_layout,
+                    spec["label"],
+                    spec["min"],
+                    spec["max"],
+                    spec["default"],
+                    spec["decimals"],
+                    attr
+                )
+                self._sweep_controls[attr] = (slider, spinbox)
+
+    def _add_sweep_mode_combo(self, parent_layout):
+        row = QtWidgets.QHBoxLayout()
+        row.setSpacing(5)
+
+        lbl = QtWidgets.QLabel("Interp Mode")
+        lbl.setFixedWidth(62)
+        row.addWidget(lbl)
+
+        combo = QtWidgets.QComboBox()
+        combo.addItems(SWEEP_MODE_ITEMS)
+        combo.setCurrentIndex(int(SWEEP_UI_SPECS["interpolationMode"]["default"]))
+        combo.currentIndexChanged.connect(lambda idx: set_sweep_preview_setting("interpolationMode", int(idx)))
+        row.addWidget(combo)
+        row.addStretch()
+        parent_layout.addLayout(row)
+        return ("combo", combo)
 
     def _add_sweep_slider(self, parent_layout, label, min_val, max_val, default, decimals, attr):
         row = QtWidgets.QHBoxLayout()
@@ -2908,6 +2940,22 @@ class PRCurveToolsUI(QtWidgets.QDialog):
                 padding: 2px;
                 font-size: 11px;
             }
+            QComboBox {
+                background-color: #1e1e1e;
+                color: #909090;
+                border: 1px solid #2e2e2e;
+                border-radius: 2px;
+                padding: 2px 4px;
+                font-size: 11px;
+                min-height: 18px;
+            }
+            QComboBox::drop-down { border: none; width: 16px; }
+            QComboBox QAbstractItemView {
+                background-color: #1e1e1e;
+                color: #b0b0b0;
+                selection-background-color: #333;
+                border: 1px solid #2e2e2e;
+            }
             QCheckBox { color: #707070; font-size: 11px; spacing: 6px; }
             QCheckBox::indicator {
                 width: 13px; height: 13px;
@@ -2954,6 +3002,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         self.snap_chk.toggled.connect(self._on_snap_toggled)
         self.on_top_chk.toggled.connect(self._on_always_on_top_toggled)
         self._sync_sweep_ui_from_settings()
+        self._update_bake_button()
 
     # ------------------------------------------------------------------
     # CONTEXT MENUS
@@ -3053,28 +3102,38 @@ class PRCurveToolsUI(QtWidgets.QDialog):
     def _sync_sweep_ui_from_settings(self):
         for attr, control in self._sweep_controls.items():
             spec = SWEEP_UI_SPECS.get(attr, {})
-            decimals = spec.get("decimals", 3)
             cur_val = _sweep_preview_settings.get(attr, spec.get("default", 0))
-            slider, spinbox = control
-            min_val = spec.get("min", 0.0)
-            max_val = spec.get("max", 1.0)
-            try:
-                ratio = (float(cur_val) - min_val) / (max_val - min_val)
-            except Exception:
-                ratio = 0.0
-            ratio = max(0.0, min(1.0, ratio))
-            spinbox.blockSignals(True)
-            slider.blockSignals(True)
-            if decimals == 0:
-                spinbox.setValue(int(round(float(cur_val))))
+            if isinstance(control, tuple) and control and control[0] == "combo":
+                combo = control[1]
+                idx = int(max(0, min(len(SWEEP_MODE_ITEMS) - 1, int(round(float(cur_val))))))
+                combo.blockSignals(True)
+                combo.setCurrentIndex(idx)
+                combo.blockSignals(False)
             else:
-                spinbox.setValue(float(cur_val))
-            slider.setValue(int(ratio * 1000))
-            spinbox.blockSignals(False)
-            slider.blockSignals(False)
+                decimals = spec.get("decimals", 3)
+                slider, spinbox = control
+                min_val = spec.get("min", 0.0)
+                max_val = spec.get("max", 1.0)
+                try:
+                    ratio = (float(cur_val) - min_val) / (max_val - min_val)
+                except Exception:
+                    ratio = 0.0
+                ratio = max(0.0, min(1.0, ratio))
+                spinbox.blockSignals(True)
+                slider.blockSignals(True)
+                if decimals == 0:
+                    spinbox.setValue(int(round(float(cur_val))))
+                else:
+                    spinbox.setValue(float(cur_val))
+                slider.setValue(int(ratio * 1000))
+                spinbox.blockSignals(False)
+                slider.blockSignals(False)
 
     def _update_bake_button(self):
-        self.bake_btn.setEnabled(is_sweep_preview_active())
+        is_active = is_sweep_preview_active()
+        self.bake_btn.setEnabled(is_active)
+        if hasattr(self, "sweep_settings_widget"):
+            self.sweep_settings_widget.setVisible(is_active)
 
     def _on_chamfer_changed(self):
         if _chamfer_active and is_chamfer_curve_selected():
@@ -3157,6 +3216,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         sweep_mesh_preview()
         for attr, spec in SWEEP_UI_SPECS.items():
             set_sweep_preview_setting(attr, _sweep_preview_settings.get(attr, spec["default"]))
+        self._sync_sweep_ui_from_settings()
         self._update_bake_button()
 
     def _do_bake(self):

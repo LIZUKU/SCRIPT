@@ -8,8 +8,10 @@ SOURCE_SET_NAME    = "TMP_bevel_sourceEdges_SET"
 ALL_EDGES_SET_NAME = "TMP_bevel_allEdges_SET"
 
 PARALLEL_DOT_THRESHOLD = 0.70
-# New edges shorter than (avg_source_len * this) are rejected as bevel caps
+# New edges too short compared to nearest source edge are rejected
 MIN_LENGTH_RATIO = 0.35
+# New edges too long compared to nearest source edge are rejected
+MAX_LENGTH_RATIO = 2.25
 # New edges too far from source mids are rejected
 MAX_MID_DISTANCE_RATIO = 1.75
 # Endpoint locality fallback: max distance from edge endpoints to source vertices
@@ -181,46 +183,51 @@ def _best_group(edge_data, groups):
     return min(candidates,
                key=lambda g: min(_dsq(edge_data["mid"], m) for m in g["mids"]) if g["mids"] else float("inf"))
 
-def _best_local_source_dir(edge_data, group):
-    best = min(group["source_datas"], key=lambda d: _dsq(edge_data["mid"], d["mid"]))
-    return best.get("dir")
+def _best_local_source(edge_data, group):
+    if not group.get("source_datas"):
+        return None
+    return min(group["source_datas"], key=lambda d: _dsq(edge_data["mid"], d["mid"]))
 
 # -- Filter -------------------------------------------------------------------
 
 def _passes_locality_and_length(edge_data, group):
+    local_source = _best_local_source(edge_data, group)
+    if not local_source:
+        return False
+
     # Gate 0 — locality (reject branches/fans that drift away from source mids)
-    max_mid_dist = group["avg_len"] * MAX_MID_DISTANCE_RATIO
-    nearest_mid_dist = math.sqrt(min(_dsq(edge_data["mid"], m) for m in group["mids"])) if group["mids"] else float("inf")
+    src_len = max(local_source["len"], 1e-8)
+    max_mid_dist = src_len * MAX_MID_DISTANCE_RATIO
+    nearest_mid_dist = math.sqrt(_dsq(edge_data["mid"], local_source["mid"]))
     near_mid_ok = nearest_mid_dist <= max_mid_dist
 
     # Fallback locality for corner/complex bevels:
-    # keep edges whose endpoints remain close to the original source vertices.
-    source_vtx = group.get("source_verts") or []
-    if source_vtx:
-        vtx_positions = [_vpos(v) for v in source_vtx]
-        end_to_source = min(
-            min(math.sqrt(_dsq(edge_data["v1"], p)), math.sqrt(_dsq(edge_data["v2"], p)))
-            for p in vtx_positions
-        ) if vtx_positions else float("inf")
-    else:
-        end_to_source = float("inf")
+    # keep edges whose endpoints remain close to nearest source edge endpoints.
+    ref_v1, ref_v2 = local_source["v1"], local_source["v2"]
+    end_to_source = min(
+        math.sqrt(_dsq(edge_data["v1"], ref_v1)),
+        math.sqrt(_dsq(edge_data["v1"], ref_v2)),
+        math.sqrt(_dsq(edge_data["v2"], ref_v1)),
+        math.sqrt(_dsq(edge_data["v2"], ref_v2))
+    )
 
-    max_vtx_dist = group["avg_len"] * MAX_VERTEX_DISTANCE_RATIO
+    max_vtx_dist = src_len * MAX_VERTEX_DISTANCE_RATIO
     near_vtx_ok = end_to_source <= max_vtx_dist
 
     if not (near_mid_ok or near_vtx_ok):
         return False
 
     # Gate 1 — length
-    min_len = group["avg_len"] * MIN_LENGTH_RATIO
-    return edge_data["len"] >= min_len
+    edge_to_source_ratio = edge_data["len"] / src_len
+    return MIN_LENGTH_RATIO <= edge_to_source_ratio <= MAX_LENGTH_RATIO
 
 def _edge_passes_group(edge_data, group, threshold=PARALLEL_DOT_THRESHOLD):
     if not _passes_locality_and_length(edge_data, group):
         return False
 
     # Gate 2 — direction (always local, handles cornered/open source selections better)
-    ref_dir = _best_local_source_dir(edge_data, group)
+    local_source = _best_local_source(edge_data, group)
+    ref_dir = local_source.get("dir") if local_source else None
     if not ref_dir:
         return False
 
@@ -230,8 +237,8 @@ def _filter_edges(new_edges, groups, threshold=PARALLEL_DOT_THRESHOLD):
     """
     Three gates — all must pass:
       1. Parallel  : |cos(angle)| >= threshold
-      2. Length    : edge.len >= group.avg_len * MIN_LENGTH_RATIO
-                     (rejects short cap/corner edges created at bevel ends)
+      2. Length    : MIN_LENGTH_RATIO <= edge.len / nearest_source.len <= MAX_LENGTH_RATIO
+                     (rejects caps/corner drifts that do not match the local source edge scale)
       3. Group     : same transform, nearest source group
     """
     kept_by_group = {g["id"]: [] for g in groups}
@@ -274,10 +281,6 @@ def _expand_loops(kept_by_group, groups, allowed_edges=None):
             except Exception as e:
                 print("[Bevel] SelectEdgeLoopSp failed for group {}: {}".format(group["id"], e))
 
-        try: mel.eval("SelectContiguousEdges;")
-        except Exception as e:
-            print("[Bevel] SelectContiguousEdges failed for group {}: {}".format(group["id"], e))
-
         mel_edges = _flatten(cmds.ls(sl=True)) or []
         for e in mel_edges:
             if allowed and e not in allowed:
@@ -289,7 +292,7 @@ def _expand_loops(kept_by_group, groups, allowed_edges=None):
                 seen.add(e); final.append(e)
 
         # Connectivity rescue:
-        # Maya's contiguous selection sometimes misses bevel strips on corner/rounded profiles.
+        # Maya's loop selection can miss strips on corner/rounded profiles.
         # Starting from strict seed edges, grow through allowed new edges using only locality+length.
         stack = [e for e in edges if e in allowed_data]
         visited = set(stack)

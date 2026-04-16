@@ -655,7 +655,9 @@ def build_radial_array(objects, angle=360, number=3, repeat=1,
         if not _safe_exists(obj):
             continue
 
-        seed_pos = _PROARRAY_STATE["original_positions"].get(obj, {}).get("position")
+        seed_pos = _PROARRAY_STATE["original_bbox_centers"].get(obj) or get_bbox_center(obj)
+        if not seed_pos:
+            seed_pos = _PROARRAY_STATE["original_positions"].get(obj, {}).get("position")
         if not seed_pos:
             seed_pos = cmds.xform(obj, q=True, ws=True, t=True)
 
@@ -686,6 +688,14 @@ def build_radial_array(objects, angle=360, number=3, repeat=1,
                     new_obj = cmds.instance(obj, name="%s%s_r%d_%d" % (PROARRAY_PREVIEW_PREFIX, obj.split("|")[-1], r, i))[0]
                 else:
                     new_obj = cmds.duplicate(obj, name="%s%s_r%d_%d" % (PROARRAY_PREVIEW_PREFIX, obj.split("|")[-1], r, i))[0]
+
+                # Important: force a stable pivot on mesh bbox center to avoid large offsets
+                # when source transforms have pivots far from the geometry.
+                try:
+                    bbox_center = _PROARRAY_STATE["original_bbox_centers"].get(obj) or get_bbox_center(obj)
+                    cmds.xform(new_obj, ws=True, pivots=bbox_center)
+                except:
+                    pass
 
                 if axis == 'x':
                     cmds.rotate(current_angle, 0, 0, new_obj, pivot=center, relative=True, worldSpace=True)
@@ -1576,7 +1586,9 @@ class ProArrayTab(QtWidgets.QWidget, SliderMixin):
         is_radial = self.radio_radial.isChecked()
 
         if is_radial:
-            pivot = cmds.xform(valid_objects[0], query=True, worldSpace=True, rotatePivot=True)
+            # Use bbox center as default locator pivot for radial mode.
+            # This avoids the common "giga offset" when mesh pivots are far away.
+            pivot = _PROARRAY_STATE["original_bbox_centers"][valid_objects[0]]
         else:
             bbox_center = _PROARRAY_STATE["original_bbox_centers"][valid_objects[0]]
             pivot = [bbox_center[0] + 5, bbox_center[1], bbox_center[2]]

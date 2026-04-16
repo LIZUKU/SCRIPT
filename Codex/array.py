@@ -36,10 +36,15 @@ import maya.OpenMayaUI as omui
 # GLOBAL CONSTANTS
 # ============================================================
 WINDOW_TITLE = "Pro Tools Combined"
+SETTINGS_ORG = "ScriptTools"
+SETTINGS_APP = "ProToolsCombined"
 
 ACCENT_RED_BG = "#5a2a2a"
 ACCENT_RED_BORDER = "#e84d4d"
 ACCENT_RED_TEXT = "#e84d4d"
+AXIS_X_COLOR = "#8f4a4a"
+AXIS_Y_COLOR = "#4a8f4a"
+AXIS_Z_COLOR = "#4a6f8f"
 
 PROARRAY_LOCATOR_NAME = "ProArray_Pivot_LOC"
 PROARRAY_PREVIEW_PREFIX = "ProArray_Preview_"
@@ -1329,6 +1334,7 @@ def curve_bake_distribution(group_result=True):
 class ProArrayTab(QtWidgets.QWidget, SliderMixin):
     def __init__(self, parent=None):
         super(ProArrayTab, self).__init__(parent)
+        self._settings_defaults = []
 
         self._started = False
         self._baked = False
@@ -1347,6 +1353,44 @@ class ProArrayTab(QtWidgets.QWidget, SliderMixin):
 
         self._build_ui()
         self._setup_icons()
+
+    def _register_default(self, widget, value):
+        self._settings_defaults.append((widget, value))
+
+    def load_settings(self, settings):
+        settings.beginGroup("proarray")
+        for widget, default_value in self._settings_defaults:
+            key = widget.property("settings_key")
+            if not key:
+                continue
+            raw = settings.value(key, default_value)
+            if isinstance(widget, (QtWidgets.QSpinBox, QtWidgets.QDoubleSpinBox)):
+                widget.setValue(float(raw) if isinstance(widget, QtWidgets.QDoubleSpinBox) else int(float(raw)))
+            elif isinstance(widget, (QtWidgets.QCheckBox, QtWidgets.QRadioButton)):
+                if isinstance(raw, bool):
+                    widget.setChecked(raw)
+                else:
+                    widget.setChecked(str(raw).lower() in ("1", "true", "yes"))
+        settings.endGroup()
+
+    def save_settings(self, settings):
+        settings.beginGroup("proarray")
+        for widget, _ in self._settings_defaults:
+            key = widget.property("settings_key")
+            if not key:
+                continue
+            if isinstance(widget, (QtWidgets.QSpinBox, QtWidgets.QDoubleSpinBox)):
+                settings.setValue(key, widget.value())
+            elif isinstance(widget, (QtWidgets.QCheckBox, QtWidgets.QRadioButton)):
+                settings.setValue(key, widget.isChecked())
+        settings.endGroup()
+
+    def reset_settings(self):
+        for widget, default_value in self._settings_defaults:
+            if isinstance(widget, (QtWidgets.QSpinBox, QtWidgets.QDoubleSpinBox)):
+                widget.setValue(default_value)
+            elif isinstance(widget, (QtWidgets.QCheckBox, QtWidgets.QRadioButton)):
+                widget.setChecked(default_value)
 
     def _request_parent_resize(self):
         parent = self.window()
@@ -1420,8 +1464,12 @@ class ProArrayTab(QtWidgets.QWidget, SliderMixin):
         self.radio_radial = QtWidgets.QRadioButton("Radial")
         self.radio_radial.setChecked(True)
         self.radio_radial.toggled.connect(self._on_mode_changed)
+        self.radio_radial.setProperty("settings_key", "mode_radial")
+        self._register_default(self.radio_radial, True)
         self.radio_rect = QtWidgets.QRadioButton("Rectangular")
         self.radio_rect.toggled.connect(self._on_mode_changed)
+        self.radio_rect.setProperty("settings_key", "mode_rect")
+        self._register_default(self.radio_rect, False)
         mode_layout.addWidget(self.radio_radial)
         mode_layout.addWidget(self.radio_rect)
         mode_layout.addStretch()
@@ -1439,9 +1487,17 @@ class ProArrayTab(QtWidgets.QWidget, SliderMixin):
         radial_layout.addWidget(radial_label)
 
         self.angle_slider, self.angle_spin = self._add_slider(radial_layout, "Angle", 1, 360, 360, 1)
+        self.angle_spin.setProperty("settings_key", "angle")
+        self._register_default(self.angle_spin, 360.0)
         self.number_slider, self.number_spin = self._add_slider(radial_layout, "Number", 1, 50, 8, 0)
+        self.number_spin.setProperty("settings_key", "number")
+        self._register_default(self.number_spin, 8)
         self.repeat_slider, self.repeat_spin = self._add_slider(radial_layout, "Repeat", 1, 10, 1, 0)
+        self.repeat_spin.setProperty("settings_key", "repeat")
+        self._register_default(self.repeat_spin, 1)
         self.repeat_dist_slider, self.repeat_dist_spin = self._add_slider(radial_layout, "Repeat Distance", 0.0, 100.0, 1.0, 3)
+        self.repeat_dist_spin.setProperty("settings_key", "repeat_distance")
+        self._register_default(self.repeat_dist_spin, 1.0)
 
         axis_layout = QtWidgets.QHBoxLayout()
         axis_layout.setSpacing(8)
@@ -1453,6 +1509,12 @@ class ProArrayTab(QtWidgets.QWidget, SliderMixin):
         self.axis_y = QtWidgets.QRadioButton("Y")
         self.axis_y.setChecked(True)
         self.axis_z = QtWidgets.QRadioButton("Z")
+        self.axis_x.setProperty("settings_key", "axis_x")
+        self.axis_y.setProperty("settings_key", "axis_y")
+        self.axis_z.setProperty("settings_key", "axis_z")
+        self._register_default(self.axis_x, False)
+        self._register_default(self.axis_y, True)
+        self._register_default(self.axis_z, False)
 
         self.axis_x.toggled.connect(self._on_rebuild)
         self.axis_y.toggled.connect(self._on_rebuild)
@@ -1473,6 +1535,10 @@ class ProArrayTab(QtWidgets.QWidget, SliderMixin):
         self.rad_dir_radial = QtWidgets.QRadioButton("Radial")
         self.rad_dir_axis = QtWidgets.QRadioButton("Axis")
         self.rad_dir_radial.setChecked(True)
+        self.rad_dir_radial.setProperty("settings_key", "radial_dir_radial")
+        self.rad_dir_axis.setProperty("settings_key", "radial_dir_axis")
+        self._register_default(self.rad_dir_radial, True)
+        self._register_default(self.rad_dir_axis, False)
         self.rad_dir_radial.toggled.connect(self._on_rebuild)
         self.rad_dir_axis.toggled.connect(self._on_rebuild)
 
@@ -1494,10 +1560,20 @@ class ProArrayTab(QtWidgets.QWidget, SliderMixin):
         rect_layout.addWidget(rect_label)
 
         self.copies_x_slider, self.copies_x_spin = self._add_slider(rect_layout, "Copies X", 1, 30, 3, 0)
+        self.copies_x_spin.setProperty("settings_key", "copies_x")
+        self._register_default(self.copies_x_spin, 3)
         self.copies_y_slider, self.copies_y_spin = self._add_slider(rect_layout, "Copies Y", 1, 30, 1, 0)
+        self.copies_y_spin.setProperty("settings_key", "copies_y")
+        self._register_default(self.copies_y_spin, 1)
         self.copies_z_slider, self.copies_z_spin = self._add_slider(rect_layout, "Copies Z", 1, 30, 1, 0)
+        self.copies_z_spin.setProperty("settings_key", "copies_z")
+        self._register_default(self.copies_z_spin, 1)
         self.rect_repeat_slider, self.rect_repeat_spin = self._add_slider(rect_layout, "Repeat", 1, 10, 1, 0)
+        self.rect_repeat_spin.setProperty("settings_key", "rect_repeat")
+        self._register_default(self.rect_repeat_spin, 1)
         self.rect_repeat_dist_slider, self.rect_repeat_dist_spin = self._add_slider(rect_layout, "Repeat Distance", 0.0, 100.0, 1.0, 3)
+        self.rect_repeat_dist_spin.setProperty("settings_key", "rect_repeat_distance")
+        self._register_default(self.rect_repeat_dist_spin, 1.0)
 
         rdir_layout = QtWidgets.QHBoxLayout()
         rdir_layout.setSpacing(8)
@@ -1510,6 +1586,14 @@ class ProArrayTab(QtWidgets.QWidget, SliderMixin):
         self.rect_dir_y = QtWidgets.QRadioButton("Y")
         self.rect_dir_z = QtWidgets.QRadioButton("Z")
         self.rect_dir_x.setChecked(True)
+        self.rect_dir_end.setProperty("settings_key", "rect_dir_end")
+        self.rect_dir_x.setProperty("settings_key", "rect_dir_x")
+        self.rect_dir_y.setProperty("settings_key", "rect_dir_y")
+        self.rect_dir_z.setProperty("settings_key", "rect_dir_z")
+        self._register_default(self.rect_dir_end, False)
+        self._register_default(self.rect_dir_x, True)
+        self._register_default(self.rect_dir_y, False)
+        self._register_default(self.rect_dir_z, False)
 
         for w in (self.rect_dir_end, self.rect_dir_x, self.rect_dir_y, self.rect_dir_z):
             w.toggled.connect(self._on_rebuild)
@@ -1532,10 +1616,14 @@ class ProArrayTab(QtWidgets.QWidget, SliderMixin):
         self.chk_instance = QtWidgets.QCheckBox("Use Instances (linked)")
         self.chk_instance.setChecked(True)
         self.chk_instance.toggled.connect(self._on_rebuild)
+        self.chk_instance.setProperty("settings_key", "use_instance")
+        self._register_default(self.chk_instance, True)
         layout.addWidget(self.chk_instance)
 
         self.chk_group = QtWidgets.QCheckBox("Group Result")
         self.chk_group.setChecked(True)
+        self.chk_group.setProperty("settings_key", "group_result")
+        self._register_default(self.chk_group, True)
         layout.addWidget(self.chk_group)
 
         layout.addSpacing(6)
@@ -1819,6 +1907,7 @@ class ProArrayTab(QtWidgets.QWidget, SliderMixin):
 class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
     def __init__(self, parent=None):
         super(CurveDistributeTab, self).__init__(parent)
+        self._settings_defaults = []
 
         self._rebuild_timer = QtCore.QTimer()
         self._rebuild_timer.setSingleShot(True)
@@ -1829,6 +1918,49 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
 
         self._build_ui()
         self._setup_icons()
+
+    def _register_default(self, widget, value):
+        self._settings_defaults.append((widget, value))
+
+    def load_settings(self, settings):
+        settings.beginGroup("curve")
+        count_max = int(float(settings.value("count_max", 30)))
+        self._set_count_max(count_max)
+        for widget, default_value in self._settings_defaults:
+            key = widget.property("settings_key")
+            if not key:
+                continue
+            raw = settings.value(key, default_value)
+            if isinstance(widget, (QtWidgets.QSpinBox, QtWidgets.QDoubleSpinBox)):
+                widget.setValue(float(raw) if isinstance(widget, QtWidgets.QDoubleSpinBox) else int(float(raw)))
+            elif isinstance(widget, (QtWidgets.QCheckBox, QtWidgets.QRadioButton)):
+                if isinstance(raw, bool):
+                    widget.setChecked(raw)
+                else:
+                    widget.setChecked(str(raw).lower() in ("1", "true", "yes"))
+        settings.endGroup()
+        self._sync_count_preset_from_range()
+
+    def save_settings(self, settings):
+        settings.beginGroup("curve")
+        settings.setValue("count_max", int(self.count_spin.maximum()))
+        for widget, _ in self._settings_defaults:
+            key = widget.property("settings_key")
+            if not key:
+                continue
+            if isinstance(widget, (QtWidgets.QSpinBox, QtWidgets.QDoubleSpinBox)):
+                settings.setValue(key, widget.value())
+            elif isinstance(widget, (QtWidgets.QCheckBox, QtWidgets.QRadioButton)):
+                settings.setValue(key, widget.isChecked())
+        settings.endGroup()
+
+    def reset_settings(self):
+        for widget, default_value in self._settings_defaults:
+            if isinstance(widget, (QtWidgets.QSpinBox, QtWidgets.QDoubleSpinBox)):
+                widget.setValue(default_value)
+            elif isinstance(widget, (QtWidgets.QCheckBox, QtWidgets.QRadioButton)):
+                widget.setChecked(default_value)
+        self._set_count_max(30)
 
     def _request_parent_resize(self):
         parent = self.window()
@@ -1916,22 +2048,35 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         layout.addWidget(dist_label)
 
         self.count_slider, self.count_spin = self._add_slider(layout, "Count", 1, 1000, 10, 0, label_width=110)
+        self.count_spin.setProperty("settings_key", "count")
+        self._register_default(self.count_spin, 10)
+        self._add_count_range_controls(layout)
         self.start_slider, self.start_spin = self._add_slider(layout, "Start", 0.0, 1.0, 0.0, 3, label_width=110)
+        self.start_spin.setProperty("settings_key", "start")
+        self._register_default(self.start_spin, 0.0)
         self.end_slider, self.end_spin = self._add_slider(layout, "End", 0.0, 1.0, 1.0, 3, label_width=110)
+        self.end_spin.setProperty("settings_key", "end")
+        self._register_default(self.end_spin, 1.0)
 
         self.chk_auto_fit = QtWidgets.QCheckBox("Auto Fit Count")
         self.chk_auto_fit.setChecked(False)
         self.chk_auto_fit.toggled.connect(self._on_auto_fit_toggled)
+        self.chk_auto_fit.setProperty("settings_key", "auto_fit")
+        self._register_default(self.chk_auto_fit, False)
         layout.addWidget(self.chk_auto_fit)
 
         self.chk_lock_no_overlap = QtWidgets.QCheckBox("Lock to Non-Overlap Count")
         self.chk_lock_no_overlap.setChecked(True)
         self.chk_lock_no_overlap.toggled.connect(self._on_rebuild)
+        self.chk_lock_no_overlap.setProperty("settings_key", "lock_no_overlap")
+        self._register_default(self.chk_lock_no_overlap, True)
         layout.addWidget(self.chk_lock_no_overlap)
 
         self.chk_trim_ends = QtWidgets.QCheckBox("Trim Ends")
         self.chk_trim_ends.setChecked(True)
         self.chk_trim_ends.toggled.connect(self._on_rebuild)
+        self.chk_trim_ends.setProperty("settings_key", "trim_ends")
+        self._register_default(self.chk_trim_ends, True)
         layout.addWidget(self.chk_trim_ends)
 
         self.padding_slider, self.padding_spin = self._add_slider(layout, "Padding", -10.0, 50.0, 0.0, 3, label_width=110)
@@ -2071,7 +2216,99 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         btn_layout.addWidget(self.btn_bake)
 
         layout.addLayout(btn_layout)
+        self._register_persisted_controls()
         self._on_auto_fit_toggled()
+
+    def _register_persisted_controls(self):
+        controls = [
+            (self.padding_spin, "padding", 0.0),
+            (self.safety_spin, "fit_safety", 1.05),
+            (self.auto_max_spin, "auto_max", 1000),
+            (self.offx_spin, "off_x", 0.0),
+            (self.offy_spin, "off_y", 0.0),
+            (self.offz_spin, "off_z", 0.0),
+            (self.rotx_spin, "rot_x", 0.0),
+            (self.roty_spin, "rot_y", 0.0),
+            (self.rotz_spin, "rot_z", 0.0),
+            (self.rand_rotx_spin, "rand_rot_x", 0.0),
+            (self.rand_roty_spin, "rand_rot_y", 0.0),
+            (self.rand_rotz_spin, "rand_rot_z", 0.0),
+            (self.scale_spin, "scale", 1.0),
+            (self.rand_scale_spin, "rand_scale", 0.0),
+            (self.seed_spin, "seed", 1),
+            (self.chk_orient, "orient", True),
+            (self.orient_mode_world_up, "orient_world_up", True),
+            (self.orient_mode_curve_normal, "orient_curve_normal", False),
+            (self.chk_center_bbox, "center_bbox", False),
+            (self.chk_instance, "use_instance", True),
+            (self.chk_group, "group_result", True),
+            (self.fit_axis_x, "fit_axis_x", False),
+            (self.fit_axis_y, "fit_axis_y", False),
+            (self.fit_axis_z, "fit_axis_z", False),
+            (self.fit_axis_longest, "fit_axis_longest", True),
+        ]
+        for widget, key, default_value in controls:
+            widget.setProperty("settings_key", key)
+            self._register_default(widget, default_value)
+
+    def _set_count_max(self, max_value):
+        max_value = int(clamp(max_value, 10, 5000))
+        self.count_spin.setMaximum(max_value)
+        current = int(self.count_spin.value())
+        if current > max_value:
+            self.count_spin.setValue(max_value)
+
+    def _sync_count_preset_from_range(self):
+        max_v = int(self.count_spin.maximum())
+        if max_v <= 30:
+            self.count_preset_combo.setCurrentText("0-30")
+        elif max_v <= 100:
+            self.count_preset_combo.setCurrentText("0-100")
+        elif max_v <= 500:
+            self.count_preset_combo.setCurrentText("0-500")
+        else:
+            self.count_preset_combo.setCurrentText("0-1000+")
+
+    def _change_count_range(self, delta):
+        step = 10 if self.count_spin.maximum() < 100 else 50
+        self._set_count_max(self.count_spin.maximum() + (delta * step))
+        self._sync_count_preset_from_range()
+        self._on_rebuild()
+
+    def _on_count_preset_changed(self, text):
+        mapping = {"0-30": 30, "0-100": 100, "0-500": 500, "0-1000+": 1000}
+        self._set_count_max(mapping.get(text, 1000))
+        self._on_rebuild()
+
+    def _add_count_range_controls(self, parent_layout):
+        row = QtWidgets.QHBoxLayout()
+        row.setSpacing(4)
+        row.setContentsMargins(0, 0, 0, 0)
+
+        lbl = QtWidgets.QLabel("Count Range")
+        lbl.setFixedWidth(110)
+        row.addWidget(lbl)
+
+        self.count_preset_combo = QtWidgets.QComboBox()
+        self.count_preset_combo.addItems(["0-30", "0-100", "0-500", "0-1000+"])
+        self.count_preset_combo.setCurrentIndex(0)
+        self.count_preset_combo.currentTextChanged.connect(self._on_count_preset_changed)
+        row.addWidget(self.count_preset_combo)
+
+        btn_minus = QtWidgets.QPushButton("-")
+        btn_minus.setToolTip("Reduce count range")
+        btn_minus.setFixedSize(22, 20)
+        btn_minus.clicked.connect(lambda: self._change_count_range(-1))
+        row.addWidget(btn_minus)
+
+        btn_plus = QtWidgets.QPushButton("+")
+        btn_plus.setToolTip("Increase count range")
+        btn_plus.setFixedSize(22, 20)
+        btn_plus.clicked.connect(lambda: self._change_count_range(1))
+        row.addWidget(btn_plus)
+
+        row.addStretch()
+        parent_layout.addLayout(row)
 
     def _add_quick_rotation_buttons(self, parent_layout):
         container = QtWidgets.QHBoxLayout()
@@ -2099,6 +2336,12 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
             btn = QtWidgets.QPushButton(text)
             btn.setFixedHeight(20)
             btn.setMinimumWidth(44)
+            if text.startswith("X"):
+                btn.setStyleSheet("background-color: %s;" % AXIS_X_COLOR)
+            elif text.startswith("Y"):
+                btn.setStyleSheet("background-color: %s;" % AXIS_Y_COLOR)
+            elif text.startswith("Z"):
+                btn.setStyleSheet("background-color: %s;" % AXIS_Z_COLOR)
             if spin is None:
                 btn.clicked.connect(self._reset_rotation_offsets)
             else:
@@ -2483,9 +2726,11 @@ class ProToolsCombinedUI(QtWidgets.QDialog):
         self._min_width_proarray = 360
         self._min_width_curve = 390
         self._max_auto_height = 900
+        self._settings = QtCore.QSettings(SETTINGS_ORG, SETTINGS_APP)
 
         self._build_ui()
         apply_shared_style(self)
+        self._load_settings()
 
         self.tabs.setCurrentIndex(0)
 
@@ -2495,6 +2740,15 @@ class ProToolsCombinedUI(QtWidgets.QDialog):
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
+
+        top_row = QtWidgets.QHBoxLayout()
+        top_row.addStretch()
+        self.btn_reset_settings = QtWidgets.QPushButton("Reset All Settings")
+        self.btn_reset_settings.setToolTip("Reset ProArray + Curve settings and clear saved preferences")
+        self.btn_reset_settings.setFixedHeight(22)
+        self.btn_reset_settings.clicked.connect(self._on_reset_all_settings)
+        top_row.addWidget(self.btn_reset_settings)
+        layout.addLayout(top_row)
 
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.setDocumentMode(False)
@@ -2517,6 +2771,24 @@ class ProToolsCombinedUI(QtWidgets.QDialog):
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
         layout.addWidget(self.tabs)
+
+    def _load_settings(self):
+        self.tab_proarray.load_settings(self._settings)
+        self.tab_curve.load_settings(self._settings)
+        tab_index = int(float(self._settings.value("ui/current_tab", 0)))
+        self.tabs.setCurrentIndex(clamp(tab_index, 0, self.tabs.count() - 1))
+
+    def _save_settings(self):
+        self._settings.setValue("ui/current_tab", self.tabs.currentIndex())
+        self.tab_proarray.save_settings(self._settings)
+        self.tab_curve.save_settings(self._settings)
+        self._settings.sync()
+
+    def _on_reset_all_settings(self):
+        self._settings.clear()
+        self.tab_proarray.reset_settings()
+        self.tab_curve.reset_settings()
+        self.request_resize()
 
     def request_resize(self):
         QtCore.QTimer.singleShot(0, lambda: self._apply_tab_size(self.tabs.currentIndex(), force=True))
@@ -2562,6 +2834,7 @@ class ProToolsCombinedUI(QtWidgets.QDialog):
         self._apply_tab_size(index, force=True)
 
     def closeEvent(self, event):
+        self._save_settings()
         try:
             self.tab_proarray.shutdown()
         except:

@@ -12,6 +12,8 @@ PARALLEL_DOT_THRESHOLD = 0.70
 MIN_LENGTH_RATIO = 0.35
 # New edges too far from source mids are rejected
 MAX_MID_DISTANCE_RATIO = 1.75
+# Endpoint locality fallback: max distance from edge endpoints to source vertices
+MAX_VERTEX_DISTANCE_RATIO = 1.25
 
 # -- Utils --------------------------------------------------------------------
 
@@ -167,6 +169,7 @@ def _build_groups(source_edges):
                 "source_count" : len(comp),
                 "closed"       : closed,
                 "avg_len"      : avg_len,
+                "source_verts" : list({v for d in comp_datas for v in d["verts"]}),
             })
             gid += 1
 
@@ -188,7 +191,24 @@ def _edge_passes_group(edge_data, group, threshold=PARALLEL_DOT_THRESHOLD):
     # Gate 0 — locality (reject branches/fans that drift away from source mids)
     max_mid_dist = group["avg_len"] * MAX_MID_DISTANCE_RATIO
     nearest_mid_dist = math.sqrt(min(_dsq(edge_data["mid"], m) for m in group["mids"])) if group["mids"] else float("inf")
-    if nearest_mid_dist > max_mid_dist:
+    near_mid_ok = nearest_mid_dist <= max_mid_dist
+
+    # Fallback locality for corner/complex bevels:
+    # keep edges whose endpoints remain close to the original source vertices.
+    source_vtx = group.get("source_verts") or []
+    if source_vtx:
+        vtx_positions = [_vpos(v) for v in source_vtx]
+        end_to_source = min(
+            min(math.sqrt(_dsq(edge_data["v1"], p)), math.sqrt(_dsq(edge_data["v2"], p)))
+            for p in vtx_positions
+        ) if vtx_positions else float("inf")
+    else:
+        end_to_source = float("inf")
+
+    max_vtx_dist = group["avg_len"] * MAX_VERTEX_DISTANCE_RATIO
+    near_vtx_ok = end_to_source <= max_vtx_dist
+
+    if not (near_mid_ok or near_vtx_ok):
         return False
 
     # Gate 1 — length
@@ -230,7 +250,8 @@ def _filter_edges(new_edges, groups, threshold=PARALLEL_DOT_THRESHOLD):
 
 # -- Loop expansion -----------------------------------------------------------
 
-def _expand_loops(kept_by_group, groups):
+def _expand_loops(kept_by_group, groups, allowed_edges=None):
+    allowed = set(allowed_edges or [])
     final, seen = [], set()
     for group in groups:
         edges = kept_by_group.get(group["id"], [])
@@ -247,6 +268,8 @@ def _expand_loops(kept_by_group, groups):
             print("[Bevel] SelectContiguousEdges failed for group {}: {}".format(group["id"], e))
 
         for e in (_flatten(cmds.ls(sl=True)) or []):
+            if allowed and e not in allowed:
+                continue
             data = _edge_data(e)
             if not data or not _edge_passes_group(data, group):
                 continue
@@ -307,7 +330,7 @@ def _bevel_tool_changed_callback():
         cmds.warning("[Bevel] No new edges detected."); _cleanup(); return
 
     kept_by_group, removed = _filter_edges(new_edges, source_groups)
-    final = _expand_loops(kept_by_group, source_groups)
+    final = _expand_loops(kept_by_group, source_groups, allowed_edges=new_edges)
 
     if final:
         cmds.select(final, r=True)

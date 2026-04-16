@@ -1051,19 +1051,76 @@ def mirror_curve(axis='auto', mode='world', merge_threshold=0.001):
 # ============================================================
 # EDGE TO CURVE
 # ============================================================
+def _split_edges_by_connectivity(edges):
+    by_mesh = {}
+    for edge in edges:
+        mesh = edge.split(".e[", 1)[0]
+        by_mesh.setdefault(mesh, []).append(edge)
+
+    groups = []
+    for mesh, mesh_edges in by_mesh.items():
+        edge_to_verts = {}
+        vert_to_edges = {}
+
+        for edge in mesh_edges:
+            verts = cmds.polyListComponentConversion(edge, fromEdge=True, toVertex=True) or []
+            verts = cmds.ls(verts, fl=True) or []
+            if len(verts) < 2:
+                continue
+            edge_to_verts[edge] = set(verts)
+            for v in verts:
+                vert_to_edges.setdefault(v, set()).add(edge)
+
+        remaining = set(edge_to_verts.keys())
+        while remaining:
+            seed = next(iter(remaining))
+            stack = [seed]
+            chunk = []
+            while stack:
+                current = stack.pop()
+                if current not in remaining:
+                    continue
+                remaining.remove(current)
+                chunk.append(current)
+                for v in edge_to_verts.get(current, ()):
+                    for neighbor in vert_to_edges.get(v, ()):
+                        if neighbor in remaining:
+                            stack.append(neighbor)
+            if chunk:
+                groups.append(chunk)
+
+    return groups
+
+
 def edge_to_curve():
-    sel = cmds.ls(sl=True, fl=True) or []
-    edges = [c for c in sel if ".e[" in c]
+    sel = cmds.ls(sl=True, fl=True, long=True) or []
+    edges = list(dict.fromkeys([c for c in sel if ".e[" in c]))
     if not edges:
         cmds.warning("[PR] Select edges.")
         return
-    cmds.select(edges, r=True)
+
+    edge_groups = _split_edges_by_connectivity(edges)
+    if not edge_groups:
+        cmds.warning("[PR] No valid edges found.")
+        return
+
+    created_curves = []
     try:
-        res = cmds.polyToCurve(form=2, degree=1, conformToSmoothMeshPreview=False)
-        if res:
-            add_to_isolate(res[0])
-            _set_curve_always_on_top(res[0])
-        cmds.select(res, r=True)
+        for group in edge_groups:
+            cmds.select(group, r=True)
+            res = cmds.polyToCurve(form=2, degree=1, conformToSmoothMeshPreview=False)
+            if not res:
+                continue
+            curve = res[0]
+            created_curves.append(curve)
+            add_to_isolate(curve)
+            _set_curve_always_on_top(curve)
+
+        if created_curves:
+            cmds.select(created_curves, r=True)
+            print("[PR] {} curve(s) created from {} edge group(s).".format(len(created_curves), len(edge_groups)))
+        else:
+            cmds.warning("[PR] polyToCurve failed on selected edges.")
     except Exception as e:
         cmds.warning("[PR] polyToCurve failed: {}".format(e))
 

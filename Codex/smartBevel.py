@@ -10,6 +10,8 @@ ALL_EDGES_SET_NAME = "TMP_bevel_allEdges_SET"
 PARALLEL_DOT_THRESHOLD = 0.70
 # New edges shorter than (avg_source_len * this) are rejected as bevel caps
 MIN_LENGTH_RATIO = 0.35
+# New edges too far from source mids are rejected
+MAX_MID_DISTANCE_RATIO = 1.75
 
 # -- Utils --------------------------------------------------------------------
 
@@ -182,6 +184,25 @@ def _best_local_source_dir(edge_data, group):
 
 # -- Filter -------------------------------------------------------------------
 
+def _edge_passes_group(edge_data, group, threshold=PARALLEL_DOT_THRESHOLD):
+    # Gate 0 — locality (reject branches/fans that drift away from source mids)
+    max_mid_dist = group["avg_len"] * MAX_MID_DISTANCE_RATIO
+    nearest_mid_dist = math.sqrt(min(_dsq(edge_data["mid"], m) for m in group["mids"])) if group["mids"] else float("inf")
+    if nearest_mid_dist > max_mid_dist:
+        return False
+
+    # Gate 1 — length
+    min_len = group["avg_len"] * MIN_LENGTH_RATIO
+    if edge_data["len"] < min_len:
+        return False
+
+    # Gate 2 — direction (always local, handles cornered/open source selections better)
+    ref_dir = _best_local_source_dir(edge_data, group)
+    if not ref_dir:
+        return False
+
+    return abs(_vdot(edge_data["dir"], ref_dir)) >= threshold
+
 def _filter_edges(new_edges, groups, threshold=PARALLEL_DOT_THRESHOLD):
     """
     Three gates — all must pass:
@@ -200,20 +221,7 @@ def _filter_edges(new_edges, groups, threshold=PARALLEL_DOT_THRESHOLD):
         group = _best_group(data, groups)
         if not group: removed.append(edge); continue
 
-        # Gate 2 — length
-        min_len = group["avg_len"] * MIN_LENGTH_RATIO
-        if data["len"] < min_len:
-            removed.append(edge); continue
-
-        # Gate 1 — direction
-        if group.get("closed"):
-            ref_dir = _best_local_source_dir(data, group)
-        else:
-            ref_dir = group.get("source_dir")
-
-        if not ref_dir: removed.append(edge); continue
-
-        if abs(_vdot(data["dir"], ref_dir)) >= threshold:
+        if _edge_passes_group(data, group, threshold=threshold):
             kept_by_group[group["id"]].append(edge)
         else:
             removed.append(edge)
@@ -239,6 +247,9 @@ def _expand_loops(kept_by_group, groups):
             print("[Bevel] SelectContiguousEdges failed for group {}: {}".format(group["id"], e))
 
         for e in (_flatten(cmds.ls(sl=True)) or []):
+            data = _edge_data(e)
+            if not data or not _edge_passes_group(data, group):
+                continue
             if e not in seen:
                 seen.add(e); final.append(e)
 

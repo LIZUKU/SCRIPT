@@ -187,7 +187,7 @@ def _best_local_source_dir(edge_data, group):
 
 # -- Filter -------------------------------------------------------------------
 
-def _edge_passes_group(edge_data, group, threshold=PARALLEL_DOT_THRESHOLD):
+def _passes_locality_and_length(edge_data, group):
     # Gate 0 — locality (reject branches/fans that drift away from source mids)
     max_mid_dist = group["avg_len"] * MAX_MID_DISTANCE_RATIO
     nearest_mid_dist = math.sqrt(min(_dsq(edge_data["mid"], m) for m in group["mids"])) if group["mids"] else float("inf")
@@ -213,7 +213,10 @@ def _edge_passes_group(edge_data, group, threshold=PARALLEL_DOT_THRESHOLD):
 
     # Gate 1 — length
     min_len = group["avg_len"] * MIN_LENGTH_RATIO
-    if edge_data["len"] < min_len:
+    return edge_data["len"] >= min_len
+
+def _edge_passes_group(edge_data, group, threshold=PARALLEL_DOT_THRESHOLD):
+    if not _passes_locality_and_length(edge_data, group):
         return False
 
     # Gate 2 — direction (always local, handles cornered/open source selections better)
@@ -252,6 +255,14 @@ def _filter_edges(new_edges, groups, threshold=PARALLEL_DOT_THRESHOLD):
 
 def _expand_loops(kept_by_group, groups, allowed_edges=None):
     allowed = set(allowed_edges or [])
+    allowed_data = {e: _edge_data(e) for e in allowed}
+    allowed_data = {e: d for e, d in allowed_data.items() if d}
+
+    by_vertex = {}
+    for e, d in allowed_data.items():
+        for v in d["verts"]:
+            by_vertex.setdefault(v, []).append(e)
+
     final, seen = [], set()
     for group in groups:
         edges = kept_by_group.get(group["id"], [])
@@ -267,7 +278,8 @@ def _expand_loops(kept_by_group, groups, allowed_edges=None):
         except Exception as e:
             print("[Bevel] SelectContiguousEdges failed for group {}: {}".format(group["id"], e))
 
-        for e in (_flatten(cmds.ls(sl=True)) or []):
+        mel_edges = _flatten(cmds.ls(sl=True)) or []
+        for e in mel_edges:
             if allowed and e not in allowed:
                 continue
             data = _edge_data(e)
@@ -275,6 +287,28 @@ def _expand_loops(kept_by_group, groups, allowed_edges=None):
                 continue
             if e not in seen:
                 seen.add(e); final.append(e)
+
+        # Connectivity rescue:
+        # Maya's contiguous selection sometimes misses bevel strips on corner/rounded profiles.
+        # Starting from strict seed edges, grow through allowed new edges using only locality+length.
+        stack = [e for e in edges if e in allowed_data]
+        visited = set(stack)
+        while stack:
+            cur = stack.pop()
+            cur_data = allowed_data.get(cur)
+            if not cur_data:
+                continue
+            if _passes_locality_and_length(cur_data, group) and cur not in seen:
+                seen.add(cur); final.append(cur)
+
+            for v in cur_data["verts"]:
+                for nb in by_vertex.get(v, []):
+                    if nb in visited:
+                        continue
+                    visited.add(nb)
+                    nb_data = allowed_data.get(nb)
+                    if nb_data and _passes_locality_and_length(nb_data, group):
+                        stack.append(nb)
 
     return final
 

@@ -1117,6 +1117,32 @@ def build_curve_distribution(
     results = []
     local_center_offset = get_mesh_center_offset_local(mesh)
 
+    proxy_mesh = None
+    source_mesh = mesh
+    use_proxy = False
+
+    try:
+        bbox = cmds.exactWorldBoundingBox(mesh)
+        bbox_center = [
+            (bbox[0] + bbox[3]) * 0.5,
+            (bbox[1] + bbox[4]) * 0.5,
+            (bbox[2] + bbox[5]) * 0.5,
+        ]
+        offset = [-bbox_center[0], -bbox_center[1], -bbox_center[2]]
+
+        if vec_len(offset) > 0.001:
+            proxy_mesh = cmds.duplicate(mesh, rr=True, name="__curveScatter_proxy__")[0]
+            cmds.move(offset[0], offset[1], offset[2], proxy_mesh + ".vtx[*]", r=True, ws=True)
+            cmds.delete(proxy_mesh, constructionHistory=True)
+            cmds.makeIdentity(proxy_mesh, apply=True, t=True, r=True, s=True, n=False, pn=True)
+            cmds.xform(proxy_mesh, ws=True, pivots=[0, 0, 0])
+            source_mesh = proxy_mesh
+            use_proxy = True
+    except Exception as e:
+        cmds.warning("Proxy mesh creation failed: {}".format(str(e)))
+        source_mesh = mesh
+        use_proxy = False
+
     trimmed_start_u = start_u
     trimmed_end_u = end_u
 
@@ -1140,103 +1166,108 @@ def build_curve_distribution(
             trimmed_start_u = start_u
             trimmed_end_u = end_u
 
-    for i in range(count):
-        if count == 1:
-            u = (trimmed_start_u + trimmed_end_u) * 0.5 if trim_ends else start_u
-        else:
-            t = float(i) / float(count - 1)
-            u = trimmed_start_u + ((trimmed_end_u - trimmed_start_u) * t)
+    try:
+        for i in range(count):
+            if count == 1:
+                u = (trimmed_start_u + trimmed_end_u) * 0.5 if trim_ends else start_u
+            else:
+                t = float(i) / float(count - 1)
+                u = trimmed_start_u + ((trimmed_end_u - trimmed_start_u) * t)
 
-        try:
-            pos = cmds.pointOnCurve(curve, pr=u, p=True, top=True)
-            tangent, curve_normal = get_curve_tangent_and_normal(curve, u)
-        except:
-            continue
+            try:
+                pos = cmds.pointOnCurve(curve, pr=u, p=True, top=True)
+                tangent, curve_normal = get_curve_tangent_and_normal(curve, u)
+            except:
+                continue
 
-        if use_instance:
-            new_obj = cmds.instance(mesh, name="{}{}{:03d}".format(CURVE_PREVIEW_PREFIX, name_prefix, i + 1))[0]
-        else:
-            new_obj = cmds.duplicate(mesh, rr=True, name="{}{}{:03d}".format(CURVE_PREVIEW_PREFIX, name_prefix, i + 1))[0]
+            if use_instance:
+                new_obj = cmds.instance(source_mesh, name="{}{}{:03d}".format(CURVE_PREVIEW_PREFIX, name_prefix, i + 1))[0]
+            else:
+                new_obj = cmds.duplicate(source_mesh, rr=True, name="{}{}{:03d}".format(CURVE_PREVIEW_PREFIX, name_prefix, i + 1))[0]
 
-        rx_rand = rand_rot[0] * get_random_for_index(random_seed, i, 0)
-        ry_rand = rand_rot[1] * get_random_for_index(random_seed, i, 1)
-        rz_rand = rand_rot[2] * get_random_for_index(random_seed, i, 2)
+            rx_rand = rand_rot[0] * get_random_for_index(random_seed, i, 0)
+            ry_rand = rand_rot[1] * get_random_for_index(random_seed, i, 1)
+            rz_rand = rand_rot[2] * get_random_for_index(random_seed, i, 2)
 
-        final_rot = (
-            offset_rot[0] + rx_rand,
-            offset_rot[1] + ry_rand,
-            offset_rot[2] + rz_rand
-        )
-
-        scale_rand_val = get_scale_random(random_seed, i)
-        final_uniform_scale = max(0.001, base_scale + (rand_scale * scale_rand_val))
-
-        if orient:
-            up_vec = (0.0, 1.0, 0.0)
-            if orient_mode == "curve_normal" and curve_normal and vec_len(curve_normal) > 1e-6:
-                up_vec = curve_normal
-
-            matrix = build_orientation_matrix(tangent, up_vec)
-            cmds.xform(new_obj, ws=True, matrix=matrix)
-
-            cmds.xform(
-                new_obj,
-                ws=True,
-                t=(
-                    pos[0] + offset_pos[0],
-                    pos[1] + offset_pos[1],
-                    pos[2] + offset_pos[2]
-                )
+            final_rot = (
+                offset_rot[0] + rx_rand,
+                offset_rot[1] + ry_rand,
+                offset_rot[2] + rz_rand
             )
 
-            cmds.rotate(
-                final_rot[0],
-                final_rot[1],
-                final_rot[2],
+            scale_rand_val = get_scale_random(random_seed, i)
+            final_uniform_scale = max(0.001, base_scale + (rand_scale * scale_rand_val))
+
+            if orient:
+                up_vec = (0.0, 1.0, 0.0)
+                if orient_mode == "curve_normal" and curve_normal and vec_len(curve_normal) > 1e-6:
+                    up_vec = curve_normal
+
+                matrix = build_orientation_matrix(tangent, up_vec)
+                cmds.xform(new_obj, ws=True, matrix=matrix)
+
+                cmds.xform(
+                    new_obj,
+                    ws=True,
+                    t=(
+                        pos[0] + offset_pos[0],
+                        pos[1] + offset_pos[1],
+                        pos[2] + offset_pos[2]
+                    )
+                )
+
+                cmds.rotate(
+                    final_rot[0],
+                    final_rot[1],
+                    final_rot[2],
+                    new_obj,
+                    r=True,
+                    os=True
+                )
+                if center_on_bbox and not use_proxy:
+                    cmds.move(
+                        -local_center_offset[0],
+                        -local_center_offset[1],
+                        -local_center_offset[2],
+                        new_obj,
+                        r=True,
+                        os=True
+                    )
+            else:
+                cmds.xform(
+                    new_obj,
+                    ws=True,
+                    t=(
+                        pos[0] + offset_pos[0],
+                        pos[1] + offset_pos[1],
+                        pos[2] + offset_pos[2]
+                    )
+                )
+
+                cmds.xform(new_obj, ws=True, ro=final_rot)
+                if center_on_bbox and not use_proxy:
+                    cmds.move(
+                        -local_center_offset[0],
+                        -local_center_offset[1],
+                        -local_center_offset[2],
+                        new_obj,
+                        r=True,
+                        os=True
+                    )
+
+            cmds.scale(
+                final_uniform_scale,
+                final_uniform_scale,
+                final_uniform_scale,
                 new_obj,
-                r=True,
+                r=False,
                 os=True
             )
-            if center_on_bbox:
-                cmds.move(
-                    -local_center_offset[0],
-                    -local_center_offset[1],
-                    -local_center_offset[2],
-                    new_obj,
-                    r=True,
-                    os=True
-                )
-        else:
-            cmds.xform(
-                new_obj,
-                ws=True,
-                t=(
-                    pos[0] + offset_pos[0],
-                    pos[1] + offset_pos[1],
-                    pos[2] + offset_pos[2]
-                )
-            )
-            cmds.xform(new_obj, ws=True, ro=final_rot)
-            if center_on_bbox:
-                cmds.move(
-                    -local_center_offset[0],
-                    -local_center_offset[1],
-                    -local_center_offset[2],
-                    new_obj,
-                    r=True,
-                    os=True
-                )
 
-        cmds.scale(
-            final_uniform_scale,
-            final_uniform_scale,
-            final_uniform_scale,
-            new_obj,
-            r=False,
-            os=True
-        )
-
-        results.append(new_obj)
+            results.append(new_obj)
+    finally:
+        if use_proxy and proxy_mesh and _safe_exists(proxy_mesh):
+            _safe_delete(proxy_mesh)
 
     if clear_existing:
         _CURVE_STATE["preview_objects"] = results

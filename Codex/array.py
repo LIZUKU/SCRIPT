@@ -997,6 +997,30 @@ def get_scale_random(seed, index):
     return rnd.uniform(-1.0, 1.0)
 
 
+def get_mesh_center_offset_local(mesh):
+    if not _safe_exists(mesh):
+        return (0.0, 0.0, 0.0)
+
+    try:
+        bbox = cmds.xform(mesh, q=True, bb=True, os=True)
+        pivot = cmds.xform(mesh, q=True, rp=True, os=True)
+        if not bbox or not pivot or len(bbox) < 6 or len(pivot) < 3:
+            return (0.0, 0.0, 0.0)
+
+        center = (
+            (bbox[0] + bbox[3]) * 0.5,
+            (bbox[1] + bbox[4]) * 0.5,
+            (bbox[2] + bbox[5]) * 0.5
+        )
+        return (
+            center[0] - pivot[0],
+            center[1] - pivot[1],
+            center[2] - pivot[2]
+        )
+    except:
+        return (0.0, 0.0, 0.0)
+
+
 def build_curve_distribution(
     mesh,
     curve,
@@ -1044,6 +1068,7 @@ def build_curve_distribution(
 
     count = max(1, int(count))
     results = []
+    local_center_offset = get_mesh_center_offset_local(mesh)
 
     trimmed_start_u = start_u
     trimmed_end_u = end_u
@@ -1121,6 +1146,14 @@ def build_curve_distribution(
                 r=True,
                 os=True
             )
+            cmds.move(
+                -local_center_offset[0],
+                -local_center_offset[1],
+                -local_center_offset[2],
+                new_obj,
+                r=True,
+                os=True
+            )
         else:
             cmds.xform(
                 new_obj,
@@ -1132,6 +1165,14 @@ def build_curve_distribution(
                 )
             )
             cmds.xform(new_obj, ws=True, ro=final_rot)
+            cmds.move(
+                -local_center_offset[0],
+                -local_center_offset[1],
+                -local_center_offset[2],
+                new_obj,
+                r=True,
+                os=True
+            )
 
         cmds.scale(
             final_uniform_scale,
@@ -1831,6 +1872,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         self.rotx_slider, self.rotx_spin = self._add_slider(layout, "Rotate X", -360.0, 360.0, 0.0, 2, label_width=110)
         self.roty_slider, self.roty_spin = self._add_slider(layout, "Rotate Y", -360.0, 360.0, 0.0, 2, label_width=110)
         self.rotz_slider, self.rotz_spin = self._add_slider(layout, "Rotate Z", -360.0, 360.0, 0.0, 2, label_width=110)
+        self._add_quick_rotation_buttons(layout)
 
         layout.addSpacing(2)
 
@@ -1900,6 +1942,51 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         btn_layout.addWidget(self.btn_bake)
 
         layout.addLayout(btn_layout)
+
+    def _add_quick_rotation_buttons(self, parent_layout):
+        container = QtWidgets.QHBoxLayout()
+        container.setSpacing(4)
+
+        label = QtWidgets.QLabel("Quick Rot")
+        label.setFixedWidth(110)
+        container.addWidget(label)
+
+        grid = QtWidgets.QGridLayout()
+        grid.setHorizontalSpacing(4)
+        grid.setVerticalSpacing(4)
+
+        buttons = [
+            ("X+45", self.rotx_spin, 45.0, 0, 0),
+            ("X+90", self.rotx_spin, 90.0, 0, 1),
+            ("Y+45", self.roty_spin, 45.0, 0, 2),
+            ("Y+90", self.roty_spin, 90.0, 0, 3),
+            ("Z+45", self.rotz_spin, 45.0, 1, 0),
+            ("Z+90", self.rotz_spin, 90.0, 1, 1),
+            ("Reset", None, 0.0, 1, 2),
+        ]
+
+        for text, spin, delta, r, c in buttons:
+            btn = QtWidgets.QPushButton(text)
+            btn.setFixedHeight(20)
+            btn.setMinimumWidth(44)
+            if spin is None:
+                btn.clicked.connect(self._reset_rotation_offsets)
+            else:
+                btn.clicked.connect(lambda _, s=spin, d=delta: self._increment_rotation(s, d))
+            grid.addWidget(btn, r, c)
+
+        container.addLayout(grid)
+        container.addStretch()
+        parent_layout.addLayout(container)
+
+    def _increment_rotation(self, spinbox, delta):
+        new_value = clamp(spinbox.value() + delta, spinbox.minimum(), spinbox.maximum())
+        spinbox.setValue(new_value)
+
+    def _reset_rotation_offsets(self):
+        self.rotx_spin.setValue(0.0)
+        self.roty_spin.setValue(0.0)
+        self.rotz_spin.setValue(0.0)
 
     def _setup_icons(self):
         self.btn_select_mesh.setText("\u25a3")

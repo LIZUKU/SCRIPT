@@ -969,9 +969,9 @@ def compute_auto_fit_count(mesh, curve, start_u, end_u,
     return max(1, count)
 
 
-def build_orientation_matrix_from_tangent(tangent, world_up=(0.0, 1.0, 0.0)):
+def build_orientation_matrix(tangent, up_vector=(0.0, 1.0, 0.0)):
     x_axis = vec_norm(list(tangent))
-    up = vec_norm(list(world_up))
+    up = vec_norm(list(up_vector))
 
     if abs(vec_dot(x_axis, up)) > 0.999:
         up = [0.0, 0.0, 1.0]
@@ -985,6 +985,41 @@ def build_orientation_matrix_from_tangent(tangent, world_up=(0.0, 1.0, 0.0)):
         z_axis[0], z_axis[1], z_axis[2], 0.0,
         0.0,       0.0,       0.0,       1.0
     ]
+
+
+def get_curve_tangent_and_normal(curve, u_ratio):
+    tangent = None
+    normal = None
+
+    try:
+        tangent = cmds.pointOnCurve(curve, pr=u_ratio, nt=True, top=True)
+    except:
+        tangent = None
+
+    try:
+        sel = om.MSelectionList()
+        sel.add(curve)
+        dag_path = sel.getDagPath(0)
+
+        if dag_path.apiType() == om.MFn.kTransform:
+            dag_path.extendToShape()
+
+        fn_curve = om.MFnNurbsCurve(dag_path)
+        min_u, max_u = fn_curve.knotDomain
+        param_u = min_u + ((max_u - min_u) * clamp(u_ratio, 0.0, 1.0))
+
+        tangent_vec = fn_curve.tangent(param_u, om.MSpace.kWorld)
+        normal_vec = fn_curve.normal(param_u, om.MSpace.kWorld)
+
+        tangent = [tangent_vec.x, tangent_vec.y, tangent_vec.z]
+        normal = [normal_vec.x, normal_vec.y, normal_vec.z]
+    except:
+        pass
+
+    if not tangent:
+        tangent = [1.0, 0.0, 0.0]
+
+    return tangent, normal
 
 
 def get_random_for_index(seed, index, axis_index):
@@ -1041,6 +1076,8 @@ def build_curve_distribution(
     auto_fit=False,
     clear_existing=True,
     name_prefix="",
+    orient_mode="world_up",
+    center_on_bbox=False,
 ):
     if not _safe_exists(mesh) or not _safe_exists(curve):
         return []
@@ -1102,7 +1139,7 @@ def build_curve_distribution(
 
         try:
             pos = cmds.pointOnCurve(curve, pr=u, p=True, top=True)
-            tangent = cmds.pointOnCurve(curve, pr=u, nt=True, top=True)
+            tangent, curve_normal = get_curve_tangent_and_normal(curve, u)
         except:
             continue
 
@@ -1125,7 +1162,11 @@ def build_curve_distribution(
         final_uniform_scale = max(0.001, base_scale + (rand_scale * scale_rand_val))
 
         if orient:
-            matrix = build_orientation_matrix_from_tangent(tangent, (0.0, 1.0, 0.0))
+            up_vec = (0.0, 1.0, 0.0)
+            if orient_mode == "curve_normal" and curve_normal and vec_len(curve_normal) > 1e-6:
+                up_vec = curve_normal
+
+            matrix = build_orientation_matrix(tangent, up_vec)
             cmds.xform(new_obj, ws=True, matrix=matrix)
 
             cmds.xform(
@@ -1146,14 +1187,15 @@ def build_curve_distribution(
                 r=True,
                 os=True
             )
-            cmds.move(
-                -local_center_offset[0],
-                -local_center_offset[1],
-                -local_center_offset[2],
-                new_obj,
-                r=True,
-                os=True
-            )
+            if center_on_bbox:
+                cmds.move(
+                    -local_center_offset[0],
+                    -local_center_offset[1],
+                    -local_center_offset[2],
+                    new_obj,
+                    r=True,
+                    os=True
+                )
         else:
             cmds.xform(
                 new_obj,
@@ -1165,14 +1207,15 @@ def build_curve_distribution(
                 )
             )
             cmds.xform(new_obj, ws=True, ro=final_rot)
-            cmds.move(
-                -local_center_offset[0],
-                -local_center_offset[1],
-                -local_center_offset[2],
-                new_obj,
-                r=True,
-                os=True
-            )
+            if center_on_bbox:
+                cmds.move(
+                    -local_center_offset[0],
+                    -local_center_offset[1],
+                    -local_center_offset[2],
+                    new_obj,
+                    r=True,
+                    os=True
+                )
 
         cmds.scale(
             final_uniform_scale,
@@ -1912,6 +1955,30 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         self.chk_orient.toggled.connect(self._on_rebuild)
         layout.addWidget(self.chk_orient)
 
+        orient_mode_row = QtWidgets.QHBoxLayout()
+        orient_mode_row.setSpacing(8)
+
+        orient_mode_lbl = QtWidgets.QLabel("Orient Mode")
+        orient_mode_lbl.setFixedWidth(110)
+        orient_mode_row.addWidget(orient_mode_lbl)
+
+        self.orient_mode_world_up = QtWidgets.QRadioButton("Tangent + WorldUp")
+        self.orient_mode_world_up.setChecked(True)
+        self.orient_mode_curve_normal = QtWidgets.QRadioButton("Tangent + Curve Normal")
+
+        self.orient_mode_world_up.toggled.connect(self._on_rebuild)
+        self.orient_mode_curve_normal.toggled.connect(self._on_rebuild)
+
+        orient_mode_row.addWidget(self.orient_mode_world_up)
+        orient_mode_row.addWidget(self.orient_mode_curve_normal)
+        orient_mode_row.addStretch()
+        layout.addLayout(orient_mode_row)
+
+        self.chk_center_bbox = QtWidgets.QCheckBox("Center on Mesh Bounding Box (can offset if pivot is far)")
+        self.chk_center_bbox.setChecked(False)
+        self.chk_center_bbox.toggled.connect(self._on_rebuild)
+        layout.addWidget(self.chk_center_bbox)
+
         self.chk_instance = QtWidgets.QCheckBox("Use Instances (linked)")
         self.chk_instance.setChecked(True)
         self.chk_instance.toggled.connect(self._on_rebuild)
@@ -2190,6 +2257,8 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
             )
 
             orient = self.chk_orient.isChecked()
+            orient_mode = "curve_normal" if self.orient_mode_curve_normal.isChecked() else "world_up"
+            center_on_bbox = self.chk_center_bbox.isChecked()
             use_instance = self.chk_instance.isChecked()
             random_seed = int(self.seed_spin.value())
 
@@ -2215,7 +2284,9 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
                     padding=padding,
                     auto_fit=auto_fit,
                     clear_existing=(idx == 0),
-                    name_prefix="c{}__".format(idx + 1)
+                    name_prefix="c{}__".format(idx + 1),
+                    orient_mode=orient_mode,
+                    center_on_bbox=center_on_bbox
                 )
                 all_results.extend(result)
                 usable_len += get_curve_length(curve) * max(0.0, (end_u - start_u))

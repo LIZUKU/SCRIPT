@@ -949,7 +949,9 @@ def compute_auto_fit_count(mesh, curve, start_u, end_u,
                            padding=0.0,
                            base_scale=1.0,
                            random_scale=0.0,
-                           trim_ends=True):
+                           trim_ends=True,
+                           safety_multiplier=1.0,
+                           max_count=None):
     if not _safe_exists(mesh) or not _safe_exists(curve):
         return 1
 
@@ -963,7 +965,7 @@ def compute_auto_fit_count(mesh, curve, start_u, end_u,
         extra_padding=padding,
         base_scale=base_scale,
         random_scale=random_scale
-    )
+    ) * max(0.01, float(safety_multiplier))
 
     if step <= 0.0001:
         return 1
@@ -976,7 +978,13 @@ def compute_auto_fit_count(mesh, curve, start_u, end_u,
     else:
         count = int(math.floor(available_length / step)) + 1
 
-    return max(1, count)
+    count = max(1, count)
+    if max_count is not None:
+        try:
+            count = min(count, max(1, int(max_count)))
+        except:
+            pass
+    return count
 
 
 def build_orientation_matrix(tangent, up_vector=(0.0, 1.0, 0.0)):
@@ -1084,6 +1092,8 @@ def build_curve_distribution(
     fit_axis_mode="longest",
     padding=0.0,
     auto_fit=False,
+    safety_multiplier=1.0,
+    max_count=None,
     clear_existing=True,
     name_prefix="",
     orient_mode="world_up",
@@ -1110,7 +1120,9 @@ def build_curve_distribution(
             padding=padding,
             base_scale=base_scale,
             random_scale=rand_scale,
-            trim_ends=trim_ends
+            trim_ends=trim_ends,
+            safety_multiplier=safety_multiplier,
+            max_count=max_count
         )
 
     count = max(1, int(count))
@@ -1912,12 +1924,19 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         self.chk_auto_fit.toggled.connect(self._on_auto_fit_toggled)
         layout.addWidget(self.chk_auto_fit)
 
+        self.chk_lock_no_overlap = QtWidgets.QCheckBox("Lock to Non-Overlap Count")
+        self.chk_lock_no_overlap.setChecked(True)
+        self.chk_lock_no_overlap.toggled.connect(self._on_rebuild)
+        layout.addWidget(self.chk_lock_no_overlap)
+
         self.chk_trim_ends = QtWidgets.QCheckBox("Trim Ends")
         self.chk_trim_ends.setChecked(True)
         self.chk_trim_ends.toggled.connect(self._on_rebuild)
         layout.addWidget(self.chk_trim_ends)
 
         self.padding_slider, self.padding_spin = self._add_slider(layout, "Padding", -10.0, 50.0, 0.0, 3, label_width=110)
+        self.safety_slider, self.safety_spin = self._add_slider(layout, "Fit Safety", 0.5, 3.0, 1.05, 3, label_width=110)
+        self.auto_max_slider, self.auto_max_spin = self._add_slider(layout, "Max Count", 1, 5000, 1000, 0, label_width=110)
 
         axis_row = QtWidgets.QHBoxLayout()
         axis_row.setSpacing(8)
@@ -2052,6 +2071,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         btn_layout.addWidget(self.btn_bake)
 
         layout.addLayout(btn_layout)
+        self._on_auto_fit_toggled()
 
     def _add_quick_rotation_buttons(self, parent_layout):
         container = QtWidgets.QHBoxLayout()
@@ -2191,6 +2211,8 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         is_auto = self.chk_auto_fit.isChecked()
         self.count_spin.setEnabled(not is_auto)
         self.count_slider.setEnabled(not is_auto)
+        self.auto_max_spin.setEnabled(is_auto)
+        self.auto_max_slider.setEnabled(is_auto)
         self._on_rebuild()
         self._request_parent_resize()
 
@@ -2260,8 +2282,24 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
             rand_scale = float(self.rand_scale_spin.value())
             fit_axis = self._get_fit_axis_mode()
             padding = float(self.padding_spin.value())
+            fit_safety = float(self.safety_spin.value())
+            max_count = int(self.auto_max_spin.value())
             trim_ends = self.chk_trim_ends.isChecked()
             auto_fit = self.chk_auto_fit.isChecked()
+            lock_no_overlap = self.chk_lock_no_overlap.isChecked()
+
+            safe_count_limit = compute_auto_fit_count(
+                mesh=mesh,
+                curve=valid_curves[0],
+                start_u=start_u,
+                end_u=end_u,
+                axis_mode=fit_axis,
+                padding=padding,
+                base_scale=base_scale,
+                random_scale=rand_scale,
+                trim_ends=trim_ends,
+                safety_multiplier=fit_safety
+            )
 
             if auto_fit:
                 count = compute_auto_fit_count(
@@ -2273,13 +2311,20 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
                     padding=padding,
                     base_scale=base_scale,
                     random_scale=rand_scale,
-                    trim_ends=trim_ends
+                    trim_ends=trim_ends,
+                    safety_multiplier=fit_safety,
+                    max_count=max_count
                 )
                 self.count_spin.blockSignals(True)
                 self.count_spin.setValue(count)
                 self.count_spin.blockSignals(False)
             else:
                 count = int(self.count_spin.value())
+                if lock_no_overlap:
+                    count = min(count, safe_count_limit)
+                    self.count_spin.blockSignals(True)
+                    self.count_spin.setValue(count)
+                    self.count_spin.blockSignals(False)
 
             offset_pos = (
                 float(self.offx_spin.value()),
@@ -2326,6 +2371,8 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
                     fit_axis_mode=fit_axis,
                     padding=padding,
                     auto_fit=auto_fit,
+                    safety_multiplier=fit_safety,
+                    max_count=max_count if auto_fit else None,
                     clear_existing=(idx == 0),
                     name_prefix="c{}__".format(idx + 1),
                     orient_mode=orient_mode,
@@ -2340,12 +2387,18 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
                 extra_padding=padding,
                 base_scale=base_scale,
                 random_scale=rand_scale
-            )
+            ) * max(0.01, fit_safety)
 
             if auto_fit:
                 self.status_label.setText(
-                        "{} preview | usable {:.3f} | step {:.3f}".format(
-                        len(all_results), usable_len, step_est
+                        "{} preview | usable {:.3f} | step {:.3f} | max {}".format(
+                        len(all_results), usable_len, step_est, max_count
+                    )
+                )
+            elif lock_no_overlap:
+                self.status_label.setText(
+                        "{} preview | usable {:.3f} | safe max {}".format(
+                        len(all_results), usable_len, safe_count_limit
                     )
                 )
             else:

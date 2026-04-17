@@ -2049,18 +2049,45 @@ def _create_curve_segments_from_points(base_curve, segments_points, degree=1):
     return created
 
 
+def _collect_selected_curve_point_indices(selection):
+    """Collect curve indices from selected CVs/EPs."""
+    by_curve = {}
+    for comp in selection:
+        crv = None
+        idx = None
+        try:
+            if ".cv[" in comp:
+                crv = get_curve_transform(comp.split(".cv[")[0]) or comp.split(".cv[")[0]
+                idx = int(comp.split("[")[1].split("]")[0])
+            elif ".ep[" in comp:
+                crv = get_curve_transform(comp.split(".ep[")[0]) or comp.split(".ep[")[0]
+                ep_pos = cmds.pointPosition(comp, w=True)
+                cv_names = cmds.ls(crv + ".cv[*]", fl=True) or []
+                if not cv_names:
+                    continue
+                cv_positions = [cmds.pointPosition(cv_name, w=True) for cv_name in cv_names]
+                idx = min(
+                    range(len(cv_positions)),
+                    key=lambda i: _dist3(cv_positions[i], ep_pos)
+                )
+            if crv is not None and idx is not None:
+                by_curve.setdefault(crv, set()).add(int(idx))
+        except Exception:
+            continue
+    return by_curve
+
+
 def split_curve_at_selected_cvs():
     sel = cmds.ls(sl=True, fl=True) or []
-    cvs = [c for c in sel if ".cv[" in c]
-    if not cvs:
-        cmds.warning("[PR] Split CV: select one or more CVs.")
+    point_components = [c for c in sel if ".cv[" in c or ".ep[" in c]
+    if not point_components:
+        cmds.warning("[PR] Split CV: select one or more CVs/EPs.")
         return
 
-    by_curve = {}
-    for cv in cvs:
-        crv = get_curve_transform(cv.split(".cv[")[0]) or cv.split(".cv[")[0]
-        idx = int(cv.split("[")[1].split("]")[0])
-        by_curve.setdefault(crv, set()).add(idx)
+    by_curve = _collect_selected_curve_point_indices(point_components)
+    if not by_curve:
+        cmds.warning("[PR] Split CV: no valid curve points found.")
+        return
 
     all_created = []
     for crv, idx_set in by_curve.items():
@@ -2118,16 +2145,15 @@ def split_curve_at_selected_cvs():
 
 def delete_selected_cvs_open():
     sel = cmds.ls(sl=True, fl=True) or []
-    cvs = [c for c in sel if ".cv[" in c]
-    if not cvs:
-        cmds.warning("[PR] Delete CV Open: select one or more CVs.")
+    point_components = [c for c in sel if ".cv[" in c or ".ep[" in c]
+    if not point_components:
+        cmds.warning("[PR] Delete CV Open: select one or more CVs/EPs.")
         return
 
-    by_curve = {}
-    for cv in cvs:
-        crv = get_curve_transform(cv.split(".cv[")[0]) or cv.split(".cv[")[0]
-        idx = int(cv.split("[")[1].split("]")[0])
-        by_curve.setdefault(crv, set()).add(idx)
+    by_curve = _collect_selected_curve_point_indices(point_components)
+    if not by_curve:
+        cmds.warning("[PR] Delete CV Open: no valid curve points found.")
+        return
 
     all_created = []
     for crv, idx_set in by_curve.items():
@@ -3263,9 +3289,9 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         self.sweep_btn = PRColorBtn("Sweep Mesh", bg="#0f2a2a", fg=self.C_MESH)
         self.bake_btn = PRColorBtn("Bake", bg="#0f3010", fg="#50ff50", w=56)
         self.bake_btn.setEnabled(False)
-        row.addWidget(self.fill_btn)
-        row.addWidget(self.sweep_btn)
-        row.addWidget(self.bake_btn)
+        row.addWidget(self.fill_btn, 1)
+        row.addWidget(self.sweep_btn, 1)
+        row.addWidget(self.bake_btn, 1)
         layout.addLayout(row)
         self.sweep_settings_widget = QtWidgets.QWidget()
         self.sweep_settings_layout = QtWidgets.QVBoxLayout(self.sweep_settings_widget)

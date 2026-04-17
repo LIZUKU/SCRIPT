@@ -3501,6 +3501,10 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         self.mirror_keep_original_cb.toggled.connect(self.mirror_hide_if_keep_cb.setEnabled)
         self.mirror_apply_btn.clicked.connect(self._apply_mirror_from_controls)
         self.mirror_mode_combo.currentIndexChanged.connect(self._on_mirror_control_changed)
+        self.mirror_axis_auto_btn.clicked.connect(lambda: self._set_mirror_axis_state("auto", refresh=True))
+        self.mirror_axis_x_btn.clicked.connect(lambda: self._set_mirror_axis_state("x", refresh=True))
+        self.mirror_axis_y_btn.clicked.connect(lambda: self._set_mirror_axis_state("y", refresh=True))
+        self.mirror_axis_z_btn.clicked.connect(lambda: self._set_mirror_axis_state("z", refresh=True))
         self.mirror_distance_spin.valueChanged.connect(self._on_mirror_control_changed)
         self.mirror_seam_spin.valueChanged.connect(self._on_mirror_control_changed)
         self.mirror_reverse_cb.toggled.connect(self._on_mirror_control_changed)
@@ -3565,6 +3569,20 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         self.mirror_mode_combo.addItems(["World Center (0)", "Object Center", "Bounding Box", "Grid Snap"])
         mode_row.addWidget(self.mirror_mode_combo)
         adv_layout.addLayout(mode_row)
+
+        axis_row = QtWidgets.QHBoxLayout()
+        axis_row.setSpacing(4)
+        axis_row.addWidget(QtWidgets.QLabel("Axis"))
+        self.mirror_axis_auto_btn = PRColorBtn("Auto", tip="Smart axis", bg="#2a1a3a", fg=self.C_MIRROR, w=42)
+        self.mirror_axis_x_btn = PRColorBtn("X", tip="Mirror X", bg="#2a1a3a", fg=self.C_MIRROR, w=26)
+        self.mirror_axis_y_btn = PRColorBtn("Y", tip="Mirror Y", bg="#2a1a3a", fg=self.C_MIRROR, w=26)
+        self.mirror_axis_z_btn = PRColorBtn("Z", tip="Mirror Z", bg="#2a1a3a", fg=self.C_MIRROR, w=26)
+        axis_row.addWidget(self.mirror_axis_auto_btn)
+        axis_row.addWidget(self.mirror_axis_x_btn)
+        axis_row.addWidget(self.mirror_axis_y_btn)
+        axis_row.addWidget(self.mirror_axis_z_btn)
+        axis_row.addStretch()
+        adv_layout.addLayout(axis_row)
 
         self.mirror_distance_slider, self.mirror_distance_spin, self.mirror_distance_reset = self._add_mirror_param_slider(
             adv_layout, "Distance", "distance_offset", decimals=4
@@ -3775,6 +3793,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
     def _run_mirror_preset(self, axis, mode):
         self._last_mirror_axis = axis
         self._last_mirror_mode = mode
+        self._set_mirror_axis_state(axis, refresh=False)
         settings = self._collect_mirror_settings()
         settings["axis"] = axis
         settings["mode"] = mode
@@ -3790,6 +3809,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         })
 
     def _run_mirror_with_axis(self, axis):
+        self._set_mirror_axis_state(axis, refresh=False)
         settings = self._collect_mirror_settings()
         settings["axis"] = axis
         self._mirror_adv_state.update(settings)
@@ -3831,6 +3851,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
     def _sync_mirror_controls_from_state(self):
         mode_map = {"world": 0, "object": 1, "boundingBox": 2, "grid": 3}
         self.mirror_mode_combo.setCurrentIndex(mode_map.get(self._mirror_adv_state.get("mode", "world"), 0))
+        self._set_mirror_axis_state(self._mirror_adv_state.get("axis", "auto"), refresh=False)
         self.mirror_distance_spin.setValue(float(self._mirror_adv_state.get("distance_offset", 0.0)))
         self.mirror_seam_spin.setValue(float(self._mirror_adv_state.get("seam_tol", 0.0001)))
         self.mirror_reverse_cb.setChecked(bool(self._mirror_adv_state.get("reverse", False)))
@@ -3844,6 +3865,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         mode_items = ["world", "object", "boundingBox", "grid"]
         mode_idx = max(0, min(len(mode_items) - 1, self.mirror_mode_combo.currentIndex()))
         return {
+            "axis": self._mirror_axis_from_ui(),
             "mode": mode_items[mode_idx],
             "distance_offset": float(self.mirror_distance_spin.value()),
             "seam_tol": float(self.mirror_seam_spin.value()),
@@ -3854,6 +3876,32 @@ class PRCurveToolsUI(QtWidgets.QDialog):
             "auto_close": self.mirror_auto_close_cb.isChecked(),
         }
 
+    def _mirror_axis_from_ui(self):
+        if self.mirror_axis_x_btn.isChecked():
+            return "x"
+        if self.mirror_axis_y_btn.isChecked():
+            return "y"
+        if self.mirror_axis_z_btn.isChecked():
+            return "z"
+        return "auto"
+
+    def _set_mirror_axis_state(self, axis, refresh=False):
+        axis = str(axis).lower()
+        if axis not in ("auto", "x", "y", "z"):
+            axis = "auto"
+        axis_buttons = {
+            "auto": self.mirror_axis_auto_btn,
+            "x": self.mirror_axis_x_btn,
+            "y": self.mirror_axis_y_btn,
+            "z": self.mirror_axis_z_btn,
+        }
+        for key, btn in axis_buttons.items():
+            btn.setCheckable(True)
+            btn.setChecked(key == axis)
+        self._last_mirror_axis = axis
+        self._mirror_adv_state["axis"] = axis
+        if refresh:
+            self._on_mirror_control_changed()
 
     def _delete_mirror_preview_curves(self):
         if not self._mirror_preview_curves:
@@ -3875,6 +3923,9 @@ class PRCurveToolsUI(QtWidgets.QDialog):
     def _on_mirror_live_toggled(self, checked):
         self.mirror_live_preview_btn.setText("Stop Live" if checked else "Start Live")
         if checked:
+            sel_curves = list(set(filter(None, [get_curve_transform(s) for s in (cmds.ls(sl=True, long=True) or [])])))
+            if sel_curves:
+                self._mirror_preview_sources = sel_curves
             self._refresh_mirror_live_preview()
         else:
             self._delete_mirror_preview_curves()
@@ -3884,9 +3935,10 @@ class PRCurveToolsUI(QtWidgets.QDialog):
             return
         if not self.mirror_adv_toggle.isChecked():
             return
-        sel_curves = list(set(filter(None, [get_curve_transform(s) for s in (cmds.ls(sl=True, long=True) or [])])))
-        if sel_curves:
-            self._mirror_preview_sources = sel_curves
+        if not self._mirror_preview_sources:
+            sel_curves = list(set(filter(None, [get_curve_transform(s) for s in (cmds.ls(sl=True, long=True) or [])])))
+            if sel_curves:
+                self._mirror_preview_sources = sel_curves
         sources = [c for c in self._mirror_preview_sources if _safe_obj_exists(c)]
         if not sources:
             return
@@ -3896,7 +3948,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
             self._delete_mirror_preview_curves()
             cmds.select(sources, r=True)
             settings = self._collect_mirror_settings()
-            axis = self._last_mirror_axis if self._last_mirror_axis in ("x", "y", "z", "auto") else "auto"
+            axis = settings.get("axis", "auto")
             mirror_curve(axis, settings.get("mode", "world"), advanced={
                 "distance_offset": settings.get("distance_offset", 0.0),
                 "reverse": settings.get("reverse", False),
@@ -3906,7 +3958,10 @@ class PRCurveToolsUI(QtWidgets.QDialog):
                 "auto_close": settings.get("auto_close", True),
                 "seam_tol": settings.get("seam_tol", 0.0001),
             }, quiet=True)
-            self._mirror_preview_curves = list(set(filter(None, [get_curve_transform(s) for s in (cmds.ls(sl=True, long=True) or [])])))
+            selected_after = list(set(filter(None, [get_curve_transform(s) for s in (cmds.ls(sl=True, long=True) or [])])))
+            source_set = set(sources)
+            self._mirror_preview_curves = [c for c in selected_after if c not in source_set]
+            cmds.select(sources, r=True)
         except Exception as e:
             cmds.warning("[PR] Live mirror preview failed: {}".format(e))
         finally:
@@ -3917,7 +3972,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         sources = [c for c in self._mirror_preview_sources if _safe_obj_exists(c)]
         if sources:
             cmds.select(sources, r=True)
-        axis = self._last_mirror_axis if self._last_mirror_axis in ("x", "y", "z", "auto") else "auto"
+        axis = self._collect_mirror_settings().get("axis", "auto")
         self._run_mirror_with_axis(axis)
 
     # ------------------------------------------------------------------

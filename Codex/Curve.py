@@ -3508,7 +3508,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         self.mirror_hide_if_keep_cb.toggled.connect(self._on_mirror_control_changed)
         self.mirror_consolidate_cb.toggled.connect(self._on_mirror_control_changed)
         self.mirror_auto_close_cb.toggled.connect(self._on_mirror_control_changed)
-        self.mirror_live_preview_cb.toggled.connect(self._on_mirror_live_toggled)
+        self.mirror_live_preview_btn.toggled.connect(self._on_mirror_live_toggled)
 
         self.extrude_btn.clicked.connect(lambda: extrude_cv_along_curve(0))
         self.edit_btn.clicked.connect(edit_curve_cvs)
@@ -3586,10 +3586,11 @@ class PRCurveToolsUI(QtWidgets.QDialog):
 
         btn_row = QtWidgets.QHBoxLayout()
         btn_row.setSpacing(4)
-        self.mirror_live_preview_cb = QtWidgets.QCheckBox("Live")
-        self.mirror_live_preview_cb.setChecked(True)
+        self.mirror_live_preview_btn = PRColorBtn("Start Live", bg="#2a2a2a", fg="#909090", w=82)
+        self.mirror_live_preview_btn.setCheckable(True)
+        self.mirror_live_preview_btn.setChecked(False)
         self.mirror_apply_btn = PRColorBtn("OK", bg="#3a103a", fg=self.C_MIRROR, w=42)
-        btn_row.addWidget(self.mirror_live_preview_cb)
+        btn_row.addWidget(self.mirror_live_preview_btn)
         btn_row.addStretch()
         btn_row.addWidget(self.mirror_apply_btn)
         adv_layout.addLayout(btn_row)
@@ -3636,6 +3637,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
             spinbox.blockSignals(True)
             spinbox.setValue(real_val)
             spinbox.blockSignals(False)
+            self._on_mirror_control_changed()
 
         def _spin_to_slider(v):
             clamped = max(min_val, min(max_val, float(v)))
@@ -3651,7 +3653,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
 
     def _on_mirror_advanced_toggled(self, checked):
         self.mirror_adv_widget.setVisible(checked)
-        if checked and self.mirror_live_preview_cb.isChecked():
+        if checked and self.mirror_live_preview_btn.isChecked():
             self._refresh_mirror_live_preview()
         if not checked:
             self._delete_mirror_preview_curves()
@@ -3865,12 +3867,13 @@ class PRCurveToolsUI(QtWidgets.QDialog):
                 pass
 
     def _on_mirror_control_changed(self, *_):
-        if not hasattr(self, "mirror_live_preview_cb"):
+        if not hasattr(self, "mirror_live_preview_btn"):
             return
-        if self.mirror_live_preview_cb.isChecked() and self.mirror_adv_toggle.isChecked():
+        if self.mirror_live_preview_btn.isChecked() and self.mirror_adv_toggle.isChecked():
             self._refresh_mirror_live_preview()
 
     def _on_mirror_live_toggled(self, checked):
+        self.mirror_live_preview_btn.setText("Stop Live" if checked else "Start Live")
         if checked:
             self._refresh_mirror_live_preview()
         else:

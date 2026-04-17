@@ -910,6 +910,7 @@ MIRROR_ADV_DEFAULTS = {
     "hide_original_if_kept": True,
     "consolidate_seam": True,
     "seam_tol": 0.0001,
+    "auto_close": True,
 }
 
 
@@ -1133,6 +1134,7 @@ def _mirrorclip_curve(
     hide_original_if_kept=True,
     consolidate_seam=True,
     seam_tol=0.0001,
+    auto_close=True,
 ):
     direction = _mc_vec_norm(direction)
     plane_point = _mc_vec_add(origin, _mc_vec_mul(direction, distance_offset))
@@ -1172,6 +1174,11 @@ def _mirrorclip_curve(
         new_degree = min(new_degree, 3)
 
     new_curve = cmds.curve(p=final_points, d=new_degree, name=new_name)
+    if auto_close:
+        try:
+            cmds.closeCurve(new_curve, ch=False, ps=True, rpo=True)
+        except Exception:
+            pass
     _set_curve_always_on_top(new_curve)
     add_to_isolate(new_curve)
 
@@ -1241,6 +1248,7 @@ def mirror_curve(axis='auto', mode='world', merge_threshold=0.001, advanced=None
                 hide_original_if_kept=bool(opts.get("hide_original_if_kept", True)),
                 consolidate_seam=bool(opts.get("consolidate_seam", True)),
                 seam_tol=max(0.0, float(opts.get("seam_tol", 0.0001))),
+                auto_close=bool(opts.get("auto_close", True)),
             )
             result_curves.append(new_crv)
         except Exception as e:
@@ -2782,6 +2790,9 @@ class MirrorAdvancedDialog(QtWidgets.QDialog):
         self.consolidate_cb = QtWidgets.QCheckBox("Consolidate Seam")
         adv_form.addRow("", self.consolidate_cb)
 
+        self.auto_close_cb = QtWidgets.QCheckBox("Auto Close Result")
+        adv_form.addRow("", self.auto_close_cb)
+
         self.seam_tol_spin = QtWidgets.QDoubleSpinBox()
         self.seam_tol_spin.setDecimals(6)
         self.seam_tol_spin.setRange(0.0, 100.0)
@@ -2806,6 +2817,7 @@ class MirrorAdvancedDialog(QtWidgets.QDialog):
         self.keep_original_cb.toggled.connect(self._refresh_preview)
         self.hide_if_keep_cb.toggled.connect(self._refresh_preview)
         self.consolidate_cb.toggled.connect(self._refresh_preview)
+        self.auto_close_cb.toggled.connect(self._refresh_preview)
         self.seam_tol_spin.valueChanged.connect(self._refresh_preview)
 
     def _load_state(self):
@@ -2823,6 +2835,7 @@ class MirrorAdvancedDialog(QtWidgets.QDialog):
         self.hide_if_keep_cb.setChecked(bool(self._state.get("hide_original_if_kept", True)))
         self.hide_if_keep_cb.setEnabled(self.keep_original_cb.isChecked())
         self.consolidate_cb.setChecked(bool(self._state.get("consolidate_seam", True)))
+        self.auto_close_cb.setChecked(bool(self._state.get("auto_close", True)))
         self.seam_tol_spin.setValue(float(self._state.get("seam_tol", 0.0001)))
 
     def settings(self):
@@ -2836,6 +2849,7 @@ class MirrorAdvancedDialog(QtWidgets.QDialog):
             "keep_original": self.keep_original_cb.isChecked(),
             "hide_original_if_kept": self.hide_if_keep_cb.isChecked(),
             "consolidate_seam": self.consolidate_cb.isChecked(),
+            "auto_close": self.auto_close_cb.isChecked(),
             "seam_tol": float(self.seam_tol_spin.value()),
         }
 
@@ -2874,6 +2888,7 @@ class MirrorAdvancedDialog(QtWidgets.QDialog):
                 "keep_original": True,
                 "hide_original_if_kept": False,
                 "consolidate_seam": preview_opts.get("consolidate_seam", True),
+                "auto_close": preview_opts.get("auto_close", True),
                 "seam_tol": preview_opts.get("seam_tol", 0.0001),
             }
             mirror_curve(
@@ -2932,6 +2947,9 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         self._auto_curve_length = AUTO_CURVE_LENGTH_DEFAULT
         self._sweep_controls = {}
         self._circle_sections_default = int(CIRCLE_SECTIONS_DEFAULT)
+        self._mirror_preview_sources = []
+        self._mirror_preview_curves = []
+        self._mirror_preview_busy = False
 
         self.setObjectName(WINDOW_OBJECT_NAME)
         self.setWindowTitle(WINDOW_TITLE)
@@ -3481,6 +3499,16 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         self.mirror_z_btn.clicked.connect(lambda: self._run_mirror_with_axis("z"))
         self.mirror_adv_toggle.toggled.connect(self._on_mirror_advanced_toggled)
         self.mirror_keep_original_cb.toggled.connect(self.mirror_hide_if_keep_cb.setEnabled)
+        self.mirror_apply_btn.clicked.connect(self._apply_mirror_from_controls)
+        self.mirror_mode_combo.currentIndexChanged.connect(self._on_mirror_control_changed)
+        self.mirror_distance_spin.valueChanged.connect(self._on_mirror_control_changed)
+        self.mirror_seam_spin.valueChanged.connect(self._on_mirror_control_changed)
+        self.mirror_reverse_cb.toggled.connect(self._on_mirror_control_changed)
+        self.mirror_keep_original_cb.toggled.connect(self._on_mirror_control_changed)
+        self.mirror_hide_if_keep_cb.toggled.connect(self._on_mirror_control_changed)
+        self.mirror_consolidate_cb.toggled.connect(self._on_mirror_control_changed)
+        self.mirror_auto_close_cb.toggled.connect(self._on_mirror_control_changed)
+        self.mirror_live_preview_cb.toggled.connect(self._on_mirror_live_toggled)
 
         self.extrude_btn.clicked.connect(lambda: extrude_cv_along_curve(0))
         self.edit_btn.clicked.connect(edit_curve_cvs)
@@ -3549,10 +3577,23 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         self.mirror_keep_original_cb = QtWidgets.QCheckBox("Keep Original")
         self.mirror_hide_if_keep_cb = QtWidgets.QCheckBox("Hide Original if Kept")
         self.mirror_consolidate_cb = QtWidgets.QCheckBox("Consolidate Seam")
+        self.mirror_auto_close_cb = QtWidgets.QCheckBox("Auto Close Result")
         adv_layout.addWidget(self.mirror_reverse_cb)
         adv_layout.addWidget(self.mirror_keep_original_cb)
         adv_layout.addWidget(self.mirror_hide_if_keep_cb)
         adv_layout.addWidget(self.mirror_consolidate_cb)
+        adv_layout.addWidget(self.mirror_auto_close_cb)
+
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_row.setSpacing(4)
+        self.mirror_live_preview_cb = QtWidgets.QCheckBox("Live")
+        self.mirror_live_preview_cb.setChecked(True)
+        self.mirror_apply_btn = PRColorBtn("OK", bg="#3a103a", fg=self.C_MIRROR, w=42)
+        btn_row.addWidget(self.mirror_live_preview_cb)
+        btn_row.addStretch()
+        btn_row.addWidget(self.mirror_apply_btn)
+        adv_layout.addLayout(btn_row)
+
         parent_layout.addWidget(self.mirror_adv_widget)
         self.mirror_adv_widget.setVisible(False)
 
@@ -3610,6 +3651,10 @@ class PRCurveToolsUI(QtWidgets.QDialog):
 
     def _on_mirror_advanced_toggled(self, checked):
         self.mirror_adv_widget.setVisible(checked)
+        if checked and self.mirror_live_preview_cb.isChecked():
+            self._refresh_mirror_live_preview()
+        if not checked:
+            self._delete_mirror_preview_curves()
         self.adjustSize()
 
     # ------------------------------------------------------------------
@@ -3721,6 +3766,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
             "keep_original": settings.get("keep_original", False),
             "hide_original_if_kept": settings.get("hide_original_if_kept", True),
             "consolidate_seam": settings.get("consolidate_seam", True),
+            "auto_close": settings.get("auto_close", True),
             "seam_tol": settings.get("seam_tol", 0.0001),
         })
 
@@ -3737,6 +3783,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
             "keep_original": settings.get("keep_original", False),
             "hide_original_if_kept": settings.get("hide_original_if_kept", True),
             "consolidate_seam": settings.get("consolidate_seam", True),
+            "auto_close": settings.get("auto_close", True),
             "seam_tol": settings.get("seam_tol", 0.0001),
         })
 
@@ -3753,6 +3800,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
             "keep_original": settings.get("keep_original", False),
             "hide_original_if_kept": settings.get("hide_original_if_kept", True),
             "consolidate_seam": settings.get("consolidate_seam", True),
+            "auto_close": settings.get("auto_close", True),
             "seam_tol": settings.get("seam_tol", 0.0001),
         }
         mirror_curve(axis, settings.get("mode", "world"), advanced=adv)
@@ -3773,6 +3821,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
             "keep_original": settings.get("keep_original", False),
             "hide_original_if_kept": settings.get("hide_original_if_kept", True),
             "consolidate_seam": settings.get("consolidate_seam", True),
+            "auto_close": settings.get("auto_close", True),
             "seam_tol": settings.get("seam_tol", 0.0001),
         }
         mirror_curve(settings.get("axis", "auto"), settings.get("mode", "world"), advanced=adv)
@@ -3787,6 +3836,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         self.mirror_hide_if_keep_cb.setChecked(bool(self._mirror_adv_state.get("hide_original_if_kept", True)))
         self.mirror_hide_if_keep_cb.setEnabled(self.mirror_keep_original_cb.isChecked())
         self.mirror_consolidate_cb.setChecked(bool(self._mirror_adv_state.get("consolidate_seam", True)))
+        self.mirror_auto_close_cb.setChecked(bool(self._mirror_adv_state.get("auto_close", True)))
 
     def _collect_mirror_settings(self):
         mode_items = ["world", "object", "boundingBox", "grid"]
@@ -3799,7 +3849,73 @@ class PRCurveToolsUI(QtWidgets.QDialog):
             "keep_original": self.mirror_keep_original_cb.isChecked(),
             "hide_original_if_kept": self.mirror_hide_if_keep_cb.isChecked(),
             "consolidate_seam": self.mirror_consolidate_cb.isChecked(),
+            "auto_close": self.mirror_auto_close_cb.isChecked(),
         }
+
+
+    def _delete_mirror_preview_curves(self):
+        if not self._mirror_preview_curves:
+            return
+        to_delete = [c for c in self._mirror_preview_curves if _safe_obj_exists(c)]
+        self._mirror_preview_curves = []
+        if to_delete:
+            try:
+                cmds.delete(to_delete)
+            except Exception:
+                pass
+
+    def _on_mirror_control_changed(self, *_):
+        if not hasattr(self, "mirror_live_preview_cb"):
+            return
+        if self.mirror_live_preview_cb.isChecked() and self.mirror_adv_toggle.isChecked():
+            self._refresh_mirror_live_preview()
+
+    def _on_mirror_live_toggled(self, checked):
+        if checked:
+            self._refresh_mirror_live_preview()
+        else:
+            self._delete_mirror_preview_curves()
+
+    def _refresh_mirror_live_preview(self):
+        if self._mirror_preview_busy:
+            return
+        if not self.mirror_adv_toggle.isChecked():
+            return
+        sel_curves = list(set(filter(None, [get_curve_transform(s) for s in (cmds.ls(sl=True, long=True) or [])])))
+        if sel_curves:
+            self._mirror_preview_sources = sel_curves
+        sources = [c for c in self._mirror_preview_sources if _safe_obj_exists(c)]
+        if not sources:
+            return
+
+        self._mirror_preview_busy = True
+        try:
+            self._delete_mirror_preview_curves()
+            cmds.select(sources, r=True)
+            settings = self._collect_mirror_settings()
+            axis = self._last_mirror_axis if self._last_mirror_axis in ("x", "y", "z", "auto") else "auto"
+            mirror_curve(axis, settings.get("mode", "world"), advanced={
+                "distance_offset": settings.get("distance_offset", 0.0),
+                "reverse": settings.get("reverse", False),
+                "keep_original": True,
+                "hide_original_if_kept": False,
+                "consolidate_seam": settings.get("consolidate_seam", True),
+                "auto_close": settings.get("auto_close", True),
+                "seam_tol": settings.get("seam_tol", 0.0001),
+            }, quiet=True)
+            self._mirror_preview_curves = list(set(filter(None, [get_curve_transform(s) for s in (cmds.ls(sl=True, long=True) or [])])))
+        except Exception as e:
+            cmds.warning("[PR] Live mirror preview failed: {}".format(e))
+        finally:
+            self._mirror_preview_busy = False
+
+    def _apply_mirror_from_controls(self):
+        self._delete_mirror_preview_curves()
+        sources = [c for c in self._mirror_preview_sources if _safe_obj_exists(c)]
+        if sources:
+            cmds.select(sources, r=True)
+        axis = self._last_mirror_axis if self._last_mirror_axis in ("x", "y", "z", "auto") else "auto"
+        self._run_mirror_with_axis(axis)
 
     # ------------------------------------------------------------------
     # CALLBACKS
@@ -3956,6 +4072,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
 
     def closeEvent(self, event):
         self._rebuild_timer.stop()
+        self._delete_mirror_preview_curves()
 
         if is_sweep_preview_active():
             sweep_cancel()

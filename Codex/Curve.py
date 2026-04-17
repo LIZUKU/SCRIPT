@@ -903,6 +903,16 @@ def close_selected_curves():
 # ============================================================
 # SMART MIRROR
 # ============================================================
+MIRROR_ADV_DEFAULTS = {
+    "distance_offset": 0.0,
+    "reverse": False,
+    "keep_original": False,
+    "hide_original_if_kept": True,
+    "consolidate_seam": True,
+    "seam_tol": 0.0001,
+}
+
+
 def _detect_best_mirror_axis(curves):
     try:
         bbox = cmds.exactWorldBoundingBox(curves)
@@ -952,17 +962,251 @@ def _best_open_curve_join(orig_pts, mir_pts):
     return candidates[0]
 
 
-def mirror_curve(axis='auto', mode='world', merge_threshold=0.001):
-    """
-    Mirror intelligent d'une curve.
+def _mc_vec_add(a, b):
+    return [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 
-    - Pour les courbes ouvertes :
-      crée une vraie continuité en testant les 4 combinaisons d'extrémités
-      puis fusionne en une seule curve.
 
-    - Pour les courbes fermées :
-      remplace simplement par la version miroir.
-    """
+def _mc_vec_sub(a, b):
+    return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+
+
+def _mc_vec_mul(a, s):
+    return [a[0] * s, a[1] * s, a[2] * s]
+
+
+def _mc_vec_dot(a, b):
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def _mc_vec_len(a):
+    return math.sqrt(max(_mc_vec_dot(a, a), 1e-16))
+
+
+def _mc_vec_norm(a):
+    l = _mc_vec_len(a)
+    if l < 1e-8:
+        return [1.0, 0.0, 0.0]
+    return [a[0] / l, a[1] / l, a[2] / l]
+
+
+def _mc_vec_lerp(a, b, t):
+    return [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+    ]
+
+
+def _mc_distance(a, b):
+    return _mc_vec_len(_mc_vec_sub(a, b))
+
+
+def _mc_signed_distance_to_plane(point, plane_point, plane_normal):
+    return _mc_vec_dot(_mc_vec_sub(point, plane_point), plane_normal)
+
+
+def _mc_mirror_point_across_plane(point, plane_point, plane_normal):
+    d = _mc_signed_distance_to_plane(point, plane_point, plane_normal)
+    return _mc_vec_sub(point, _mc_vec_mul(plane_normal, 2.0 * d))
+
+
+def _mc_dedupe_consecutive(points, tol=1e-5):
+    if not points:
+        return []
+    out = [points[0]]
+    for p in points[1:]:
+        if _mc_distance(p, out[-1]) > tol:
+            out.append(p)
+    return out
+
+
+def _mc_get_curve_cvs_world(curve_transform):
+    shapes = cmds.listRelatives(curve_transform, s=True, type="nurbsCurve", fullPath=True) or []
+    if not shapes:
+        return None, None, None
+    shape = shapes[0]
+    cvs = cmds.ls(curve_transform + ".cv[*]", fl=True) or []
+    points = [cmds.pointPosition(cv, world=True) for cv in cvs]
+    degree = cmds.getAttr(shape + ".degree")
+    form = cmds.getAttr(shape + ".form")
+    return [[p[0], p[1], p[2]] for p in points], degree, form
+
+
+def _mc_clip_cvs_against_plane(points, plane_point, plane_normal, keep_positive=True, eps=1e-8):
+    if len(points) < 2:
+        return points[:]
+
+    def inside(sd):
+        return sd >= -eps if keep_positive else sd <= eps
+
+    out = []
+    prev = points[0]
+    prev_sd = _mc_signed_distance_to_plane(prev, plane_point, plane_normal)
+    prev_in = inside(prev_sd)
+
+    if prev_in:
+        out.append(prev)
+
+    for curr in points[1:]:
+        curr_sd = _mc_signed_distance_to_plane(curr, plane_point, plane_normal)
+        curr_in = inside(curr_sd)
+
+        crossed = (prev_sd > eps and curr_sd < -eps) or (prev_sd < -eps and curr_sd > eps)
+        if crossed:
+            denom = prev_sd - curr_sd
+            if abs(denom) > eps:
+                t = prev_sd / denom
+                inter = _mc_vec_lerp(prev, curr, t)
+                if not out or _mc_distance(out[-1], inter) > 1e-7:
+                    out.append(inter)
+        elif abs(curr_sd) <= eps:
+            if not out or _mc_distance(out[-1], curr) > 1e-7:
+                out.append(curr)
+
+        if curr_in and (not out or _mc_distance(out[-1], curr) > 1e-7):
+            out.append(curr)
+
+        prev = curr
+        prev_sd = curr_sd
+        prev_in = curr_in
+
+    return _mc_dedupe_consecutive(out, tol=1e-7)
+
+
+def _mc_build_mirrored_profile(points_kept, plane_point, plane_normal, seam_tol=1e-4, consolidate_seam=True):
+    if len(points_kept) < 2:
+        return points_kept[:]
+    mirrored = [_mc_mirror_point_across_plane(p, plane_point, plane_normal) for p in points_kept]
+    mirrored.reverse()
+    result = points_kept[:]
+    if mirrored and consolidate_seam and _mc_distance(result[-1], mirrored[0]) <= seam_tol:
+        mirrored = mirrored[1:]
+    result.extend(mirrored)
+    return _mc_dedupe_consecutive(result, tol=seam_tol)
+
+
+def _mc_insert_center_plane_points(points, plane_point, plane_normal, eps=1e-8, tol=1e-6):
+    if len(points) < 2:
+        return points[:]
+
+    out = [points[0]]
+    for i in range(1, len(points)):
+        prev = out[-1]
+        curr = points[i]
+        prev_sd = _mc_signed_distance_to_plane(prev, plane_point, plane_normal)
+        curr_sd = _mc_signed_distance_to_plane(curr, plane_point, plane_normal)
+
+        crossed = (prev_sd > eps and curr_sd < -eps) or (prev_sd < -eps and curr_sd > eps)
+        on_prev = abs(prev_sd) <= eps
+        on_curr = abs(curr_sd) <= eps
+
+        if crossed:
+            denom = prev_sd - curr_sd
+            if abs(denom) > eps:
+                t = prev_sd / denom
+                inter = _mc_vec_lerp(prev, curr, t)
+                if _mc_distance(out[-1], inter) > tol:
+                    out.append(inter)
+        elif not on_prev and on_curr:
+            if _mc_distance(out[-1], curr) > tol:
+                out.append(curr)
+            continue
+        elif on_prev and not on_curr:
+            pass
+
+        if _mc_distance(out[-1], curr) > tol:
+            out.append(curr)
+    return _mc_dedupe_consecutive(out, tol=tol)
+
+
+def _mc_curve_parent_short_name(curve_transform):
+    return curve_transform.split("|")[-1].split(":")[-1]
+
+
+def _mirrorclip_curve(
+    curve_transform,
+    origin,
+    direction,
+    distance_offset=0.0,
+    reverse=False,
+    keep_original=False,
+    hide_original_if_kept=True,
+    consolidate_seam=True,
+    seam_tol=0.0001,
+):
+    direction = _mc_vec_norm(direction)
+    plane_point = _mc_vec_add(origin, _mc_vec_mul(direction, distance_offset))
+
+    cv_points, curve_degree, curve_form = _mc_get_curve_cvs_world(curve_transform)
+    if not cv_points:
+        raise RuntimeError("Courbe invalide.")
+
+    keep_positive = not reverse
+    kept = _mc_clip_cvs_against_plane(
+        cv_points,
+        plane_point,
+        direction,
+        keep_positive=keep_positive,
+    )
+    if len(kept) < 2:
+        raise RuntimeError("La partie gardée après clip est vide ou trop petite.")
+
+    final_points = _mc_build_mirrored_profile(
+        kept,
+        plane_point,
+        direction,
+        seam_tol=seam_tol,
+        consolidate_seam=consolidate_seam,
+    )
+    final_points = _mc_insert_center_plane_points(
+        final_points,
+        plane_point,
+        direction,
+        tol=seam_tol,
+    )
+
+    short_name = _mc_curve_parent_short_name(curve_transform)
+    new_name = "{}_mirror".format(short_name)
+    new_degree = min(max(1, int(curve_degree)), max(1, len(final_points) - 1))
+    if curve_form in (1, 2):
+        new_degree = min(new_degree, 3)
+
+    new_curve = cmds.curve(p=final_points, d=new_degree, name=new_name)
+    _set_curve_always_on_top(new_curve)
+    add_to_isolate(new_curve)
+
+    if keep_original:
+        if hide_original_if_kept and _safe_obj_exists(curve_transform):
+            try:
+                cmds.hide(curve_transform)
+            except Exception:
+                pass
+    else:
+        _safe_delete(curve_transform)
+
+    return new_curve
+
+
+def _mirror_pivot_from_mode(curves, axis, mode):
+    axis_map = {'x': 0, 'y': 1, 'z': 2}
+    axis_idx = axis_map.get(axis.lower(), 0)
+    if mode == 'world':
+        return 0.0
+    if mode == 'object':
+        bbox = cmds.exactWorldBoundingBox(curves[0])
+        return (bbox[axis_idx] + bbox[axis_idx + 3]) * 0.5
+    if mode == 'boundingBox':
+        bbox = cmds.exactWorldBoundingBox(curves)
+        return (bbox[axis_idx] + bbox[axis_idx + 3]) * 0.5
+    if mode == 'grid':
+        bbox = cmds.exactWorldBoundingBox(curves)
+        center = (bbox[axis_idx] + bbox[axis_idx + 3]) * 0.5
+        grid_size = cmds.grid(q=True, spacing=True)
+        return round(center / grid_size) * grid_size if grid_size else 0.0
+    return 0.0
+
+
+def mirror_curve(axis='auto', mode='world', merge_threshold=0.001, advanced=None):
     sel = cmds.ls(sl=True, long=True) or []
     curves = list(set(filter(None, [get_curve_transform(s) for s in sel])))
     if not curves:
@@ -971,78 +1215,40 @@ def mirror_curve(axis='auto', mode='world', merge_threshold=0.001):
 
     if axis == 'auto':
         axis = _detect_best_mirror_axis(curves)
+    axis = axis.lower() if axis else 'x'
+    if axis not in ('x', 'y', 'z'):
+        axis = 'x'
 
-    axis_map = {'x': 0, 'y': 1, 'z': 2}
-    axis_idx = axis_map.get(axis.lower(), 0)
-
-    if mode == 'world':
-        pivot = 0.0
-    elif mode == 'object':
-        bbox = cmds.exactWorldBoundingBox(curves[0])
-        pivot = (bbox[axis_idx] + bbox[axis_idx + 3]) / 2.0
-    elif mode == 'boundingBox':
-        bbox = cmds.exactWorldBoundingBox(curves)
-        pivot = (bbox[axis_idx] + bbox[axis_idx + 3]) / 2.0
-    elif mode == 'grid':
-        bbox = cmds.exactWorldBoundingBox(curves)
-        center = (bbox[axis_idx] + bbox[axis_idx + 3]) / 2.0
-        grid_size = cmds.grid(q=True, spacing=True)
-        pivot = round(center / grid_size) * grid_size if grid_size else 0.0
-    else:
-        pivot = 0.0
+    opts = dict(MIRROR_ADV_DEFAULTS)
+    if isinstance(advanced, dict):
+        opts.update(advanced)
 
     result_curves = []
+    axis_vec = {'x': [1.0, 0.0, 0.0], 'y': [0.0, 1.0, 0.0], 'z': [0.0, 0.0, 1.0]}[axis]
+    pivot = _mirror_pivot_from_mode(curves, axis, mode)
+    origin = [0.0, 0.0, 0.0]
+    origin[{'x': 0, 'y': 1, 'z': 2}[axis]] = float(pivot)
 
     for crv in curves:
         try:
-            data = _get_curve_data(crv)
-            if not data:
-                continue
-
-            shp, degree, form, positions, cyclic, cleaned = data
-
-            mirrored_positions = []
-            for pos in positions:
-                new_pos = list(pos)
-                new_pos[axis_idx] = 2.0 * pivot - pos[axis_idx]
-                mirrored_positions.append(new_pos)
-
-            orig_short = crv.split("|")[-1].split(":")[-1]
-
-            if cyclic or form in (1, 2):
-                _safe_delete(crv)
-                new_crv = rebuild_curve_keep_name(orig_short, mirrored_positions, degree, form)
-                if new_crv:
-                    result_curves.append(new_crv)
-                continue
-
-            if len(positions) < 2 or len(mirrored_positions) < 2:
-                continue
-
-            join_mode, best_dist, ordered_orig, ordered_mir = _best_open_curve_join(
-                positions, mirrored_positions
+            new_crv = _mirrorclip_curve(
+                curve_transform=crv,
+                origin=origin,
+                direction=axis_vec,
+                distance_offset=float(opts.get("distance_offset", 0.0)),
+                reverse=bool(opts.get("reverse", False)),
+                keep_original=bool(opts.get("keep_original", False)),
+                hide_original_if_kept=bool(opts.get("hide_original_if_kept", True)),
+                consolidate_seam=bool(opts.get("consolidate_seam", True)),
+                seam_tol=max(0.0, float(opts.get("seam_tol", 0.0001))),
             )
-
-            if best_dist <= merge_threshold:
-                combined = ordered_orig + ordered_mir[1:]
-            else:
-                combined = ordered_orig + ordered_mir
-
-            _safe_delete(crv)
-
-            new_degree = max(1, min(int(degree), 3))
-            new_crv = cmds.curve(d=new_degree, p=combined, name=orig_short)
-
-            add_to_isolate(new_crv)
-            _set_curve_always_on_top(new_crv)
             result_curves.append(new_crv)
-
         except Exception as e:
             cmds.warning("[PR] Mirror failed for {}: {}".format(crv, e))
 
     if result_curves:
         cmds.select(result_curves, r=True)
-        print("[PR] {} curve(s) mirrored + merged along {}.".format(len(result_curves), axis.upper()))
+        print("[PR] {} curve(s) mirror-clipped along {}.".format(len(result_curves), axis.upper()))
         cmds.inViewMessage(
             amg="<hl>Mirror</hl> done along <hl>{}</hl>".format(axis.upper()),
             pos="topCenter",
@@ -2510,6 +2716,117 @@ class SectionLabel(QtWidgets.QLabel):
         """.format(c=color, border=QtGui.QColor(color).darker(150).name()))
 
 
+class MirrorAdvancedDialog(QtWidgets.QDialog):
+    def __init__(self, parent=None, state=None):
+        super(MirrorAdvancedDialog, self).__init__(parent)
+        self.setWindowTitle("Mirror Options")
+        self.setWindowFlags(self.windowFlags() & ~QtCore.Qt.WindowContextHelpButtonHint)
+        self.setMinimumWidth(320)
+        self._state = dict(MIRROR_ADV_DEFAULTS)
+        if isinstance(state, dict):
+            self._state.update(state)
+        self._build_ui()
+        self._load_state()
+
+    def _build_ui(self):
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(6)
+
+        self.axis_combo = QtWidgets.QComboBox()
+        self.axis_combo.addItems(["Auto", "X", "Y", "Z"])
+
+        self.mode_combo = QtWidgets.QComboBox()
+        self.mode_combo.addItems(["World Center (0)", "Object Center", "Bounding Box", "Grid Snap"])
+
+        form = QtWidgets.QFormLayout()
+        form.setLabelAlignment(QtCore.Qt.AlignLeft)
+        form.addRow("Axis", self.axis_combo)
+        form.addRow("Pivot Mode", self.mode_combo)
+        layout.addLayout(form)
+
+        self.advanced_btn = QtWidgets.QToolButton()
+        self.advanced_btn.setText("Advanced")
+        self.advanced_btn.setCheckable(True)
+        self.advanced_btn.setChecked(False)
+        self.advanced_btn.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        layout.addWidget(self.advanced_btn)
+
+        self.advanced_widget = QtWidgets.QWidget()
+        adv_form = QtWidgets.QFormLayout(self.advanced_widget)
+        adv_form.setLabelAlignment(QtCore.Qt.AlignLeft)
+        adv_form.setContentsMargins(6, 0, 0, 0)
+
+        self.distance_spin = QtWidgets.QDoubleSpinBox()
+        self.distance_spin.setDecimals(6)
+        self.distance_spin.setRange(-999999.0, 999999.0)
+        self.distance_spin.setSingleStep(0.01)
+        self.distance_spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+        adv_form.addRow("Distance", self.distance_spin)
+
+        self.reverse_combo = QtWidgets.QComboBox()
+        self.reverse_combo.addItems(["Forward", "Reverse"])
+        adv_form.addRow("Direction", self.reverse_combo)
+
+        self.keep_original_cb = QtWidgets.QCheckBox("Keep Original")
+        adv_form.addRow("", self.keep_original_cb)
+
+        self.hide_if_keep_cb = QtWidgets.QCheckBox("Hide Original if Kept")
+        adv_form.addRow("", self.hide_if_keep_cb)
+
+        self.consolidate_cb = QtWidgets.QCheckBox("Consolidate Seam")
+        adv_form.addRow("", self.consolidate_cb)
+
+        self.seam_tol_spin = QtWidgets.QDoubleSpinBox()
+        self.seam_tol_spin.setDecimals(6)
+        self.seam_tol_spin.setRange(0.0, 100.0)
+        self.seam_tol_spin.setSingleStep(0.0001)
+        self.seam_tol_spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+        adv_form.addRow("Seam Tolerance", self.seam_tol_spin)
+
+        layout.addWidget(self.advanced_widget)
+        self.advanced_widget.setVisible(False)
+
+        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        layout.addWidget(btns)
+
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        self.advanced_btn.toggled.connect(self.advanced_widget.setVisible)
+        self.keep_original_cb.toggled.connect(self.hide_if_keep_cb.setEnabled)
+
+    def _load_state(self):
+        axis = str(self._state.get("axis", "auto")).lower()
+        axis_map = {"auto": 0, "x": 1, "y": 2, "z": 3}
+        self.axis_combo.setCurrentIndex(axis_map.get(axis, 0))
+
+        mode = str(self._state.get("mode", "world"))
+        mode_map = {"world": 0, "object": 1, "boundingBox": 2, "grid": 3}
+        self.mode_combo.setCurrentIndex(mode_map.get(mode, 0))
+
+        self.distance_spin.setValue(float(self._state.get("distance_offset", 0.0)))
+        self.reverse_combo.setCurrentIndex(1 if bool(self._state.get("reverse", False)) else 0)
+        self.keep_original_cb.setChecked(bool(self._state.get("keep_original", False)))
+        self.hide_if_keep_cb.setChecked(bool(self._state.get("hide_original_if_kept", True)))
+        self.hide_if_keep_cb.setEnabled(self.keep_original_cb.isChecked())
+        self.consolidate_cb.setChecked(bool(self._state.get("consolidate_seam", True)))
+        self.seam_tol_spin.setValue(float(self._state.get("seam_tol", 0.0001)))
+
+    def settings(self):
+        axis_items = ["auto", "x", "y", "z"]
+        mode_items = ["world", "object", "boundingBox", "grid"]
+        return {
+            "axis": axis_items[self.axis_combo.currentIndex()],
+            "mode": mode_items[self.mode_combo.currentIndex()],
+            "distance_offset": float(self.distance_spin.value()),
+            "reverse": self.reverse_combo.currentIndex() == 1,
+            "keep_original": self.keep_original_cb.isChecked(),
+            "hide_original_if_kept": self.hide_if_keep_cb.isChecked(),
+            "consolidate_seam": self.consolidate_cb.isChecked(),
+            "seam_tol": float(self.seam_tol_spin.value()),
+        }
+
+
 # ============================================================
 # MAIN UI
 # ============================================================
@@ -2527,6 +2844,9 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         super(PRCurveToolsUI, self).__init__(parent)
 
         self._last_mirror_axis = 'auto'
+        self._last_mirror_mode = 'world'
+        self._mirror_adv_state = dict(MIRROR_ADV_DEFAULTS)
+        self._mirror_adv_state.update({"axis": "auto", "mode": "world"})
         self._attach_auto_reverse = True
         self._attach_clean_mode = False
         self._auto_curve_length = AUTO_CURVE_LENGTH_DEFAULT
@@ -2642,7 +2962,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         layout.addWidget(SectionLabel("  MIRROR", self.C_MIRROR))
 
         self.mirror_btn = PRColorBtn("Smart Mirror",
-                                     tip="Left-click: Auto-detect axis | Right-click: Manual",
+                                     tip="Left-click: Mirror options dialog | Right-click: Quick presets",
                                      bg="#2a1a3a", fg=self.C_MIRROR)
         self.mirror_btn.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.mirror_btn.customContextMenuRequested.connect(self._show_mirror_menu)
@@ -3081,7 +3401,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
 
         self.edge_btn.clicked.connect(edge_to_curve)
         self.attach_btn.clicked.connect(lambda: self._do_attach(True, "connect"))
-        self.mirror_btn.clicked.connect(lambda: mirror_curve('auto', 'world'))
+        self.mirror_btn.clicked.connect(self._show_mirror_advanced_dialog)
 
         self.extrude_btn.clicked.connect(lambda: extrude_cv_along_curve(0))
         self.edit_btn.clicked.connect(edit_curve_cvs)
@@ -3176,14 +3496,15 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         menu = QtWidgets.QMenu(self)
         menu.setStyleSheet(self._menu_style())
 
-        menu.addAction("Smart Auto-Detect").triggered.connect(lambda: mirror_curve('auto', 'world'))
+        menu.addAction("Smart Auto-Detect").triggered.connect(lambda: self._run_mirror_preset('auto', 'world'))
+        menu.addAction("Mirror Options...").triggered.connect(self._show_mirror_advanced_dialog)
         menu.addSeparator()
 
         axis_menu = menu.addMenu("Manual Axis")
         axis_menu.setStyleSheet(self._menu_style())
-        axis_menu.addAction("X").triggered.connect(lambda: mirror_curve('x', 'world'))
-        axis_menu.addAction("Y").triggered.connect(lambda: mirror_curve('y', 'world'))
-        axis_menu.addAction("Z").triggered.connect(lambda: mirror_curve('z', 'world'))
+        axis_menu.addAction("X").triggered.connect(lambda: self._run_mirror_preset('x', 'world'))
+        axis_menu.addAction("Y").triggered.connect(lambda: self._run_mirror_preset('y', 'world'))
+        axis_menu.addAction("Z").triggered.connect(lambda: self._run_mirror_preset('z', 'world'))
 
         menu.addSeparator()
         mode_menu = menu.addMenu("Pivot Mode")
@@ -3194,16 +3515,42 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         mode_menu.addAction("Grid Snap").triggered.connect(lambda: self._last_mirror_with_mode('grid'))
 
         menu.addSeparator()
-        menu.addAction("Mirror X (World)").triggered.connect(lambda: mirror_curve('x', 'world'))
-        menu.addAction("Mirror X (BBox)").triggered.connect(lambda: mirror_curve('x', 'boundingBox'))
-        menu.addAction("Mirror Z (World)").triggered.connect(lambda: mirror_curve('z', 'world'))
-        menu.addAction("Mirror Z (BBox)").triggered.connect(lambda: mirror_curve('z', 'boundingBox'))
+        menu.addAction("Mirror X (World)").triggered.connect(lambda: self._run_mirror_preset('x', 'world'))
+        menu.addAction("Mirror X (BBox)").triggered.connect(lambda: self._run_mirror_preset('x', 'boundingBox'))
+        menu.addAction("Mirror Z (World)").triggered.connect(lambda: self._run_mirror_preset('z', 'world'))
+        menu.addAction("Mirror Z (BBox)").triggered.connect(lambda: self._run_mirror_preset('z', 'boundingBox'))
 
         menu.exec_(self.mirror_btn.mapToGlobal(pos))
 
     def _last_mirror_with_mode(self, mode):
         axis = self._last_mirror_axis if self._last_mirror_axis != 'auto' else 'x'
+        self._last_mirror_mode = mode
         mirror_curve(axis, mode)
+
+    def _run_mirror_preset(self, axis, mode):
+        self._last_mirror_axis = axis
+        self._last_mirror_mode = mode
+        mirror_curve(axis, mode)
+
+    def _show_mirror_advanced_dialog(self):
+        dlg = MirrorAdvancedDialog(self, state=self._mirror_adv_state)
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return
+
+        settings = dlg.settings()
+        self._mirror_adv_state.update(settings)
+        self._last_mirror_axis = settings.get("axis", "auto")
+        self._last_mirror_mode = settings.get("mode", "world")
+
+        adv = {
+            "distance_offset": settings.get("distance_offset", 0.0),
+            "reverse": settings.get("reverse", False),
+            "keep_original": settings.get("keep_original", False),
+            "hide_original_if_kept": settings.get("hide_original_if_kept", True),
+            "consolidate_seam": settings.get("consolidate_seam", True),
+            "seam_tol": settings.get("seam_tol", 0.0001),
+        }
+        mirror_curve(settings.get("axis", "auto"), settings.get("mode", "world"), advanced=adv)
 
     # ------------------------------------------------------------------
     # CALLBACKS

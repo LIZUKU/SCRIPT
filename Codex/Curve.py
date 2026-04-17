@@ -48,6 +48,8 @@ SWEEP_DEFAULT_SETTINGS = {
 }
 
 AUTO_CURVE_LENGTH_DEFAULT = 15.0
+CIRCLE_SECTIONS_DEFAULT = 32
+CIRCLE_SECTIONS_PRESETS = (8, 16, 32, 64, 128)
 
 
 # ============================================================
@@ -1471,9 +1473,10 @@ def attach_selected_curves(delete_originals=True, method="connect", keep_multipl
 # ============================================================
 # PRIMITIVES
 # ============================================================
-def create_primitive_circle():
+def create_primitive_circle(sections=CIRCLE_SECTIONS_DEFAULT):
     try:
-        crv = cmds.circle(c=(0, 0, 0), nr=(0, 1, 0), sw=360, r=1, d=3, ut=0, tol=0.01, s=8, ch=1)[0]
+        sections = int(max(3, sections))
+        crv = cmds.circle(c=(0, 0, 0), nr=(0, 1, 0), sw=360, r=1, d=1, ut=0, tol=0.01, s=sections, ch=1)[0]
         _set_curve_always_on_top(crv)
         cmds.select(crv, r=True)
         try:
@@ -2060,6 +2063,33 @@ def _find_mesh_transform_from_nodes(nodes):
     return None
 
 
+def _prepare_curves_for_ring_fill(curves, spans=32):
+    """Convertit les curves non-lineaires en degree 1 avant le ring fill."""
+    prepared = []
+    linearized_count = 0
+    for c in curves or []:
+        if not _safe_obj_exists(c):
+            continue
+        try:
+            shapes = cmds.listRelatives(c, shapes=True, type="nurbsCurve", fullPath=True) or []
+            if not shapes:
+                continue
+            degree = int(cmds.getAttr(shapes[0] + ".degree"))
+            if degree != 1:
+                cmds.rebuildCurve(
+                    c,
+                    ch=1, rpo=1, rt=0, end=1, kr=0, kcp=0, kep=1, kt=1,
+                    s=int(max(3, spans)), d=1, tol=0.01
+                )
+                linearized_count += 1
+            prepared.append(c)
+        except Exception as e:
+            cmds.warning("[PR] Rebuild curve failed for {}: {}".format(c, e))
+    if linearized_count:
+        print("[PR] Ring Fill: {} curve(s) linearized (degree 1).".format(linearized_count))
+    return prepared
+
+
 def curve_to_bevel_plus():
     """
     Ring Fill robuste pour Maya récents :
@@ -2074,6 +2104,11 @@ def curve_to_bevel_plus():
     curves = _get_selected_curves_for_ring_fill()
     if not curves:
         cmds.warning("[PR] Ring Fill : aucune curve sélectionnée.")
+        return None
+
+    curves = _prepare_curves_for_ring_fill(curves, spans=CIRCLE_SECTIONS_DEFAULT)
+    if not curves:
+        cmds.warning("[PR] Ring Fill : aucune curve valide apres conversion.")
         return None
 
     closed_curves = []
@@ -2496,6 +2531,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         self._attach_clean_mode = False
         self._auto_curve_length = AUTO_CURVE_LENGTH_DEFAULT
         self._sweep_controls = {}
+        self._circle_sections_default = int(CIRCLE_SECTIONS_DEFAULT)
 
         self.setObjectName(WINDOW_OBJECT_NAME)
         self.setWindowTitle(WINDOW_TITLE)
@@ -2530,12 +2566,17 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         row = QtWidgets.QHBoxLayout()
         row.setSpacing(5)
         row.addWidget(QtWidgets.QLabel("Degree:"))
-        self.degree_spin = QtWidgets.QSpinBox()
-        self.degree_spin.setRange(1, 3)
-        self.degree_spin.setValue(1)
-        self.degree_spin.setFixedWidth(44)
-        self.degree_spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
-        row.addWidget(self.degree_spin)
+        self.degree_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.degree_slider.setRange(1, 3)
+        self.degree_slider.setValue(1)
+        self.degree_slider.setSingleStep(1)
+        self.degree_slider.setPageStep(1)
+        self.degree_slider.setFixedWidth(58)
+        self.degree_slider.setTickPosition(QtWidgets.QSlider.NoTicks)
+        row.addWidget(self.degree_slider)
+        self.degree_value_lbl = QtWidgets.QLabel("1")
+        self.degree_value_lbl.setFixedWidth(10)
+        row.addWidget(self.degree_value_lbl)
         self.snap_chk = QtWidgets.QCheckBox("Snap Grid")
         row.addWidget(self.snap_chk)
         row.addStretch()
@@ -2550,7 +2591,9 @@ class PRCurveToolsUI(QtWidgets.QDialog):
 
         row = QtWidgets.QHBoxLayout()
         row.setSpacing(4)
-        self.circle_btn = PRColorBtn("Circle", bg="#1a2a3a", fg=self.C_DRAW)
+        self.circle_btn = PRColorBtn("Circle", tip="Left-click: default 32 | Right-click: presets", bg="#1a2a3a", fg=self.C_DRAW)
+        self.circle_btn.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.circle_btn.customContextMenuRequested.connect(self._show_circle_menu)
         self.square_btn = PRColorBtn("Square", bg="#1a2a3a", fg=self.C_DRAW)
         row.addWidget(self.circle_btn)
         row.addWidget(self.square_btn)
@@ -3028,10 +3071,11 @@ class PRCurveToolsUI(QtWidgets.QDialog):
     # SIGNALS
     # ------------------------------------------------------------------
     def _connect_signals(self):
-        self.draw_btn.clicked.connect(lambda: draw_curve(self.degree_spin.value(), self.snap_chk.isChecked()))
+        self.draw_btn.clicked.connect(lambda: draw_curve(self.degree_slider.value(), self.snap_chk.isChecked()))
+        self.degree_slider.valueChanged.connect(lambda v: self.degree_value_lbl.setText(str(int(v))))
         self.stop_btn.clicked.connect(stop_draw_tool)
         self.close_btn.clicked.connect(close_selected_curves)
-        self.circle_btn.clicked.connect(create_primitive_circle)
+        self.circle_btn.clicked.connect(lambda: create_primitive_circle(self._circle_sections_default))
         self.square_btn.clicked.connect(create_primitive_square)
         self.auto_curve_btn.clicked.connect(lambda: auto_create_curve_from_vertex(self.auto_curve_len_spin.value()))
 
@@ -3071,6 +3115,26 @@ class PRCurveToolsUI(QtWidgets.QDialog):
             QMenu::item:selected { background-color: #333; color: #ffffff; }
             QMenu::separator { height: 1px; background: #333; margin: 3px 0; }
         """
+
+    def _show_circle_menu(self, pos):
+        menu = QtWidgets.QMenu(self)
+        menu.setStyleSheet(self._menu_style())
+
+        for sections in CIRCLE_SECTIONS_PRESETS:
+            action = menu.addAction("{} sections".format(int(sections)))
+            if int(sections) == int(self._circle_sections_default):
+                f = action.font()
+                f.setBold(True)
+                action.setFont(f)
+                action.setText("{} sections (Default)".format(int(sections)))
+
+            def _create_with_preset(_checked=False, s=int(sections)):
+                self._circle_sections_default = int(s)
+                create_primitive_circle(self._circle_sections_default)
+
+            action.triggered.connect(_create_with_preset)
+
+        menu.exec_(self.circle_btn.mapToGlobal(pos))
 
     def _show_ring_fill_menu(self, pos):
         menu = QtWidgets.QMenu(self)

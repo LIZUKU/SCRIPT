@@ -2068,20 +2068,42 @@ def split_curve_at_selected_cvs():
             data = _get_curve_data(crv)
             if not data:
                 continue
-            _shp, degree, _form, _positions_raw, _cyclic, _positions = data
-            cv_names = cmds.ls(crv + ".cv[*]", fl=True) or []
-            positions_full = [list(cmds.pointPosition(c, w=True)) for c in cv_names]
-            count = len(positions_full)
-            if count < 2:
-                continue
+            _shp, degree, _form, _positions_raw, cyclic, cleaned_positions = data
+            if cyclic:
+                points = [list(p) for p in cleaned_positions]
+                count = len(points)
+                if count < 3:
+                    continue
+                split_indices = sorted({i % count for i in idx_set})
+                if not split_indices:
+                    continue
 
-            split_indices = sorted(i for i in idx_set if 0 < i < count - 1)
-            if not split_indices:
-                continue
+                segments_pts = []
+                if len(split_indices) == 1:
+                    start = split_indices[0]
+                    rotated = points[start:] + points[:start]
+                    if len(rotated) >= 2:
+                        segments_pts = [rotated]
+                else:
+                    wrapped = split_indices + [split_indices[0] + count]
+                    for a, b in zip(wrapped[:-1], wrapped[1:]):
+                        seg = [points[k % count] for k in range(a, b + 1)]
+                        if len(seg) >= 2:
+                            segments_pts.append(seg)
+            else:
+                cv_names = cmds.ls(crv + ".cv[*]", fl=True) or []
+                points = [list(cmds.pointPosition(c, w=True)) for c in cv_names]
+                count = len(points)
+                if count < 2:
+                    continue
+                split_indices = sorted(i for i in idx_set if 0 < i < count - 1)
+                if not split_indices:
+                    cmds.warning("[PR] Split CV: ignored end CV selection on {}.".format(crv))
+                    continue
+                start_indices = [0] + split_indices
+                end_indices = split_indices + [count - 1]
+                segments_pts = [points[s:e + 1] for s, e in zip(start_indices, end_indices)]
 
-            start_indices = [0] + split_indices
-            end_indices = split_indices + [count - 1]
-            segments_pts = [positions_full[s:e + 1] for s, e in zip(start_indices, end_indices)]
             created = _create_curve_segments_from_points(crv, segments_pts, degree=degree)
             if created:
                 _safe_delete(crv)
@@ -3231,18 +3253,17 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         row.addWidget(self.split_only_btn)
         layout.addLayout(row)
 
+        row = QtWidgets.QHBoxLayout()
+        row.setSpacing(4)
         self.fill_btn = PRColorBtn("Ring Fill",
                                    tip="Left-click: Hide curves | Right-click: Delete curves",
                                    bg="#0f2a2a", fg=self.C_MESH)
         self.fill_btn.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.fill_btn.customContextMenuRequested.connect(self._show_ring_fill_menu)
-        layout.addWidget(self.fill_btn)
-
-        row = QtWidgets.QHBoxLayout()
-        row.setSpacing(4)
         self.sweep_btn = PRColorBtn("Sweep Mesh", bg="#0f2a2a", fg=self.C_MESH)
         self.bake_btn = PRColorBtn("Bake", bg="#0f3010", fg="#50ff50", w=56)
         self.bake_btn.setEnabled(False)
+        row.addWidget(self.fill_btn)
         row.addWidget(self.sweep_btn)
         row.addWidget(self.bake_btn)
         layout.addLayout(row)

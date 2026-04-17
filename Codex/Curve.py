@@ -2839,6 +2839,10 @@ class PRCurveToolsUI(QtWidgets.QDialog):
     C_CV = "#ffaa40"
     C_CHAMFER = "#cc4444"
     C_MESH = "#40c8c8"
+    MIRROR_SLIDER_MIN_MAX = {
+        "distance_offset": (-10.0, 10.0),
+        "seam_tol": (0.0, 0.1),
+    }
 
     def __init__(self, parent=get_maya_main_window()):
         super(PRCurveToolsUI, self).__init__(parent)
@@ -2960,13 +2964,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         layout.addWidget(self.attach_btn)
 
         layout.addWidget(SectionLabel("  MIRROR", self.C_MIRROR))
-
-        self.mirror_btn = PRColorBtn("Smart Mirror",
-                                     tip="Left-click: Mirror options dialog | Right-click: Quick presets",
-                                     bg="#2a1a3a", fg=self.C_MIRROR)
-        self.mirror_btn.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
-        self.mirror_btn.customContextMenuRequested.connect(self._show_mirror_menu)
-        layout.addWidget(self.mirror_btn)
+        self._add_mirror_controls(layout)
 
         layout.addWidget(SectionLabel("  CV TOOLS", self.C_CV))
 
@@ -3401,7 +3399,12 @@ class PRCurveToolsUI(QtWidgets.QDialog):
 
         self.edge_btn.clicked.connect(edge_to_curve)
         self.attach_btn.clicked.connect(lambda: self._do_attach(True, "connect"))
-        self.mirror_btn.clicked.connect(self._show_mirror_advanced_dialog)
+        self.mirror_auto_btn.clicked.connect(lambda: self._run_mirror_with_axis("auto"))
+        self.mirror_x_btn.clicked.connect(lambda: self._run_mirror_with_axis("x"))
+        self.mirror_y_btn.clicked.connect(lambda: self._run_mirror_with_axis("y"))
+        self.mirror_z_btn.clicked.connect(lambda: self._run_mirror_with_axis("z"))
+        self.mirror_adv_toggle.toggled.connect(self.mirror_adv_widget.setVisible)
+        self.mirror_keep_original_cb.toggled.connect(self.mirror_hide_if_keep_cb.setEnabled)
 
         self.extrude_btn.clicked.connect(lambda: extrude_cv_along_curve(0))
         self.edit_btn.clicked.connect(edit_curve_cvs)
@@ -3423,7 +3426,111 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         self.snap_chk.toggled.connect(self._on_snap_toggled)
         self.on_top_chk.toggled.connect(self._on_always_on_top_toggled)
         self._sync_sweep_ui_from_settings()
+        self._sync_mirror_controls_from_state()
         self._update_bake_button()
+
+    def _add_mirror_controls(self, parent_layout):
+        row = QtWidgets.QHBoxLayout()
+        row.setSpacing(4)
+        self.mirror_auto_btn = PRColorBtn("Smart Mirror", tip="Auto axis", bg="#2a1a3a", fg=self.C_MIRROR)
+        self.mirror_x_btn = PRColorBtn("X", tip="Mirror X", bg="#2a1a3a", fg=self.C_MIRROR, w=34)
+        self.mirror_y_btn = PRColorBtn("Y", tip="Mirror Y", bg="#2a1a3a", fg=self.C_MIRROR, w=34)
+        self.mirror_z_btn = PRColorBtn("Z", tip="Mirror Z", bg="#2a1a3a", fg=self.C_MIRROR, w=34)
+        row.addWidget(self.mirror_auto_btn)
+        row.addWidget(self.mirror_x_btn)
+        row.addWidget(self.mirror_y_btn)
+        row.addWidget(self.mirror_z_btn)
+        parent_layout.addLayout(row)
+
+        self.mirror_adv_toggle = QtWidgets.QToolButton()
+        self.mirror_adv_toggle.setText("Advanced")
+        self.mirror_adv_toggle.setCheckable(True)
+        self.mirror_adv_toggle.setChecked(False)
+        self.mirror_adv_toggle.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        parent_layout.addWidget(self.mirror_adv_toggle)
+
+        self.mirror_adv_widget = QtWidgets.QWidget()
+        adv_layout = QtWidgets.QVBoxLayout(self.mirror_adv_widget)
+        adv_layout.setContentsMargins(6, 0, 0, 0)
+        adv_layout.setSpacing(4)
+
+        mode_row = QtWidgets.QHBoxLayout()
+        mode_row.setSpacing(4)
+        mode_row.addWidget(QtWidgets.QLabel("Pivot"))
+        self.mirror_mode_combo = QtWidgets.QComboBox()
+        self.mirror_mode_combo.addItems(["World Center (0)", "Object Center", "Bounding Box", "Grid Snap"])
+        mode_row.addWidget(self.mirror_mode_combo)
+        adv_layout.addLayout(mode_row)
+
+        self.mirror_distance_slider, self.mirror_distance_spin, self.mirror_distance_reset = self._add_mirror_param_slider(
+            adv_layout, "Distance", "distance_offset", decimals=4
+        )
+        self.mirror_seam_slider, self.mirror_seam_spin, self.mirror_seam_reset = self._add_mirror_param_slider(
+            adv_layout, "Seam Tol.", "seam_tol", decimals=6
+        )
+
+        self.mirror_reverse_cb = QtWidgets.QCheckBox("Reverse")
+        self.mirror_keep_original_cb = QtWidgets.QCheckBox("Keep Original")
+        self.mirror_hide_if_keep_cb = QtWidgets.QCheckBox("Hide Original if Kept")
+        self.mirror_consolidate_cb = QtWidgets.QCheckBox("Consolidate Seam")
+        adv_layout.addWidget(self.mirror_reverse_cb)
+        adv_layout.addWidget(self.mirror_keep_original_cb)
+        adv_layout.addWidget(self.mirror_hide_if_keep_cb)
+        adv_layout.addWidget(self.mirror_consolidate_cb)
+        parent_layout.addWidget(self.mirror_adv_widget)
+        self.mirror_adv_widget.setVisible(False)
+
+        self.mirror_distance_reset.clicked.connect(
+            lambda: self.mirror_distance_spin.setValue(float(MIRROR_ADV_DEFAULTS.get("distance_offset", 0.0)))
+        )
+        self.mirror_seam_reset.clicked.connect(
+            lambda: self.mirror_seam_spin.setValue(float(MIRROR_ADV_DEFAULTS.get("seam_tol", 0.0001)))
+        )
+
+    def _add_mirror_param_slider(self, parent_layout, label, key, decimals=3):
+        min_val, max_val = self.MIRROR_SLIDER_MIN_MAX.get(key, (0.0, 1.0))
+        row = QtWidgets.QHBoxLayout()
+        row.setSpacing(4)
+        lbl = QtWidgets.QLabel(label)
+        lbl.setFixedWidth(62)
+        row.addWidget(lbl)
+
+        slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        slider.setMinimum(0)
+        slider.setMaximum(1000)
+        row.addWidget(slider)
+
+        spinbox = QtWidgets.QDoubleSpinBox()
+        spinbox.setDecimals(decimals)
+        spinbox.setRange(min_val, max_val)
+        spinbox.setSingleStep(0.0001 if key == "seam_tol" else 0.01)
+        spinbox.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+        spinbox.setKeyboardTracking(False)
+        spinbox.setFixedWidth(65)
+        row.addWidget(spinbox)
+
+        reset_btn = PRColorBtn("Reset", bg="#2a2a2a", fg="#707070", w=46)
+        row.addWidget(reset_btn)
+        parent_layout.addLayout(row)
+
+        def _slider_to_spin(v):
+            ratio = v / 1000.0
+            real_val = min_val + ratio * (max_val - min_val)
+            spinbox.blockSignals(True)
+            spinbox.setValue(real_val)
+            spinbox.blockSignals(False)
+
+        def _spin_to_slider(v):
+            clamped = max(min_val, min(max_val, float(v)))
+            ratio = (clamped - min_val) / (max_val - min_val) if max_val > min_val else 0.0
+            slider.blockSignals(True)
+            slider.setValue(int(ratio * 1000))
+            slider.blockSignals(False)
+
+        slider.valueChanged.connect(_slider_to_spin)
+        spinbox.valueChanged.connect(_spin_to_slider)
+        spinbox.setValue(float(MIRROR_ADV_DEFAULTS.get(key, min_val)))
+        return slider, spinbox, reset_btn
 
     # ------------------------------------------------------------------
     # CONTEXT MENUS
@@ -3520,17 +3627,55 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         menu.addAction("Mirror Z (World)").triggered.connect(lambda: self._run_mirror_preset('z', 'world'))
         menu.addAction("Mirror Z (BBox)").triggered.connect(lambda: self._run_mirror_preset('z', 'boundingBox'))
 
-        menu.exec_(self.mirror_btn.mapToGlobal(pos))
+        menu.exec_(self.mirror_auto_btn.mapToGlobal(pos))
 
     def _last_mirror_with_mode(self, mode):
         axis = self._last_mirror_axis if self._last_mirror_axis != 'auto' else 'x'
         self._last_mirror_mode = mode
-        mirror_curve(axis, mode)
+        settings = self._collect_mirror_settings()
+        settings["mode"] = mode
+        self._mirror_adv_state.update(settings)
+        mirror_curve(axis, mode, advanced={
+            "distance_offset": settings.get("distance_offset", 0.0),
+            "reverse": settings.get("reverse", False),
+            "keep_original": settings.get("keep_original", False),
+            "hide_original_if_kept": settings.get("hide_original_if_kept", True),
+            "consolidate_seam": settings.get("consolidate_seam", True),
+            "seam_tol": settings.get("seam_tol", 0.0001),
+        })
 
     def _run_mirror_preset(self, axis, mode):
         self._last_mirror_axis = axis
         self._last_mirror_mode = mode
-        mirror_curve(axis, mode)
+        settings = self._collect_mirror_settings()
+        settings["axis"] = axis
+        settings["mode"] = mode
+        self._mirror_adv_state.update(settings)
+        mirror_curve(axis, mode, advanced={
+            "distance_offset": settings.get("distance_offset", 0.0),
+            "reverse": settings.get("reverse", False),
+            "keep_original": settings.get("keep_original", False),
+            "hide_original_if_kept": settings.get("hide_original_if_kept", True),
+            "consolidate_seam": settings.get("consolidate_seam", True),
+            "seam_tol": settings.get("seam_tol", 0.0001),
+        })
+
+    def _run_mirror_with_axis(self, axis):
+        settings = self._collect_mirror_settings()
+        settings["axis"] = axis
+        self._mirror_adv_state.update(settings)
+        self._last_mirror_axis = axis
+        self._last_mirror_mode = settings.get("mode", "world")
+
+        adv = {
+            "distance_offset": settings.get("distance_offset", 0.0),
+            "reverse": settings.get("reverse", False),
+            "keep_original": settings.get("keep_original", False),
+            "hide_original_if_kept": settings.get("hide_original_if_kept", True),
+            "consolidate_seam": settings.get("consolidate_seam", True),
+            "seam_tol": settings.get("seam_tol", 0.0001),
+        }
+        mirror_curve(axis, settings.get("mode", "world"), advanced=adv)
 
     def _show_mirror_advanced_dialog(self):
         dlg = MirrorAdvancedDialog(self, state=self._mirror_adv_state)
@@ -3551,6 +3696,30 @@ class PRCurveToolsUI(QtWidgets.QDialog):
             "seam_tol": settings.get("seam_tol", 0.0001),
         }
         mirror_curve(settings.get("axis", "auto"), settings.get("mode", "world"), advanced=adv)
+
+    def _sync_mirror_controls_from_state(self):
+        mode_map = {"world": 0, "object": 1, "boundingBox": 2, "grid": 3}
+        self.mirror_mode_combo.setCurrentIndex(mode_map.get(self._mirror_adv_state.get("mode", "world"), 0))
+        self.mirror_distance_spin.setValue(float(self._mirror_adv_state.get("distance_offset", 0.0)))
+        self.mirror_seam_spin.setValue(float(self._mirror_adv_state.get("seam_tol", 0.0001)))
+        self.mirror_reverse_cb.setChecked(bool(self._mirror_adv_state.get("reverse", False)))
+        self.mirror_keep_original_cb.setChecked(bool(self._mirror_adv_state.get("keep_original", False)))
+        self.mirror_hide_if_keep_cb.setChecked(bool(self._mirror_adv_state.get("hide_original_if_kept", True)))
+        self.mirror_hide_if_keep_cb.setEnabled(self.mirror_keep_original_cb.isChecked())
+        self.mirror_consolidate_cb.setChecked(bool(self._mirror_adv_state.get("consolidate_seam", True)))
+
+    def _collect_mirror_settings(self):
+        mode_items = ["world", "object", "boundingBox", "grid"]
+        mode_idx = max(0, min(len(mode_items) - 1, self.mirror_mode_combo.currentIndex()))
+        return {
+            "mode": mode_items[mode_idx],
+            "distance_offset": float(self.mirror_distance_spin.value()),
+            "seam_tol": float(self.mirror_seam_spin.value()),
+            "reverse": self.mirror_reverse_cb.isChecked(),
+            "keep_original": self.mirror_keep_original_cb.isChecked(),
+            "hide_original_if_kept": self.mirror_hide_if_keep_cb.isChecked(),
+            "consolidate_seam": self.mirror_consolidate_cb.isChecked(),
+        }
 
     # ------------------------------------------------------------------
     # CALLBACKS

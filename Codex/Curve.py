@@ -1206,7 +1206,7 @@ def _mirror_pivot_from_mode(curves, axis, mode):
     return 0.0
 
 
-def mirror_curve(axis='auto', mode='world', merge_threshold=0.001, advanced=None):
+def mirror_curve(axis='auto', mode='world', merge_threshold=0.001, advanced=None, quiet=False):
     sel = cmds.ls(sl=True, long=True) or []
     curves = list(set(filter(None, [get_curve_transform(s) for s in sel])))
     if not curves:
@@ -1248,12 +1248,13 @@ def mirror_curve(axis='auto', mode='world', merge_threshold=0.001, advanced=None
 
     if result_curves:
         cmds.select(result_curves, r=True)
-        print("[PR] {} curve(s) mirror-clipped along {}.".format(len(result_curves), axis.upper()))
-        cmds.inViewMessage(
-            amg="<hl>Mirror</hl> done along <hl>{}</hl>".format(axis.upper()),
-            pos="topCenter",
-            fade=True
-        )
+        if not quiet:
+            print("[PR] {} curve(s) mirror-clipped along {}.".format(len(result_curves), axis.upper()))
+            cmds.inViewMessage(
+                amg="<hl>Mirror</hl> done along <hl>{}</hl>".format(axis.upper()),
+                pos="topCenter",
+                fade=True
+            )
 
 
 # ============================================================
@@ -2722,11 +2723,15 @@ class MirrorAdvancedDialog(QtWidgets.QDialog):
         self.setWindowTitle("Mirror Options")
         self.setWindowFlags(self.windowFlags() & ~QtCore.Qt.WindowContextHelpButtonHint)
         self.setMinimumWidth(320)
+        self._preview_sources = list(set(filter(None, [get_curve_transform(s) for s in (cmds.ls(sl=True, long=True) or [])])))
+        self._preview_curves = []
+        self._preview_update_busy = False
         self._state = dict(MIRROR_ADV_DEFAULTS)
         if isinstance(state, dict):
             self._state.update(state)
         self._build_ui()
         self._load_state()
+        self._refresh_preview()
 
     def _build_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
@@ -2792,8 +2797,16 @@ class MirrorAdvancedDialog(QtWidgets.QDialog):
 
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
-        self.advanced_btn.toggled.connect(self.advanced_widget.setVisible)
+        self.advanced_btn.toggled.connect(self._on_advanced_toggled)
         self.keep_original_cb.toggled.connect(self.hide_if_keep_cb.setEnabled)
+        self.axis_combo.currentIndexChanged.connect(self._refresh_preview)
+        self.mode_combo.currentIndexChanged.connect(self._refresh_preview)
+        self.distance_spin.valueChanged.connect(self._refresh_preview)
+        self.reverse_combo.currentIndexChanged.connect(self._refresh_preview)
+        self.keep_original_cb.toggled.connect(self._refresh_preview)
+        self.hide_if_keep_cb.toggled.connect(self._refresh_preview)
+        self.consolidate_cb.toggled.connect(self._refresh_preview)
+        self.seam_tol_spin.valueChanged.connect(self._refresh_preview)
 
     def _load_state(self):
         axis = str(self._state.get("axis", "auto")).lower()
@@ -2825,6 +2838,69 @@ class MirrorAdvancedDialog(QtWidgets.QDialog):
             "consolidate_seam": self.consolidate_cb.isChecked(),
             "seam_tol": float(self.seam_tol_spin.value()),
         }
+
+    def _on_advanced_toggled(self, checked):
+        self.advanced_widget.setVisible(checked)
+        self.adjustSize()
+
+    def _delete_preview_curves(self):
+        if not self._preview_curves:
+            return
+        to_delete = [c for c in self._preview_curves if _safe_obj_exists(c)]
+        self._preview_curves = []
+        if to_delete:
+            try:
+                cmds.delete(to_delete)
+            except Exception:
+                pass
+
+    def _refresh_preview(self, *_):
+        if self._preview_update_busy:
+            return
+        if not self._preview_sources:
+            return
+        existing_sources = [c for c in self._preview_sources if _safe_obj_exists(c)]
+        if not existing_sources:
+            return
+
+        self._preview_update_busy = True
+        try:
+            self._delete_preview_curves()
+            cmds.select(existing_sources, r=True)
+            preview_opts = self.settings()
+            preview_adv = {
+                "distance_offset": preview_opts.get("distance_offset", 0.0),
+                "reverse": preview_opts.get("reverse", False),
+                "keep_original": True,
+                "hide_original_if_kept": False,
+                "consolidate_seam": preview_opts.get("consolidate_seam", True),
+                "seam_tol": preview_opts.get("seam_tol", 0.0001),
+            }
+            mirror_curve(
+                preview_opts.get("axis", "auto"),
+                preview_opts.get("mode", "world"),
+                advanced=preview_adv,
+                quiet=True
+            )
+            self._preview_curves = list(set(filter(None, [get_curve_transform(s) for s in (cmds.ls(sl=True, long=True) or [])])))
+        except Exception as e:
+            cmds.warning("[PR] Live mirror preview failed: {}".format(e))
+        finally:
+            self._preview_update_busy = False
+
+    def accept(self):
+        self._delete_preview_curves()
+        existing_sources = [c for c in self._preview_sources if _safe_obj_exists(c)]
+        if existing_sources:
+            cmds.select(existing_sources, r=True)
+        super(MirrorAdvancedDialog, self).accept()
+
+    def reject(self):
+        self._delete_preview_curves()
+        existing_sources = [c for c in self._preview_sources if _safe_obj_exists(c)]
+        if existing_sources:
+            cmds.select(existing_sources, r=True)
+        super(MirrorAdvancedDialog, self).reject()
 
 
 # ============================================================
@@ -3403,7 +3479,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         self.mirror_x_btn.clicked.connect(lambda: self._run_mirror_with_axis("x"))
         self.mirror_y_btn.clicked.connect(lambda: self._run_mirror_with_axis("y"))
         self.mirror_z_btn.clicked.connect(lambda: self._run_mirror_with_axis("z"))
-        self.mirror_adv_toggle.toggled.connect(self.mirror_adv_widget.setVisible)
+        self.mirror_adv_toggle.toggled.connect(self._on_mirror_advanced_toggled)
         self.mirror_keep_original_cb.toggled.connect(self.mirror_hide_if_keep_cb.setEnabled)
 
         self.extrude_btn.clicked.connect(lambda: extrude_cv_along_curve(0))
@@ -3531,6 +3607,10 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         spinbox.valueChanged.connect(_spin_to_slider)
         spinbox.setValue(float(MIRROR_ADV_DEFAULTS.get(key, min_val)))
         return slider, spinbox, reset_btn
+
+    def _on_mirror_advanced_toggled(self, checked):
+        self.mirror_adv_widget.setVisible(checked)
+        self.adjustSize()
 
     # ------------------------------------------------------------------
     # CONTEXT MENUS

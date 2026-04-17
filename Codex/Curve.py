@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 import math
+import os
 import time
+import importlib.util
 import maya.cmds as cmds
 import maya.mel as mel
 import maya.api.OpenMaya as om
@@ -176,6 +178,32 @@ def _safe_delete(obj):
             cmds.delete(obj)
     except Exception:
         pass
+
+
+def _load_slot_tool_module():
+    module_name = "slot_tool"
+    try:
+        import sys
+        if module_name in sys.modules and sys.modules[module_name] is not None:
+            return sys.modules[module_name]
+    except Exception:
+        pass
+
+    module_path = os.path.join(os.path.dirname(__file__), "slot_tool.py")
+    if not os.path.exists(module_path):
+        return None
+
+    try:
+        spec = importlib.util.spec_from_file_location(module_name, module_path)
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        import sys
+        sys.modules[module_name] = module
+        return module
+    except Exception:
+        return None
 
 
 def _get_vertex_normal_world(vertex_component):
@@ -3112,7 +3140,8 @@ class PRCurveToolsUI(QtWidgets.QDialog):
 
         self.setObjectName(WINDOW_OBJECT_NAME)
         self.setWindowTitle(WINDOW_TITLE)
-        self.setFixedWidth(310)
+        self.setMinimumWidth(310)
+        self.setSizeGripEnabled(True)
         self.setWindowFlags(QtCore.Qt.Window | QtCore.Qt.WindowCloseButtonHint)
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose)
 
@@ -3124,6 +3153,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
 
         self._build_ui()
         self._apply_global_style()
+        self.adjustSize()
 
         try:
             self._job = cmds.scriptJob(event=["SelectionChanged", self._on_sel_changed], parent=WINDOW_OBJECT_NAME)
@@ -3235,8 +3265,10 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         row_cv_cut.setSpacing(4)
         self.split_cv_btn = PRColorBtn("Split CV", bg="#2a1e0a", fg=self.C_CV)
         self.delete_open_cv_btn = PRColorBtn("Delete Open", bg="#2a1e0a", fg=self.C_CV)
+        self.slot_btn = PRColorBtn("Slots", bg="#2a1e0a", fg=self.C_CV, tip="Build slot from selected curve(s)")
         row_cv_cut.addWidget(self.split_cv_btn)
         row_cv_cut.addWidget(self.delete_open_cv_btn)
+        row_cv_cut.addWidget(self.slot_btn)
         layout.addLayout(row_cv_cut)
 
         self.merge_cv_slider, self.merge_cv_spin = self._add_merge_slider(
@@ -3685,6 +3717,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         self.insert_btn.clicked.connect(insert_cv)
         self.split_cv_btn.clicked.connect(split_curve_at_selected_cvs)
         self.delete_open_cv_btn.clicked.connect(delete_selected_cvs_open)
+        self.slot_btn.clicked.connect(self._do_slot_tool)
 
         self.merge_cv_spin.valueChanged.connect(lambda v: None)
         self.merge_cv_btn.clicked.connect(self._do_apply_merge_cv)
@@ -3704,6 +3737,16 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         self._sync_sweep_ui_from_settings()
         self._sync_mirror_controls_from_state()
         self._update_bake_button()
+
+    def _do_slot_tool(self):
+        slot_tool_mod = _load_slot_tool_module()
+        if slot_tool_mod is None:
+            cmds.warning("[PR] Slot tool module not available.")
+            return
+        try:
+            slot_tool_mod.launch_slot_tool_from_ui()
+        except Exception as e:
+            cmds.warning("[PR] Slot tool failed: {}".format(e))
 
     def _add_mirror_controls(self, parent_layout):
         row = QtWidgets.QHBoxLayout()

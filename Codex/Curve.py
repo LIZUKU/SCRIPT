@@ -2032,6 +2032,117 @@ def insert_cv():
         cmds.warning("[PR] Insert failed: {}".format(e))
 
 
+def _create_curve_segments_from_points(base_curve, segments_points, degree=1):
+    created = []
+    base_short = base_curve.split("|")[-1].split(":")[-1]
+    for pts in segments_points:
+        if len(pts) < 2:
+            continue
+        try:
+            d = min(max(1, int(degree)), len(pts) - 1)
+            new_crv = cmds.curve(d=d, p=pts, name="{}_part#".format(base_short))
+            _set_curve_always_on_top(new_crv)
+            add_to_isolate(new_crv)
+            created.append(new_crv)
+        except Exception as e:
+            cmds.warning("[PR] Failed to build curve segment: {}".format(e))
+    return created
+
+
+def split_curve_at_selected_cvs():
+    sel = cmds.ls(sl=True, fl=True) or []
+    cvs = [c for c in sel if ".cv[" in c]
+    if not cvs:
+        cmds.warning("[PR] Split CV: select one or more CVs.")
+        return
+
+    by_curve = {}
+    for cv in cvs:
+        crv = get_curve_transform(cv.split(".cv[")[0]) or cv.split(".cv[")[0]
+        idx = int(cv.split("[")[1].split("]")[0])
+        by_curve.setdefault(crv, set()).add(idx)
+
+    all_created = []
+    for crv, idx_set in by_curve.items():
+        try:
+            data = _get_curve_data(crv)
+            if not data:
+                continue
+            _shp, degree, _form, _positions_raw, _cyclic, _positions = data
+            cv_names = cmds.ls(crv + ".cv[*]", fl=True) or []
+            positions_full = [list(cmds.pointPosition(c, w=True)) for c in cv_names]
+            count = len(positions_full)
+            if count < 2:
+                continue
+
+            split_indices = sorted(i for i in idx_set if 0 < i < count - 1)
+            if not split_indices:
+                continue
+
+            start_indices = [0] + split_indices
+            end_indices = split_indices + [count - 1]
+            segments_pts = [positions_full[s:e + 1] for s, e in zip(start_indices, end_indices)]
+            created = _create_curve_segments_from_points(crv, segments_pts, degree=degree)
+            if created:
+                _safe_delete(crv)
+                all_created.extend(created)
+        except Exception as e:
+            cmds.warning("[PR] Split CV failed on {}: {}".format(crv, e))
+
+    if all_created:
+        cmds.select(all_created, r=True)
+        print("[PR] Split CV: {} curve(s) created.".format(len(all_created)))
+
+
+def delete_selected_cvs_open():
+    sel = cmds.ls(sl=True, fl=True) or []
+    cvs = [c for c in sel if ".cv[" in c]
+    if not cvs:
+        cmds.warning("[PR] Delete CV Open: select one or more CVs.")
+        return
+
+    by_curve = {}
+    for cv in cvs:
+        crv = get_curve_transform(cv.split(".cv[")[0]) or cv.split(".cv[")[0]
+        idx = int(cv.split("[")[1].split("]")[0])
+        by_curve.setdefault(crv, set()).add(idx)
+
+    all_created = []
+    for crv, idx_set in by_curve.items():
+        try:
+            data = _get_curve_data(crv)
+            if not data:
+                continue
+            _shp, degree, _form, _positions_raw, _cyclic, _positions = data
+            cv_names = cmds.ls(crv + ".cv[*]", fl=True) or []
+            positions_full = [list(cmds.pointPosition(c, w=True)) for c in cv_names]
+            if len(positions_full) < 2:
+                continue
+
+            segments_pts = []
+            run = []
+            for i, p in enumerate(positions_full):
+                if i in idx_set:
+                    if len(run) >= 2:
+                        segments_pts.append(run)
+                    run = []
+                else:
+                    run.append(p)
+            if len(run) >= 2:
+                segments_pts.append(run)
+
+            created = _create_curve_segments_from_points(crv, segments_pts, degree=degree)
+            if created:
+                _safe_delete(crv)
+                all_created.extend(created)
+        except Exception as e:
+            cmds.warning("[PR] Delete CV Open failed on {}: {}".format(crv, e))
+
+    if all_created:
+        cmds.select(all_created, r=True)
+        print("[PR] Delete CV Open: {} curve(s) created.".format(len(all_created)))
+
+
 # ============================================================
 # SWEEP MESH
 # ============================================================
@@ -3072,6 +3183,14 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         row.addWidget(self.insert_btn)
         layout.addLayout(row)
 
+        row_cv_cut = QtWidgets.QHBoxLayout()
+        row_cv_cut.setSpacing(4)
+        self.split_cv_btn = PRColorBtn("Split CV", bg="#2a1e0a", fg=self.C_CV)
+        self.delete_open_cv_btn = PRColorBtn("Delete Open", bg="#2a1e0a", fg=self.C_CV)
+        row_cv_cut.addWidget(self.split_cv_btn)
+        row_cv_cut.addWidget(self.delete_open_cv_btn)
+        layout.addLayout(row_cv_cut)
+
         self.merge_cv_slider, self.merge_cv_spin = self._add_merge_slider(
             layout, "Merge CVs", 0.0, 10.0, 0.0, self.C_CV
         )
@@ -3517,6 +3636,8 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         self.extrude_btn.clicked.connect(lambda: extrude_cv_along_curve(0))
         self.edit_btn.clicked.connect(edit_curve_cvs)
         self.insert_btn.clicked.connect(insert_cv)
+        self.split_cv_btn.clicked.connect(split_curve_at_selected_cvs)
+        self.delete_open_cv_btn.clicked.connect(delete_selected_cvs_open)
 
         self.merge_cv_spin.valueChanged.connect(lambda v: None)
         self.merge_cv_btn.clicked.connect(self._do_apply_merge_cv)

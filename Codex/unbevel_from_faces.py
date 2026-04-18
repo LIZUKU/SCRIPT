@@ -2,20 +2,22 @@
 """
 UnBevel from face selection for Autodesk Maya.
 
-Usage (paste in Maya Script Editor, Python tab):
-
+Usage (one-shot):
     import unbevel_from_faces as ub
     ub.run_unbevel_from_faces(strength=1.0)
 
 Interactive mode:
-
     import unbevel_from_faces as ub
     ub.start_unbevel_dragger()
     # drag mouse left/right to adjust
-    # call ub.finish_unbevel_dragger() when done (or switch tool)
+    # tool finalizes automatically when leaving the context
+    # or call:
+    ub.finish_unbevel_dragger()
 
-The tool is intentionally pragmatic: it collapses selected bevel faces toward a
-central axis per connected face group, then merges vertices per group.
+Notes:
+- Supports simple bevel strips.
+- Automatically splits closed bevel rings / loops into logical sub-groups.
+- Intended to collapse selected bevel faces toward reconstructed hard edges.
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple, FrozenSet
 
 import maya.cmds as cmds
 import maya.api.OpenMaya as om
@@ -34,14 +36,21 @@ _HUD_NAME = "unbevelFacesHUD"
 _CTX_NAME = "unbevelFacesDraggerCtx"
 _TOOL_STATE = None
 
+DEBUG = True
+
 
 def _debug(msg: str):
-    print("[UnBevelDebug] {}".format(msg))
+    if DEBUG:
+        print("[UnBevelDebug] {}".format(msg))
 
+
+# ---------------------------------------------------------
+# Data
+# ---------------------------------------------------------
 
 @dataclass
 class GroupData:
-    """Data for one connected face group."""
+    """Data for one logical unbevel group."""
 
     shape: str
     dag_path: om.MDagPath
@@ -71,6 +80,10 @@ class MeshData:
     mfn_mesh: om.MFnMesh
     groups: List[GroupData]
 
+
+# ---------------------------------------------------------
+# Core tool
+# ---------------------------------------------------------
 
 class UnBevelFaceTool(object):
     """Core logic for face-based unbevel collapse."""
@@ -109,16 +122,31 @@ class UnBevelFaceTool(object):
         for shape, face_ids in shape_to_faces.items():
             dag_path = _dag_path_from_shape(shape)
             mfn = om.MFnMesh(dag_path)
-            groups_face_ids = _split_connected_face_groups(dag_path, face_ids)
-            _debug("Mesh {} -> {} selected faces, {} connected groups".format(shape, len(face_ids), len(groups_face_ids)))
+
+            connected_groups = _split_connected_face_groups(dag_path, face_ids)
+            _debug(
+                "Mesh {} -> {} selected faces, {} connected groups".format(
+                    shape, len(face_ids), len(connected_groups)
+                )
+            )
 
             groups_data: List[GroupData] = []
-            for group_faces in groups_face_ids:
+
+            for group_faces in connected_groups:
                 if not group_faces:
                     continue
-                group = _build_group_data(shape, dag_path, mfn, group_faces)
-                if group and group.vertex_ids:
-                    groups_data.append(group)
+
+                logical_groups = _split_group_by_support_signature(dag_path, group_faces)
+                _debug(
+                    "Mesh {} connected group {} faces -> {} logical groups".format(
+                        shape, len(group_faces), len(logical_groups)
+                    )
+                )
+
+                for logical_faces in logical_groups:
+                    group = _build_single_group_data(shape, dag_path, mfn, logical_faces)
+                    if group and group.vertex_ids:
+                        groups_data.append(group)
 
             if groups_data:
                 self.meshes[shape] = MeshData(
@@ -157,6 +185,7 @@ class UnBevelFaceTool(object):
                 vtx_components = ["{}.vtx[{}]".format(mesh_data.shape, vid) for vid in sorted(group.vertex_ids)]
                 if len(vtx_components) < 2:
                     continue
+
                 self._merge_attempts += 1
                 try:
                     cmds.polyMergeVertex(
@@ -169,6 +198,7 @@ class UnBevelFaceTool(object):
                     self._merge_failures += 1
                     self._merge_errors.append("{}: {}".format(mesh_data.shape, exc))
                     cmds.warning("polyMergeVertex failed on {}: {}".format(mesh_data.shape, exc))
+
         _debug(
             "Merge finished - attempts: {}, failures: {}".format(
                 self._merge_attempts, self._merge_failures
@@ -185,7 +215,11 @@ class UnBevelFaceTool(object):
         group_count = sum(len(mesh.groups) for mesh in self.meshes.values())
         face_count = sum(len(grp.face_ids) for mesh in self.meshes.values() for grp in mesh.groups)
         vertex_count = sum(len(grp.vertex_ids) for mesh in self.meshes.values() for grp in mesh.groups)
-        details = "{} | meshes={} groups={} faces={} vertices={} strength={:.3f} mergeAttempts={} mergeFailures={}".format(
+
+        details = (
+            "{} | meshes={} groups={} faces={} vertices={} strength={:.3f} "
+            "mergeAttempts={} mergeFailures={}"
+        ).format(
             prefix,
             mesh_count,
             group_count,
@@ -195,15 +229,16 @@ class UnBevelFaceTool(object):
             self._merge_attempts,
             self._merge_failures,
         )
+
         if self._merge_errors:
             details += " errors=[{}]".format("; ".join(self._merge_errors))
+
         return details
 
 
-# ---------------------------------
-# Geometry helpers
-# ---------------------------------
-
+# ---------------------------------------------------------
+# Selection / parsing helpers
+# ---------------------------------------------------------
 
 def _parse_face_component(component: str) -> Tuple[Optional[str], Optional[int]]:
     m = _FACE_RE.match(component)
@@ -221,21 +256,23 @@ def _parse_face_component(component: str) -> Tuple[Optional[str], Optional[int]]
         return None, None
 
 
-
 def _as_mesh_shape(node: str) -> Optional[str]:
     if not cmds.objExists(node):
         return None
 
-    if cmds.nodeType(node) == "mesh":
-        return cmds.ls(node, l=True)[0]
+    ntype = cmds.nodeType(node)
 
-    if cmds.nodeType(node) == "transform":
+    if ntype == "mesh":
+        long_names = cmds.ls(node, l=True) or []
+        return long_names[0] if long_names else node
+
+    if ntype == "transform":
         shapes = cmds.listRelatives(node, s=True, ni=True, f=True) or []
         for shp in shapes:
             if cmds.nodeType(shp) == "mesh":
                 return shp
-    return None
 
+    return None
 
 
 def _dag_path_from_shape(shape: str) -> om.MDagPath:
@@ -244,10 +281,68 @@ def _dag_path_from_shape(shape: str) -> om.MDagPath:
     return sel.getDagPath(0)
 
 
+# ---------------------------------------------------------
+# Basic mesh helpers
+# ---------------------------------------------------------
+
+def _safe_set_face(poly_it: om.MItMeshPolygon, fid: int) -> bool:
+    try:
+        poly_it.setIndex(fid)
+        return True
+    except Exception:
+        return False
+
+
+def _safe_set_edge(edge_it: om.MItMeshEdge, eid: int) -> bool:
+    try:
+        edge_it.setIndex(eid)
+        return True
+    except Exception:
+        return False
+
+
+def _face_connected_selected_neighbors(dag_path: om.MDagPath, fid: int, selected_faces: Set[int]) -> List[int]:
+    poly_it = om.MItMeshPolygon(dag_path)
+    if not _safe_set_face(poly_it, fid):
+        return []
+    return [nf for nf in poly_it.getConnectedFaces() if nf in selected_faces]
+
+
+def _face_outside_neighbors(dag_path: om.MDagPath, fid: int, selected_faces: Set[int]) -> List[int]:
+    poly_it = om.MItMeshPolygon(dag_path)
+    if not _safe_set_face(poly_it, fid):
+        return []
+    return [nf for nf in poly_it.getConnectedFaces() if nf not in selected_faces]
+
+
+def _face_center(dag_path: om.MDagPath, fid: int) -> Optional[om.MPoint]:
+    poly_it = om.MItMeshPolygon(dag_path)
+    if not _safe_set_face(poly_it, fid):
+        return None
+    return poly_it.center(om.MSpace.kObject)
+
+
+def _face_normal(dag_path: om.MDagPath, fid: int) -> Optional[om.MVector]:
+    poly_it = om.MItMeshPolygon(dag_path)
+    if not _safe_set_face(poly_it, fid):
+        return None
+    try:
+        n = poly_it.getNormal(om.MSpace.kObject)
+    except Exception:
+        return None
+    if n.length() < 1e-8:
+        return None
+    n.normalize()
+    return n
+
+
+# ---------------------------------------------------------
+# Topology grouping
+# ---------------------------------------------------------
 
 def _split_connected_face_groups(dag_path: om.MDagPath, selected_faces: Set[int]) -> List[Set[int]]:
     selected_faces = set(selected_faces)
-    groups = []
+    groups: List[Set[int]] = []
 
     while selected_faces:
         seed = next(iter(selected_faces))
@@ -258,16 +353,15 @@ def _split_connected_face_groups(dag_path: om.MDagPath, selected_faces: Set[int]
             f = queue.pop()
             if f not in selected_faces:
                 continue
+
             selected_faces.remove(f)
             chunk.add(f)
 
-            it = om.MItMeshPolygon(dag_path)
-            try:
-                it.setIndex(f)
-            except RuntimeError:
+            poly_it = om.MItMeshPolygon(dag_path)
+            if not _safe_set_face(poly_it, f):
                 continue
 
-            connected = it.getConnectedFaces()
+            connected = poly_it.getConnectedFaces()
             for nf in connected:
                 if nf in selected_faces:
                     queue.append(nf)
@@ -278,37 +372,285 @@ def _split_connected_face_groups(dag_path: om.MDagPath, selected_faces: Set[int]
     return groups
 
 
+# ---------------------------------------------------------
+# Logical split for loops / rings
+# ---------------------------------------------------------
 
-def _build_group_data(shape: str, dag_path: om.MDagPath, mfn: om.MFnMesh, face_ids: Set[int]) -> Optional[GroupData]:
+def _angle_deg(v1: om.MVector, v2: om.MVector) -> float:
+    if v1.length() < 1e-8 or v2.length() < 1e-8:
+        return 180.0
+    a = om.MVector(v1)
+    b = om.MVector(v2)
+    a.normalize()
+    b.normalize()
+    dot = max(-1.0, min(1.0, a * b))
+    return math.degrees(math.acos(dot))
+
+
+def _cluster_normals(normals: List[om.MVector], threshold_deg: float = 20.0) -> List[om.MVector]:
+    """Cluster normals by angle and return representative averaged normals."""
+    clusters: List[List[om.MVector]] = []
+
+    for n in normals:
+        if n.length() < 1e-8:
+            continue
+
+        assigned = False
+        for cluster in clusters:
+            ref = _average_vector(cluster)
+            if ref.length() < 1e-8:
+                continue
+            ref.normalize()
+            if _angle_deg(n, ref) <= threshold_deg:
+                cluster.append(n)
+                assigned = True
+                break
+
+        if not assigned:
+            clusters.append([n])
+
+    reps = []
+    for cluster in clusters:
+        rep = _average_vector(cluster)
+        if rep.length() >= 1e-8:
+            rep.normalize()
+            reps.append(rep)
+
+    return reps
+
+
+def _signature_from_outside_normals(
+    outside_normals: List[om.MVector],
+    cluster_reps: List[om.MVector],
+    threshold_deg: float = 25.0,
+) -> FrozenSet[int]:
+    """
+    Build a stable signature for one selected face from its outside support normals.
+    Signature is a frozenset of support cluster ids.
+    """
+    result = set()
+
+    for n in outside_normals:
+        best_i = None
+        best_ang = None
+
+        for i, rep in enumerate(cluster_reps):
+            ang = _angle_deg(n, rep)
+            if best_ang is None or ang < best_ang:
+                best_ang = ang
+                best_i = i
+
+        if best_i is not None and best_ang is not None and best_ang <= threshold_deg:
+            result.add(best_i)
+
+    return frozenset(result)
+
+
+def _split_group_by_support_signature(dag_path: om.MDagPath, face_ids: Set[int]) -> List[Set[int]]:
+    """
+    Split one connected selected group into logical unbevel groups by analyzing
+    the normals of neighboring support faces outside the selection.
+
+    This fixes the common case:
+    - one topological ring around a face
+    - but several geometric unbevel segments (e.g. 4 sides of a cube top bevel)
+    """
+    if not face_ids:
+        return []
+
+    selected = set(face_ids)
+
+    # Gather all outside support normals around this group
+    all_outside_normals: List[om.MVector] = []
+    face_to_outside_normals: Dict[int, List[om.MVector]] = {}
+
+    for fid in selected:
+        normals = []
+        for nf in _face_outside_neighbors(dag_path, fid, selected):
+            n = _face_normal(dag_path, nf)
+            if n is not None:
+                normals.append(n)
+                all_outside_normals.append(n)
+        face_to_outside_normals[fid] = normals
+
+    # If not enough info, keep group as-is
+    if len(all_outside_normals) < 2:
+        return [selected]
+
+    cluster_reps = _cluster_normals(all_outside_normals, threshold_deg=20.0)
+    if len(cluster_reps) <= 2:
+        # Simple strip / corner / already coherent enough
+        return [selected]
+
+    face_signatures: Dict[int, FrozenSet[int]] = {}
+    for fid in selected:
+        sig = _signature_from_outside_normals(
+            face_to_outside_normals.get(fid, []),
+            cluster_reps,
+            threshold_deg=25.0,
+        )
+        face_signatures[fid] = sig
+
+    # BFS split:
+    # faces stay together if connected and support signatures are compatible
+    # Compatibility rule:
+    # - same signature
+    # - or one shared support cluster (helps continuity on slightly noisy meshes)
+    logical_groups: List[Set[int]] = []
+    remaining = set(selected)
+
+    while remaining:
+        seed = next(iter(remaining))
+        seed_sig = face_signatures.get(seed, frozenset())
+
+        queue = [seed]
+        group = set()
+
+        while queue:
+            fid = queue.pop()
+            if fid not in remaining:
+                continue
+
+            remaining.remove(fid)
+            group.add(fid)
+
+            sig_a = face_signatures.get(fid, frozenset())
+
+            for nb in _face_connected_selected_neighbors(dag_path, fid, selected):
+                if nb not in remaining:
+                    continue
+
+                sig_b = face_signatures.get(nb, frozenset())
+
+                compatible = False
+                if sig_a == sig_b:
+                    compatible = True
+                elif sig_a and sig_b and sig_a.intersection(sig_b):
+                    compatible = True
+                elif not sig_a and not sig_b:
+                    compatible = True
+                elif sig_b == seed_sig:
+                    compatible = True
+
+                if compatible:
+                    queue.append(nb)
+
+        if group:
+            logical_groups.append(group)
+
+    # Merge tiny accidental fragments back to nearest compatible group
+    logical_groups = _merge_tiny_logical_groups(dag_path, logical_groups, face_signatures)
+
+    return logical_groups if logical_groups else [selected]
+
+
+def _merge_tiny_logical_groups(
+    dag_path: om.MDagPath,
+    groups: List[Set[int]],
+    face_signatures: Dict[int, FrozenSet[int]],
+    tiny_size: int = 1,
+) -> List[Set[int]]:
+    if len(groups) <= 1:
+        return groups
+
+    big_groups = [set(g) for g in groups if len(g) > tiny_size]
+    small_groups = [set(g) for g in groups if len(g) <= tiny_size]
+
+    if not big_groups or not small_groups:
+        return groups
+
+    def group_signature(group: Set[int]) -> FrozenSet[int]:
+        freq: Dict[FrozenSet[int], int] = {}
+        for fid in group:
+            sig = face_signatures.get(fid, frozenset())
+            freq[sig] = freq.get(sig, 0) + 1
+        if not freq:
+            return frozenset()
+        return max(freq.items(), key=lambda x: x[1])[0]
+
+    big_group_sigs = [group_signature(g) for g in big_groups]
+
+    for sg in small_groups:
+        sg_sig = group_signature(sg)
+
+        best_idx = None
+        best_score = None
+
+        for i, bg in enumerate(big_groups):
+            bg_sig = big_group_sigs[i]
+
+            shared = len(sg_sig.intersection(bg_sig))
+            touch = 0
+            for fid in sg:
+                for nb in _face_connected_selected_neighbors(dag_path, fid, set().union(*big_groups, *small_groups)):
+                    if nb in bg:
+                        touch += 1
+
+            score = (shared, touch, len(bg))
+            if best_score is None or score > best_score:
+                best_score = score
+                best_idx = i
+
+        if best_idx is not None:
+            big_groups[best_idx].update(sg)
+        else:
+            big_groups.append(set(sg))
+
+    return big_groups
+
+
+# ---------------------------------------------------------
+# Group build
+# ---------------------------------------------------------
+
+def _build_single_group_data(
+    shape: str,
+    dag_path: om.MDagPath,
+    mfn: om.MFnMesh,
+    face_ids: Set[int],
+) -> Optional[GroupData]:
     vertex_ids = set()
     face_centers = []
 
     poly_it = om.MItMeshPolygon(dag_path)
+
     for fid in face_ids:
-        try:
-            poly_it.setIndex(fid)
-        except RuntimeError:
+        if not _safe_set_face(poly_it, fid):
             continue
-        for vid in poly_it.getVertices():
-            vertex_ids.add(vid)
-        face_centers.append(poly_it.center(om.MSpace.kObject))
+        try:
+            vertex_ids.update(poly_it.getVertices())
+            face_centers.append(poly_it.center(om.MSpace.kObject))
+        except Exception:
+            continue
 
     if not vertex_ids:
         return None
 
-    original_positions = {vid: mfn.getPoint(vid, om.MSpace.kObject) for vid in vertex_ids}
+    original_positions = {}
+    for vid in vertex_ids:
+        try:
+            original_positions[vid] = mfn.getPoint(vid, om.MSpace.kObject)
+        except Exception:
+            pass
+
+    if not original_positions:
+        return None
 
     sample_points = list(original_positions.values())
     axis_origin = _point_average(face_centers) if face_centers else _point_average(sample_points)
     axis_dir = _principal_axis(sample_points)
 
-    # Preferred mode: rebuild using the 2 support planes around the selected bevel faces.
-    # This better matches a "slide to hard corner" unbevel behavior.
+    # Preferred mode: rebuild from support planes around the selected bevel sub-group.
     corner_line = _compute_corner_line_from_boundaries(dag_path, mfn, face_ids)
     if corner_line:
         axis_origin, axis_dir = corner_line
     elif len(sample_points) >= 3:
         axis_origin = _point_average(sample_points)
+
+    if axis_dir.length() < 1e-8:
+        axis_dir = om.MVector(1.0, 0.0, 0.0)
+    else:
+        axis_dir.normalize()
 
     target_positions = {}
     for vid, p in original_positions.items():
@@ -318,13 +660,17 @@ def _build_group_data(shape: str, dag_path: om.MDagPath, mfn: om.MFnMesh, face_i
         shape=shape,
         dag_path=dag_path,
         face_ids=set(face_ids),
-        vertex_ids=vertex_ids,
+        vertex_ids=set(original_positions.keys()),
         axis_origin=axis_origin,
         axis_dir=axis_dir,
         original_positions=original_positions,
         target_positions=target_positions,
     )
 
+
+# ---------------------------------------------------------
+# Boundary / support plane analysis
+# ---------------------------------------------------------
 
 def _compute_corner_line_from_boundaries(
     dag_path: om.MDagPath,
@@ -336,6 +682,7 @@ def _compute_corner_line_from_boundaries(
         return None
 
     candidate_planes: List[Tuple[BoundarySide, om.MVector, om.MPoint]] = []
+
     for side in sides:
         plane = _fit_support_plane_from_side(dag_path, mfn, side)
         if not plane:
@@ -346,19 +693,24 @@ def _compute_corner_line_from_boundaries(
     if len(candidate_planes) < 2:
         return None
 
-    # Choose the pair that best represents opposite support faces.
-    # We prioritize:
-    #   1) normals least parallel (small |dot|)
-    #   2) larger boundary support (more edge coverage)
-    best_pair: Optional[Tuple[om.MVector, om.MPoint, om.MVector, om.MPoint]] = None
-    best_key: Optional[Tuple[float, int]] = None
+    # Choose the pair representing the best support faces:
+    # 1) normals least parallel
+    # 2) larger boundary coverage
+    best_pair = None
+    best_key = None
+
     for i in range(len(candidate_planes)):
         side_a, n1, p1 = candidate_planes[i]
         for j in range(i + 1, len(candidate_planes)):
             side_b, n2, p2 = candidate_planes[j]
+
+            if n1.length() < 1e-8 or n2.length() < 1e-8:
+                continue
+
             dot_val = abs(n1 * n2)
             size_score = len(side_a.edge_ids) + len(side_b.edge_ids)
             key = (dot_val, -size_score)
+
             if best_key is None or key < best_key:
                 best_key = key
                 best_pair = (n1, p1, n2, p2)
@@ -377,18 +729,23 @@ def _collect_boundary_sides(dag_path: om.MDagPath, face_ids: Set[int]) -> List[B
 
     for fid in selected:
         poly_it = om.MItMeshPolygon(dag_path)
-        try:
-            poly_it.setIndex(fid)
-        except RuntimeError:
+        if not _safe_set_face(poly_it, fid):
             continue
 
-        for eid in poly_it.getEdges():
-            try:
-                edge_it.setIndex(eid)
-            except RuntimeError:
+        try:
+            edge_ids = poly_it.getEdges()
+        except Exception:
+            continue
+
+        for eid in edge_ids:
+            if not _safe_set_edge(edge_it, eid):
                 continue
 
-            connected_faces = set(edge_it.getConnectedFaces())
+            try:
+                connected_faces = set(edge_it.getConnectedFaces())
+            except Exception:
+                continue
+
             selected_on_edge = connected_faces.intersection(selected)
             if not selected_on_edge:
                 continue
@@ -397,15 +754,22 @@ def _collect_boundary_sides(dag_path: om.MDagPath, face_ids: Set[int]) -> List[B
             if not outside_faces:
                 continue
 
+            try:
+                v0 = edge_it.vertexId(0)
+                v1 = edge_it.vertexId(1)
+            except Exception:
+                continue
+
             data = boundary_edges.setdefault(
-                eid, {"vertex_ids": set(edge_it.vertexId(i) for i in range(2)), "neighbor_face_ids": set()}
+                eid,
+                {"vertex_ids": set([v0, v1]), "neighbor_face_ids": set()}
             )
             data["neighbor_face_ids"].update(outside_faces)
 
     if not boundary_edges:
         return []
 
-    # Connected components by shared vertices.
+    # Connected components by shared vertices
     components: List[BoundarySide] = []
     remaining = set(boundary_edges.keys())
     edge_to_vertices = {eid: set(boundary_edges[eid]["vertex_ids"]) for eid in boundary_edges}
@@ -421,17 +785,21 @@ def _collect_boundary_sides(dag_path: om.MDagPath, face_ids: Set[int]) -> List[B
             eid = queue.pop()
             if eid not in remaining:
                 continue
+
             remaining.remove(eid)
             comp_edges.add(eid)
             comp_vertices.update(edge_to_vertices[eid])
             comp_neighbors.update(boundary_edges[eid]["neighbor_face_ids"])
 
-            for other in list(remaining):
-                if edge_to_vertices[eid].intersection(edge_to_vertices[other]):
-                    queue.append(other)
+            linked = [other for other in remaining if edge_to_vertices[eid].intersection(edge_to_vertices[other])]
+            queue.extend(linked)
 
         components.append(
-            BoundarySide(edge_ids=comp_edges, vertex_ids=comp_vertices, neighbor_face_ids=comp_neighbors)
+            BoundarySide(
+                edge_ids=comp_edges,
+                vertex_ids=comp_vertices,
+                neighbor_face_ids=comp_neighbors,
+            )
         )
 
     return components
@@ -450,12 +818,19 @@ def _fit_support_plane_from_side(
     points: List[om.MPoint] = []
 
     for fid in side.neighbor_face_ids:
-        try:
-            poly_it.setIndex(fid)
-        except RuntimeError:
+        if not _safe_set_face(poly_it, fid):
             continue
-        normals.append(poly_it.getNormal(om.MSpace.kObject))
-        points.append(poly_it.center(om.MSpace.kObject))
+        try:
+            n = poly_it.getNormal(om.MSpace.kObject)
+            p = poly_it.center(om.MSpace.kObject)
+        except Exception:
+            continue
+
+        if n.length() < 1e-8:
+            continue
+
+        normals.append(n)
+        points.append(p)
 
     if not normals or not points:
         return None
@@ -463,6 +838,7 @@ def _fit_support_plane_from_side(
     normal = _average_vector(normals)
     if normal.length() < 1e-8:
         return None
+
     normal.normalize()
     plane_point = _point_average(points)
     return normal, plane_point
@@ -476,6 +852,7 @@ def _intersect_two_planes(
 ) -> Optional[Tuple[om.MPoint, om.MVector]]:
     direction = n1 ^ n2
     denom = direction.length() ** 2
+
     if denom < 1e-12:
         return None
 
@@ -490,10 +867,14 @@ def _intersect_two_planes(
 
     if direction.length() < 1e-8:
         return None
+
     direction.normalize()
     return point, direction
 
 
+# ---------------------------------------------------------
+# Math helpers
+# ---------------------------------------------------------
 
 def _point_average(points: List[om.MPoint]) -> om.MPoint:
     if not points:
@@ -504,6 +885,7 @@ def _point_average(points: List[om.MPoint]) -> om.MPoint:
         sx += p.x
         sy += p.y
         sz += p.z
+
     n = float(len(points))
     return om.MPoint(sx / n, sy / n, sz / n)
 
@@ -517,6 +899,7 @@ def _average_vector(vectors: List[om.MVector]) -> om.MVector:
         sx += v.x
         sy += v.y
         sz += v.z
+
     n = float(len(vectors))
     return om.MVector(sx / n, sy / n, sz / n)
 
@@ -540,7 +923,6 @@ def _principal_axis(points: List[om.MPoint]) -> om.MVector:
         yz += y * z
         zz += z * z
 
-    # Degenerate fallback: choose largest bbox extent axis.
     if (xx + yy + zz) < 1e-12:
         return om.MVector(1.0, 0.0, 0.0)
 
@@ -566,8 +948,8 @@ def _principal_axis(points: List[om.MPoint]) -> om.MVector:
         axis = om.MVector(1.0, 0.0, 0.0)
     else:
         axis.normalize()
-    return axis
 
+    return axis
 
 
 def _project_point_to_axis(point: om.MPoint, origin: om.MPoint, axis_dir: om.MVector) -> om.MPoint:
@@ -580,7 +962,6 @@ def _project_point_to_axis(point: om.MPoint, origin: om.MPoint, axis_dir: om.MVe
     )
 
 
-
 def _lerp_point(a: om.MPoint, b: om.MPoint, t: float) -> om.MPoint:
     return om.MPoint(
         a.x + (b.x - a.x) * t,
@@ -589,14 +970,14 @@ def _lerp_point(a: om.MPoint, b: om.MPoint, t: float) -> om.MPoint:
     )
 
 
-# ---------------------------------
+# ---------------------------------------------------------
 # Public API - one shot
-# ---------------------------------
-
+# ---------------------------------------------------------
 
 def run_unbevel_from_faces(strength=1.0, merge_distance=0.001):
     """One-shot collapse + merge from currently selected polygon faces."""
     _debug("run_unbevel_from_faces called (strength={}, merge_distance={})".format(strength, merge_distance))
+
     try:
         tool = UnBevelFaceTool(merge_distance=merge_distance, merge_always_on_finish=True)
     except RuntimeError as exc:
@@ -606,15 +987,15 @@ def run_unbevel_from_faces(strength=1.0, merge_distance=0.001):
     tool.apply_strength(strength)
     tool.finish()
     _select_original_faces(tool)
+
     _debug(tool.build_summary(prefix="Final summary"))
     cmds.inViewMessage(amg="<hl>UnBevel faces:</hl> done", pos="topCenter", fade=True)
     return tool
 
 
-# ---------------------------------
+# ---------------------------------------------------------
 # Public API - interactive dragger
-# ---------------------------------
-
+# ---------------------------------------------------------
 
 def start_unbevel_dragger(merge_distance=0.001, sensitivity=0.004):
     """
@@ -649,15 +1030,19 @@ def start_unbevel_dragger(merge_distance=0.001, sensitivity=0.004):
         _CTX_NAME,
         pressCommand=_on_press,
         dragCommand=_on_drag,
-        finalizeCommand=_on_finalize,
+        finalize=_on_finalize,   # important : pas finalizeCommand
         cursor="hand",
         undoMode="step",
         space="screen",
     )
-    cmds.setToolTo(_CTX_NAME)
-    cmds.inViewMessage(amg="<hl>UnBevel faces:</hl> drag horizontal to adjust", pos="topCenter", fade=True)
-    return tool
 
+    cmds.setToolTo(_CTX_NAME)
+    cmds.inViewMessage(
+        amg="<hl>UnBevel faces:</hl> drag horizontal to adjust",
+        pos="topCenter",
+        fade=True,
+    )
+    return tool
 
 
 def finish_unbevel_dragger():
@@ -665,10 +1050,9 @@ def finish_unbevel_dragger():
     _on_finalize()
 
 
-# ---------------------------------
+# ---------------------------------------------------------
 # Interactive callbacks
-# ---------------------------------
-
+# ---------------------------------------------------------
 
 def _on_press():
     global _TOOL_STATE
@@ -678,7 +1062,6 @@ def _on_press():
     anchor = cmds.draggerContext(_CTX_NAME, q=True, anchorPoint=True)
     _TOOL_STATE["start_x"] = float(anchor[0]) if anchor else 0.0
     _TOOL_STATE["start_strength"] = _TOOL_STATE["tool"].strength
-
 
 
 def _on_drag():
@@ -699,9 +1082,9 @@ def _on_drag():
     _hud_create_or_update(s)
 
 
-
 def _on_finalize():
     global _TOOL_STATE
+
     if not _TOOL_STATE:
         _hud_remove()
         return
@@ -716,10 +1099,9 @@ def _on_finalize():
     _TOOL_STATE = None
 
 
-# ---------------------------------
+# ---------------------------------------------------------
 # UI helpers
-# ---------------------------------
-
+# ---------------------------------------------------------
 
 def _hud_create_or_update(value):
     txt = "UnBevel Strength: {:.3f}".format(float(value))
@@ -729,11 +1111,8 @@ def _hud_create_or_update(value):
             cmds.headsUpDisplay(_HUD_NAME, edit=True, label=txt)
             return
     except Exception:
-        # In some Maya versions/layouts, querying/editing can throw
-        # "invalid flag combination"; fallback to recreate below.
         pass
 
-    # Query Maya for the next free HUD block (avoid invalid exists+section+block flag combos).
     try:
         block = int(cmds.headsUpDisplay(nextFreeBlock=5))
     except Exception:
@@ -747,15 +1126,15 @@ def _hud_create_or_update(value):
             label=txt,
         )
     except Exception:
-        # Fallback if HUD fails in this Maya UI layout.
         pass
 
 
-
 def _hud_remove():
-    if cmds.headsUpDisplay(_HUD_NAME, exists=True):
-        cmds.headsUpDisplay(_HUD_NAME, remove=True)
-
+    try:
+        if cmds.headsUpDisplay(_HUD_NAME, exists=True):
+            cmds.headsUpDisplay(_HUD_NAME, remove=True)
+    except Exception:
+        pass
 
 
 def _select_original_faces(tool: UnBevelFaceTool):
@@ -764,8 +1143,10 @@ def _select_original_faces(tool: UnBevelFaceTool):
         for grp in mesh.groups:
             for fid in sorted(grp.face_ids):
                 faces.append("{}.f[{}]".format(mesh.shape, fid))
+
     if faces:
         cmds.select(faces, r=True)
+
     _debug("Reselected original faces: {}".format(len(faces)))
 
 

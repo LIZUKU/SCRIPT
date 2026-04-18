@@ -4720,10 +4720,10 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         self.mirror_negative_cb.setToolTip("Use negative axis for quick mirror buttons (X/Y/Z -> -X/-Y/-Z).")
         self.mirror_negative_cb.setMinimumWidth(46)
         row.addWidget(self.mirror_auto_btn)
-        row.addWidget(self.mirror_negative_cb)
         row.addWidget(self.mirror_x_btn)
         row.addWidget(self.mirror_y_btn)
         row.addWidget(self.mirror_z_btn)
+        row.addWidget(self.mirror_negative_cb)
         parent_layout.addLayout(row)
 
         self.mirror_adv_toggle = QtWidgets.QToolButton()

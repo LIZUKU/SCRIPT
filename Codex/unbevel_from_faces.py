@@ -567,13 +567,33 @@ def _hud_remove():
 
 def _select_original_faces(tool: UnBevelFaceTool):
     faces = []
+    mesh_transforms = set()
     for mesh in tool.meshes.values():
+        parents = cmds.listRelatives(mesh.shape, p=True, f=True) or []
+        if parents:
+            mesh_transforms.add(parents[0])
         for grp in mesh.groups:
             for fid in sorted(grp.face_ids):
                 faces.append("{}.f[{}]".format(mesh.shape, fid))
-    if faces:
-        cmds.select(faces, r=True)
-    _debug("Reselected original faces: {}".format(len(faces)))
+
+    if not faces:
+        _debug("Reselected original faces: 0")
+        return
+
+    # poly ops can temporarily force object selection; defer to the next UI tick
+    # and force component mode to reliably restore face selection.
+    def _do_reselect():
+        try:
+            if mesh_transforms:
+                cmds.hilite(list(mesh_transforms), r=True)
+            cmds.selectMode(component=True)
+            cmds.selectType(polymeshFace=True)
+            cmds.select(faces, r=True)
+            _debug("Reselected original faces: {}".format(len(faces)))
+        except Exception as exc:
+            cmds.warning("Could not restore face selection: {}".format(exc))
+
+    cmds.evalDeferred(_do_reselect)
 
 
 if __name__ == "__main__":

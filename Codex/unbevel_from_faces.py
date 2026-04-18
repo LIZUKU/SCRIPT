@@ -35,6 +35,10 @@ _CTX_NAME = "unbevelFacesDraggerCtx"
 _TOOL_STATE = None
 
 
+def _debug(msg: str):
+    print("[UnBevelDebug] {}".format(msg))
+
+
 @dataclass
 class GroupData:
     """Data for one connected face group."""
@@ -67,7 +71,11 @@ class UnBevelFaceTool(object):
         self.merge_always_on_finish = bool(merge_always_on_finish)
         self.meshes: Dict[str, MeshData] = {}
         self.strength = 0.0
+        self._merge_attempts = 0
+        self._merge_failures = 0
+        self._merge_errors: List[str] = []
         self._collect_from_selection()
+        _debug(self.build_summary(prefix="Tool initialized"))
 
     # -------------------------------
     # Selection & grouping
@@ -75,6 +83,7 @@ class UnBevelFaceTool(object):
 
     def _collect_from_selection(self):
         face_components = cmds.filterExpand(cmds.ls(sl=True, fl=True) or [], sm=34) or []
+        _debug("Selected face components: {}".format(len(face_components)))
         if not face_components:
             raise RuntimeError("No polygon faces selected.")
 
@@ -92,6 +101,7 @@ class UnBevelFaceTool(object):
             dag_path = _dag_path_from_shape(shape)
             mfn = om.MFnMesh(dag_path)
             groups_face_ids = _split_connected_face_groups(dag_path, face_ids)
+            _debug("Mesh {} -> {} selected faces, {} connected groups".format(shape, len(face_ids), len(groups_face_ids)))
 
             groups_data: List[GroupData] = []
             for group_faces in groups_face_ids:
@@ -108,6 +118,7 @@ class UnBevelFaceTool(object):
                     mfn_mesh=mfn,
                     groups=groups_data,
                 )
+                _debug("Mesh {} usable groups: {}".format(shape, len(groups_data)))
 
         if not self.meshes:
             raise RuntimeError("No valid face groups could be built from selection.")
@@ -118,6 +129,7 @@ class UnBevelFaceTool(object):
 
     def apply_strength(self, strength: float):
         self.strength = max(0.0, min(1.0, float(strength)))
+        _debug("Applying strength {:.4f}".format(self.strength))
 
         for mesh_data in self.meshes.values():
             points = mesh_data.mfn_mesh.getPoints(om.MSpace.kObject)
@@ -136,6 +148,7 @@ class UnBevelFaceTool(object):
                 vtx_components = ["{}.vtx[{}]".format(mesh_data.shape, vid) for vid in sorted(group.vertex_ids)]
                 if len(vtx_components) < 2:
                     continue
+                self._merge_attempts += 1
                 try:
                     cmds.polyMergeVertex(
                         vtx_components,
@@ -144,11 +157,38 @@ class UnBevelFaceTool(object):
                         ch=False,
                     )
                 except Exception as exc:
+                    self._merge_failures += 1
+                    self._merge_errors.append("{}: {}".format(mesh_data.shape, exc))
                     cmds.warning("polyMergeVertex failed on {}: {}".format(mesh_data.shape, exc))
+        _debug(
+            "Merge finished - attempts: {}, failures: {}".format(
+                self._merge_attempts, self._merge_failures
+            )
+        )
 
     def finish(self):
         if self.merge_always_on_finish:
             self.merge_vertices()
+        _debug(self.build_summary(prefix="Finish summary"))
+
+    def build_summary(self, prefix="Run summary") -> str:
+        mesh_count = len(self.meshes)
+        group_count = sum(len(mesh.groups) for mesh in self.meshes.values())
+        face_count = sum(len(grp.face_ids) for mesh in self.meshes.values() for grp in mesh.groups)
+        vertex_count = sum(len(grp.vertex_ids) for mesh in self.meshes.values() for grp in mesh.groups)
+        details = "{} | meshes={} groups={} faces={} vertices={} strength={:.3f} mergeAttempts={} mergeFailures={}".format(
+            prefix,
+            mesh_count,
+            group_count,
+            face_count,
+            vertex_count,
+            self.strength,
+            self._merge_attempts,
+            self._merge_failures,
+        )
+        if self._merge_errors:
+            details += " errors=[{}]".format("; ".join(self._merge_errors))
+        return details
 
 
 # ---------------------------------
@@ -363,6 +403,7 @@ def _lerp_point(a: om.MPoint, b: om.MPoint, t: float) -> om.MPoint:
 
 def run_unbevel_from_faces(strength=1.0, merge_distance=0.001):
     """One-shot collapse + merge from currently selected polygon faces."""
+    _debug("run_unbevel_from_faces called (strength={}, merge_distance={})".format(strength, merge_distance))
     try:
         tool = UnBevelFaceTool(merge_distance=merge_distance, merge_always_on_finish=True)
     except RuntimeError as exc:
@@ -372,6 +413,7 @@ def run_unbevel_from_faces(strength=1.0, merge_distance=0.001):
     tool.apply_strength(strength)
     tool.finish()
     _select_original_faces(tool)
+    _debug(tool.build_summary(prefix="Final summary"))
     cmds.inViewMessage(amg="<hl>UnBevel faces:</hl> done", pos="topCenter", fade=True)
     return tool
 
@@ -531,6 +573,7 @@ def _select_original_faces(tool: UnBevelFaceTool):
                 faces.append("{}.f[{}]".format(mesh.shape, fid))
     if faces:
         cmds.select(faces, r=True)
+    _debug("Reselected original faces: {}".format(len(faces)))
 
 
 if __name__ == "__main__":

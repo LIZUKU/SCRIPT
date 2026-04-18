@@ -4724,6 +4724,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         row.addWidget(self.mirror_y_btn)
         row.addWidget(self.mirror_z_btn)
         row.addWidget(self.mirror_negative_cb)
+
         parent_layout.addLayout(row)
 
         self.mirror_adv_toggle = QtWidgets.QToolButton()

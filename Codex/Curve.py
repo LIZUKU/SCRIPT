@@ -3535,6 +3535,276 @@ def start_chamfer_viewport_drag(auto=False):
 # ============================================================
 # UI - COLOR BUTTON
 # ============================================================
+# ============================================================
+# BOOLEAN NURBS CURVES
+# ============================================================
+BOOLEAN_LOFT_OFFSET = 1.0
+
+
+def boolean_get_cvs_world(curve_transform):
+    shapes = cmds.listRelatives(curve_transform, shapes=True, type="nurbsCurve") or []
+    if not shapes:
+        return []
+    shape = shapes[0]
+    num_cvs = cmds.getAttr(shape + ".degree") + cmds.getAttr(shape + ".spans")
+    pts = []
+    for i in range(num_cvs):
+        pos = cmds.xform("{}.cv[{}]".format(curve_transform, i), query=True, worldSpace=True, translation=True)
+        pts.append((pos[0], pos[1], pos[2]))
+    return pts
+
+
+def boolean_compute_normal_vector(pts):
+    n = len(pts)
+    nx = ny = nz = 0.0
+    for i in range(n):
+        cur = pts[i]
+        nxt = pts[(i + 1) % n]
+        nx += (cur[1] - nxt[1]) * (cur[2] + nxt[2])
+        ny += (cur[2] - nxt[2]) * (cur[0] + nxt[0])
+        nz += (cur[0] - nxt[0]) * (cur[1] + nxt[1])
+    length = (nx * nx + ny * ny + nz * nz) ** 0.5
+    if length < 1e-10:
+        return (0.0, 1.0, 0.0)
+    return (nx / length, ny / length, nz / length)
+
+
+def boolean_detect_normal_vector(curve_transform):
+    pts = boolean_get_cvs_world(curve_transform)
+    if len(pts) < 3:
+        return (0.0, 1.0, 0.0)
+    return boolean_compute_normal_vector(pts)
+
+
+def boolean_check_is_nurbs_curve(transforms):
+    for t in transforms:
+        sh = cmds.listRelatives(t, shapes=True, type="nurbsCurve") or []
+        if not sh:
+            raise RuntimeError("'{}' n'est pas une NURBS curve.".format(t))
+
+
+def boolean_loft_curve(curve_transform, normal_vec):
+    nx, ny, nz = normal_vec
+    dx, dy, dz = nx * BOOLEAN_LOFT_OFFSET, ny * BOOLEAN_LOFT_OFFSET, nz * BOOLEAN_LOFT_OFFSET
+
+    dup = cmds.duplicate(curve_transform, returnRootsOnly=True)[0]
+    cmds.move(dx, dy, dz, dup, relative=True)
+
+    lofted = cmds.loft(
+        curve_transform,
+        dup,
+        ch=False,
+        u=True,
+        c=False,
+        ar=True,
+        d=3,
+        ss=1,
+        rn=False,
+        po=False,
+        rsn=True,
+    )[0]
+
+    cmds.delete(dup)
+    return lofted
+
+
+def boolean_do_nurbs_boolean(surf_a, surf_b, op_int):
+    return cmds.nurbsBoolean(surf_a, surf_b, ch=False, nsf=1, op=op_int)
+
+
+def boolean_collect_bool_surfaces(result_nodes, loft_a, loft_b):
+    exclude = {loft_a, loft_b}
+    surfaces = []
+
+    for node in result_nodes:
+        if not cmds.objExists(node):
+            continue
+        if cmds.nodeType(node) == "transform":
+            sh = cmds.listRelatives(node, shapes=True, type="nurbsSurface") or []
+            if sh and node not in exclude:
+                surfaces.append(node)
+        elif cmds.nodeType(node) == "nurbsSurface":
+            par = (cmds.listRelatives(node, parent=True) or [None])[0]
+            if par and par not in exclude:
+                surfaces.append(par)
+
+    if not surfaces:
+        for t in cmds.ls("nurbsBooleanSurface*", type="transform") or []:
+            if t in exclude:
+                continue
+            sh = cmds.listRelatives(t, shapes=True, type="nurbsSurface") or []
+            if sh:
+                surfaces.append(t)
+
+    return list(dict.fromkeys(surfaces))
+
+
+def boolean_nurbs_to_poly(surface):
+    return cmds.nurbsToPoly(
+        surface,
+        mnd=1,
+        ch=False,
+        f=2,
+        pt=1,
+        pc=200,
+        chr=0.1,
+        ft=0.01,
+        mel=0.001,
+        d=0.1,
+        ut=1,
+        un=1,
+        vt=1,
+        vn=1,
+        uch=False,
+        ucr=False,
+        cht=0.2,
+        es=False,
+        ntr=False,
+        mrt=False,
+        uss=True,
+    )[0]
+
+
+def boolean_get_origin_border_edges(mesh, normal_vec, curve_a_pts):
+    nx, ny, nz = normal_vec
+
+    def proj(pt):
+        return pt[0] * nx + pt[1] * ny + pt[2] * nz
+
+    origin_proj = sum(proj(p) for p in curve_a_pts) / len(curve_a_pts)
+
+    cmds.select(mesh)
+    cmds.polySelectConstraint(mode=3, type=0x8000, where=1)
+    border_edges = cmds.ls(selection=True, flatten=True) or []
+    cmds.polySelectConstraint(mode=0)
+    cmds.select(clear=True)
+
+    if not border_edges:
+        return []
+
+    edge_proj = {}
+    for edge in border_edges:
+        info = cmds.polyInfo(edge, edgeToVertex=True)
+        if not info:
+            continue
+        tokens = info[0].split()
+        vals = []
+        for tok in tokens[2:]:
+            try:
+                vi = int(tok)
+                pos = cmds.xform("{}.vtx[{}]".format(mesh, vi), q=True, ws=True, t=True)
+                vals.append(proj(pos))
+            except Exception:
+                pass
+        if vals:
+            edge_proj[edge] = sum(vals) / len(vals)
+
+    if not edge_proj:
+        return border_edges
+
+    closest_val = min(edge_proj.values(), key=lambda v: abs(v - origin_proj))
+    tol = BOOLEAN_LOFT_OFFSET * 0.4
+    result = [e for e, v in edge_proj.items() if abs(v - closest_val) < tol]
+    return result if result else border_edges
+
+
+def run_boolean_curve(operation_str="union"):
+    cmds.undoInfo(openChunk=True, chunkName="boolean_nurbs_{}".format(operation_str))
+    try:
+        _run_boolean_curve_internal(operation_str)
+    finally:
+        cmds.undoInfo(closeChunk=True)
+
+
+def _run_boolean_curve_internal(operation_str):
+    sel = cmds.ls(selection=True, type="transform")
+    if len(sel) != 2:
+        cmds.confirmDialog(title="Boolean NURBS", message="Selectionnez exactement 2 NURBS curves.", button=["OK"])
+        return
+
+    curve_a, curve_b = sel[0], sel[1]
+
+    try:
+        boolean_check_is_nurbs_curve([curve_a, curve_b])
+    except RuntimeError as e:
+        cmds.confirmDialog(title="Boolean NURBS - Erreur", message=str(e), button=["OK"])
+        return
+
+    pts_a = boolean_get_cvs_world(curve_a)
+    normal_vec = boolean_detect_normal_vector(curve_a)
+    op_int = {"union": 0, "difference": 1, "intersection": 2}[operation_str]
+    temp_nodes = []
+
+    try:
+        loft_a = boolean_loft_curve(curve_a, normal_vec)
+        loft_b = boolean_loft_curve(curve_b, normal_vec)
+        temp_nodes += [loft_a, loft_b]
+
+        bool_result = boolean_do_nurbs_boolean(loft_a, loft_b, op_int)
+        bool_surfs = boolean_collect_bool_surfaces(bool_result, loft_a, loft_b)
+
+        if not bool_surfs:
+            cmds.confirmDialog(
+                title="Boolean NURBS",
+                message="Le boolean n'a produit aucune surface.\nVerifiez que les courbes se chevauchent.",
+                button=["OK"],
+            )
+            cmds.delete([n for n in temp_nodes if cmds.objExists(n)])
+            return
+
+        for s in bool_surfs:
+            par = (cmds.listRelatives(s, parent=True) or [None])[0]
+            if par:
+                temp_nodes.append(par)
+            temp_nodes.append(s)
+
+        meshes = []
+        for surf in bool_surfs:
+            m = boolean_nurbs_to_poly(surf)
+            meshes.append(m)
+            temp_nodes.append(m)
+
+        combined = cmds.polyUnite(meshes, ch=False, mergeUVSets=True)[0] if len(meshes) > 1 else meshes[0]
+        temp_nodes.append(combined)
+        cmds.polyMergeVertex(combined, d=0.001, am=True, ch=False)
+
+        origin_edges = boolean_get_origin_border_edges(combined, normal_vec, pts_a)
+        if not origin_edges:
+            cmds.confirmDialog(
+                title="Boolean NURBS",
+                message="Impossible de trouver le bord de la courbe resultante.",
+                button=["OK"],
+            )
+            return
+
+        cmds.select(origin_edges)
+        curve_nodes = cmds.polyToCurve(form=2, degree=1, conformToSmoothMeshPreview=True)
+        final_curve = cmds.rename(curve_nodes[0], "boolean_{}_#".format(operation_str))
+        cmds.xform(final_curve, centerPivots=True)
+
+        cmds.hide(curve_a)
+        cmds.hide(curve_b)
+
+        to_del = [n for n in temp_nodes if cmds.objExists(n) and n != final_curve]
+        if to_del:
+            cmds.delete(to_del)
+
+        for pattern in ["loftedSurface*", "nurbsBooleanSurface*"]:
+            for node in cmds.ls(pattern, type="transform") or []:
+                if cmds.objExists(node) and node != final_curve:
+                    cmds.delete(node)
+
+        cmds.select(final_curve)
+    except Exception as e:
+        for n in temp_nodes:
+            if cmds.objExists(n):
+                try:
+                    cmds.delete(n)
+                except Exception:
+                    pass
+        cmds.confirmDialog(title="Boolean NURBS - Erreur", message=str(e), button=["OK"])
+
+
 class PRColorBtn(QtWidgets.QPushButton):
     def __init__(self, text="", tip="", bg="#2a2a2a", fg="#909090", w=None, h=26, parent=None):
         super(PRColorBtn, self).__init__(text, parent)
@@ -3913,6 +4183,17 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         self.attach_btn.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.attach_btn.customContextMenuRequested.connect(self._show_attach_menu)
         layout.addWidget(self.attach_btn)
+
+        layout.addWidget(SectionLabel("  BOOLEAN NURBS", self.C_CONVERT))
+        row_boolean = QtWidgets.QHBoxLayout()
+        row_boolean.setSpacing(4)
+        self.bool_union_btn = PRColorBtn("Union", bg="#1d3557", fg="#87b8ff")
+        self.bool_diff_btn = PRColorBtn("Difference", bg="#5a2a1a", fg="#ff9a7a")
+        self.bool_inter_btn = PRColorBtn("Intersection", bg="#1f4a2b", fg="#86d39a")
+        row_boolean.addWidget(self.bool_union_btn)
+        row_boolean.addWidget(self.bool_diff_btn)
+        row_boolean.addWidget(self.bool_inter_btn)
+        layout.addLayout(row_boolean)
 
         layout.addWidget(SectionLabel("  MIRROR", self.C_MIRROR))
         self._add_mirror_controls(layout)
@@ -4359,6 +4640,9 @@ class PRCurveToolsUI(QtWidgets.QDialog):
 
         self.edge_btn.clicked.connect(edge_to_curve)
         self.attach_btn.clicked.connect(lambda: self._do_attach(True, "connect"))
+        self.bool_union_btn.clicked.connect(lambda: run_boolean_curve("union"))
+        self.bool_diff_btn.clicked.connect(lambda: run_boolean_curve("difference"))
+        self.bool_inter_btn.clicked.connect(lambda: run_boolean_curve("intersection"))
         self.mirror_auto_btn.clicked.connect(lambda: self._run_mirror_with_axis("auto"))
         self.mirror_x_btn.clicked.connect(lambda: self._run_mirror_with_axis("x"))
         self.mirror_y_btn.clicked.connect(lambda: self._run_mirror_with_axis("y"))

@@ -4648,6 +4648,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         self.mirror_x_btn.clicked.connect(lambda: self._run_mirror_with_axis("x"))
         self.mirror_y_btn.clicked.connect(lambda: self._run_mirror_with_axis("y"))
         self.mirror_z_btn.clicked.connect(lambda: self._run_mirror_with_axis("z"))
+        self.mirror_negative_cb.toggled.connect(self._on_mirror_control_changed)
         self.mirror_adv_toggle.toggled.connect(self._on_mirror_advanced_toggled)
         self.mirror_keep_original_cb.toggled.connect(self.mirror_hide_if_keep_cb.setEnabled)
         self.mirror_apply_btn.clicked.connect(self._apply_mirror_from_controls)
@@ -4707,10 +4708,13 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         self.mirror_x_btn = PRColorBtn("X", tip="Mirror X", bg="#2a1a3a", fg=self.C_MIRROR, w=34)
         self.mirror_y_btn = PRColorBtn("Y", tip="Mirror Y", bg="#2a1a3a", fg=self.C_MIRROR, w=34)
         self.mirror_z_btn = PRColorBtn("Z", tip="Mirror Z", bg="#2a1a3a", fg=self.C_MIRROR, w=34)
+        self.mirror_negative_cb = QtWidgets.QCheckBox("Negative")
+        self.mirror_negative_cb.setToolTip("Use negative axis for quick mirror buttons (X/Y/Z -> -X/-Y/-Z).")
         row.addWidget(self.mirror_auto_btn)
         row.addWidget(self.mirror_x_btn)
         row.addWidget(self.mirror_y_btn)
         row.addWidget(self.mirror_z_btn)
+        row.addWidget(self.mirror_negative_cb)
         parent_layout.addLayout(row)
 
         self.mirror_adv_toggle = QtWidgets.QToolButton()
@@ -4984,6 +4988,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         })
 
     def _run_mirror_with_axis(self, axis):
+        axis = self._axis_with_quick_negative(axis)
         self._set_mirror_axis_state(axis, refresh=False)
         settings = self._collect_mirror_settings()
         settings["axis"] = axis
@@ -5001,6 +5006,13 @@ class PRCurveToolsUI(QtWidgets.QDialog):
             "seam_tol": settings.get("seam_tol", 0.0001),
         }
         mirror_curve(axis, settings.get("mode", "world"), advanced=adv)
+
+    def _axis_with_quick_negative(self, axis):
+        axis = str(axis).lower()
+        if getattr(self, "mirror_negative_cb", None) and self.mirror_negative_cb.isChecked():
+            if axis in ("x", "y", "z"):
+                return "-{}".format(axis)
+        return axis
 
     def _show_mirror_advanced_dialog(self):
         dlg = MirrorAdvancedDialog(self, state=self._mirror_adv_state)

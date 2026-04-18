@@ -1195,8 +1195,9 @@ def _mirrorclip_curve(
 
 
 def _mirror_pivot_from_mode(curves, axis, mode):
+    axis_key = str(axis).lower().lstrip('-')
     axis_map = {'x': 0, 'y': 1, 'z': 2}
-    axis_idx = axis_map.get(axis.lower(), 0)
+    axis_idx = axis_map.get(axis_key, 0)
     if mode == 'world':
         return 0.0
     if mode == 'object':
@@ -1223,7 +1224,7 @@ def mirror_curve(axis='auto', mode='world', merge_threshold=0.001, advanced=None
     if axis == 'auto':
         axis = _detect_best_mirror_axis(curves)
     axis = axis.lower() if axis else 'x'
-    if axis not in ('x', 'y', 'z'):
+    if axis not in ('x', 'y', 'z', '-x', '-y', '-z'):
         axis = 'x'
 
     opts = dict(MIRROR_ADV_DEFAULTS)
@@ -1231,10 +1232,10 @@ def mirror_curve(axis='auto', mode='world', merge_threshold=0.001, advanced=None
         opts.update(advanced)
 
     result_curves = []
-    axis_vec = {'x': [1.0, 0.0, 0.0], 'y': [0.0, 1.0, 0.0], 'z': [0.0, 0.0, 1.0]}[axis]
+    axis_vec = {'x': [1.0, 0.0, 0.0], 'y': [0.0, 1.0, 0.0], 'z': [0.0, 0.0, 1.0], '-x': [-1.0, 0.0, 0.0], '-y': [0.0, -1.0, 0.0], '-z': [0.0, 0.0, -1.0]}[axis]
     pivot = _mirror_pivot_from_mode(curves, axis, mode)
     origin = [0.0, 0.0, 0.0]
-    origin[{'x': 0, 'y': 1, 'z': 2}[axis]] = float(pivot)
+    origin[{'x': 0, 'y': 1, 'z': 2}[axis.lstrip('-')]] = float(pivot)
 
     for crv in curves:
         try:
@@ -1259,7 +1260,7 @@ def mirror_curve(axis='auto', mode='world', merge_threshold=0.001, advanced=None
         if not quiet:
             print("[PR] {} curve(s) mirror-clipped along {}.".format(len(result_curves), axis.upper()))
             cmds.inViewMessage(
-                amg="<hl>Mirror</hl> done along <hl>{}</hl>".format(axis.upper()),
+                amg="<hl>Mirror</hl> done along <hl>{}</hl>".format(axis.upper().replace("-", "−")),
                 pos="topCenter",
                 fade=True
             )
@@ -3872,7 +3873,7 @@ class MirrorAdvancedDialog(QtWidgets.QDialog):
         layout.setSpacing(6)
 
         self.axis_combo = QtWidgets.QComboBox()
-        self.axis_combo.addItems(["Auto", "X", "Y", "Z"])
+        self.axis_combo.addItems(["Auto", "X", "Y", "Z", "-X", "-Y", "-Z"])
 
         self.mode_combo = QtWidgets.QComboBox()
         self.mode_combo.addItems(["World Center (0)", "Object Center", "Bounding Box", "Grid Snap"])
@@ -3947,7 +3948,7 @@ class MirrorAdvancedDialog(QtWidgets.QDialog):
 
     def _load_state(self):
         axis = str(self._state.get("axis", "auto")).lower()
-        axis_map = {"auto": 0, "x": 1, "y": 2, "z": 3}
+        axis_map = {"auto": 0, "x": 1, "y": 2, "z": 3, "-x": 4, "-y": 5, "-z": 6}
         self.axis_combo.setCurrentIndex(axis_map.get(axis, 0))
 
         mode = str(self._state.get("mode", "world"))
@@ -3964,7 +3965,7 @@ class MirrorAdvancedDialog(QtWidgets.QDialog):
         self.seam_tol_spin.setValue(float(self._state.get("seam_tol", 0.0001)))
 
     def settings(self):
-        axis_items = ["auto", "x", "y", "z"]
+        axis_items = ["auto", "x", "y", "z", "-x", "-y", "-z"]
         mode_items = ["world", "object", "boundingBox", "grid"]
         return {
             "axis": axis_items[self.axis_combo.currentIndex()],
@@ -4655,6 +4656,9 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         self.mirror_axis_x_btn.clicked.connect(lambda: self._set_mirror_axis_state("x", refresh=True))
         self.mirror_axis_y_btn.clicked.connect(lambda: self._set_mirror_axis_state("y", refresh=True))
         self.mirror_axis_z_btn.clicked.connect(lambda: self._set_mirror_axis_state("z", refresh=True))
+        self.mirror_axis_nx_btn.clicked.connect(lambda: self._set_mirror_axis_state("-x", refresh=True))
+        self.mirror_axis_ny_btn.clicked.connect(lambda: self._set_mirror_axis_state("-y", refresh=True))
+        self.mirror_axis_nz_btn.clicked.connect(lambda: self._set_mirror_axis_state("-z", refresh=True))
         self.mirror_distance_spin.valueChanged.connect(self._on_mirror_control_changed)
         self.mirror_seam_spin.valueChanged.connect(self._on_mirror_control_changed)
         self.mirror_reverse_cb.toggled.connect(self._on_mirror_control_changed)
@@ -4736,10 +4740,16 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         self.mirror_axis_x_btn = PRColorBtn("X", tip="Mirror X", bg="#2a1a3a", fg=self.C_MIRROR, w=26)
         self.mirror_axis_y_btn = PRColorBtn("Y", tip="Mirror Y", bg="#2a1a3a", fg=self.C_MIRROR, w=26)
         self.mirror_axis_z_btn = PRColorBtn("Z", tip="Mirror Z", bg="#2a1a3a", fg=self.C_MIRROR, w=26)
+        self.mirror_axis_nx_btn = PRColorBtn("-X", tip="Mirror -X", bg="#2a1a3a", fg=self.C_MIRROR, w=30)
+        self.mirror_axis_ny_btn = PRColorBtn("-Y", tip="Mirror -Y", bg="#2a1a3a", fg=self.C_MIRROR, w=30)
+        self.mirror_axis_nz_btn = PRColorBtn("-Z", tip="Mirror -Z", bg="#2a1a3a", fg=self.C_MIRROR, w=30)
         axis_row.addWidget(self.mirror_axis_auto_btn)
         axis_row.addWidget(self.mirror_axis_x_btn)
         axis_row.addWidget(self.mirror_axis_y_btn)
         axis_row.addWidget(self.mirror_axis_z_btn)
+        axis_row.addWidget(self.mirror_axis_nx_btn)
+        axis_row.addWidget(self.mirror_axis_ny_btn)
+        axis_row.addWidget(self.mirror_axis_nz_btn)
         axis_row.addStretch()
         adv_layout.addLayout(axis_row)
 
@@ -4916,6 +4926,10 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         axis_menu.addAction("X").triggered.connect(lambda: self._run_mirror_preset('x', 'world'))
         axis_menu.addAction("Y").triggered.connect(lambda: self._run_mirror_preset('y', 'world'))
         axis_menu.addAction("Z").triggered.connect(lambda: self._run_mirror_preset('z', 'world'))
+        axis_menu.addSeparator()
+        axis_menu.addAction("-X").triggered.connect(lambda: self._run_mirror_preset('-x', 'world'))
+        axis_menu.addAction("-Y").triggered.connect(lambda: self._run_mirror_preset('-y', 'world'))
+        axis_menu.addAction("-Z").triggered.connect(lambda: self._run_mirror_preset('-z', 'world'))
 
         menu.addSeparator()
         mode_menu = menu.addMenu("Pivot Mode")
@@ -4928,6 +4942,8 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         menu.addSeparator()
         menu.addAction("Mirror X (World)").triggered.connect(lambda: self._run_mirror_preset('x', 'world'))
         menu.addAction("Mirror X (BBox)").triggered.connect(lambda: self._run_mirror_preset('x', 'boundingBox'))
+        menu.addAction("Mirror -X (World)").triggered.connect(lambda: self._run_mirror_preset('-x', 'world'))
+        menu.addAction("Mirror -X (BBox)").triggered.connect(lambda: self._run_mirror_preset('-x', 'boundingBox'))
         menu.addAction("Mirror Z (World)").triggered.connect(lambda: self._run_mirror_preset('z', 'world'))
         menu.addAction("Mirror Z (BBox)").triggered.connect(lambda: self._run_mirror_preset('z', 'boundingBox'))
 
@@ -5042,17 +5058,26 @@ class PRCurveToolsUI(QtWidgets.QDialog):
             return "y"
         if self.mirror_axis_z_btn.isChecked():
             return "z"
+        if self.mirror_axis_nx_btn.isChecked():
+            return "-x"
+        if self.mirror_axis_ny_btn.isChecked():
+            return "-y"
+        if self.mirror_axis_nz_btn.isChecked():
+            return "-z"
         return "auto"
 
     def _set_mirror_axis_state(self, axis, refresh=False):
         axis = str(axis).lower()
-        if axis not in ("auto", "x", "y", "z"):
+        if axis not in ("auto", "x", "y", "z", "-x", "-y", "-z"):
             axis = "auto"
         axis_buttons = {
             "auto": self.mirror_axis_auto_btn,
             "x": self.mirror_axis_x_btn,
             "y": self.mirror_axis_y_btn,
             "z": self.mirror_axis_z_btn,
+            "-x": self.mirror_axis_nx_btn,
+            "-y": self.mirror_axis_ny_btn,
+            "-z": self.mirror_axis_nz_btn,
         }
         for key, btn in axis_buttons.items():
             btn.setCheckable(True)

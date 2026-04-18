@@ -153,7 +153,7 @@ class UnBevelFaceTool(object):
                     cmds.polyMergeVertex(
                         vtx_components,
                         d=self.merge_distance,
-                        am=True,
+                        am=False,
                         ch=False,
                     )
                 except Exception as exc:
@@ -577,4 +577,4 @@ def _select_original_faces(tool: UnBevelFaceTool):
 
 
 if __name__ == "__main__":
-    run_unbevel_from_faces(strength=1.0)
+    start_unbevel_dragger()

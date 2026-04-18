@@ -54,6 +54,15 @@ class GroupData:
 
 
 @dataclass
+class BoundarySide:
+    """One connected boundary side around a selected face group."""
+
+    edge_ids: Set[int]
+    vertex_ids: Set[int]
+    neighbor_face_ids: Set[int]
+
+
+@dataclass
 class MeshData:
     """Container for all groups on one mesh shape."""
 
@@ -290,12 +299,16 @@ def _build_group_data(shape: str, dag_path: om.MDagPath, mfn: om.MFnMesh, face_i
     original_positions = {vid: mfn.getPoint(vid, om.MSpace.kObject) for vid in vertex_ids}
 
     sample_points = list(original_positions.values())
-    if len(sample_points) >= 3:
-        axis_origin = _point_average(sample_points)
-    else:
-        axis_origin = _point_average(face_centers) if face_centers else _point_average(sample_points)
-
+    axis_origin = _point_average(face_centers) if face_centers else _point_average(sample_points)
     axis_dir = _principal_axis(sample_points)
+
+    # Preferred mode: rebuild using the 2 support planes around the selected bevel faces.
+    # This better matches a "slide to hard corner" unbevel behavior.
+    corner_line = _compute_corner_line_from_boundaries(dag_path, mfn, face_ids)
+    if corner_line:
+        axis_origin, axis_dir = corner_line
+    elif len(sample_points) >= 3:
+        axis_origin = _point_average(sample_points)
 
     target_positions = {}
     for vid, p in original_positions.items():
@@ -313,6 +326,152 @@ def _build_group_data(shape: str, dag_path: om.MDagPath, mfn: om.MFnMesh, face_i
     )
 
 
+def _compute_corner_line_from_boundaries(
+    dag_path: om.MDagPath,
+    mfn: om.MFnMesh,
+    face_ids: Set[int],
+) -> Optional[Tuple[om.MPoint, om.MVector]]:
+    sides = _collect_boundary_sides(dag_path, face_ids)
+    if len(sides) < 2:
+        return None
+
+    # Keep the 2 most significant sides.
+    sides = sorted(sides, key=lambda s: len(s.edge_ids), reverse=True)[:2]
+
+    plane_a = _fit_support_plane_from_side(dag_path, mfn, sides[0])
+    plane_b = _fit_support_plane_from_side(dag_path, mfn, sides[1])
+    if not plane_a or not plane_b:
+        return None
+
+    n1, p1 = plane_a
+    n2, p2 = plane_b
+    return _intersect_two_planes(n1, p1, n2, p2)
+
+
+def _collect_boundary_sides(dag_path: om.MDagPath, face_ids: Set[int]) -> List[BoundarySide]:
+    selected = set(face_ids)
+    edge_it = om.MItMeshEdge(dag_path)
+    boundary_edges: Dict[int, Dict[str, Set[int]]] = {}
+
+    for fid in selected:
+        poly_it = om.MItMeshPolygon(dag_path)
+        try:
+            poly_it.setIndex(fid)
+        except RuntimeError:
+            continue
+
+        for eid in poly_it.getEdges():
+            try:
+                edge_it.setIndex(eid)
+            except RuntimeError:
+                continue
+
+            connected_faces = set(edge_it.getConnectedFaces())
+            selected_on_edge = connected_faces.intersection(selected)
+            if not selected_on_edge:
+                continue
+
+            outside_faces = connected_faces - selected
+            if not outside_faces:
+                continue
+
+            data = boundary_edges.setdefault(
+                eid, {"vertex_ids": set(edge_it.vertexId(i) for i in range(2)), "neighbor_face_ids": set()}
+            )
+            data["neighbor_face_ids"].update(outside_faces)
+
+    if not boundary_edges:
+        return []
+
+    # Connected components by shared vertices.
+    components: List[BoundarySide] = []
+    remaining = set(boundary_edges.keys())
+    edge_to_vertices = {eid: set(boundary_edges[eid]["vertex_ids"]) for eid in boundary_edges}
+
+    while remaining:
+        seed = next(iter(remaining))
+        queue = [seed]
+        comp_edges = set()
+        comp_vertices = set()
+        comp_neighbors = set()
+
+        while queue:
+            eid = queue.pop()
+            if eid not in remaining:
+                continue
+            remaining.remove(eid)
+            comp_edges.add(eid)
+            comp_vertices.update(edge_to_vertices[eid])
+            comp_neighbors.update(boundary_edges[eid]["neighbor_face_ids"])
+
+            for other in list(remaining):
+                if edge_to_vertices[eid].intersection(edge_to_vertices[other]):
+                    queue.append(other)
+
+        components.append(
+            BoundarySide(edge_ids=comp_edges, vertex_ids=comp_vertices, neighbor_face_ids=comp_neighbors)
+        )
+
+    return components
+
+
+def _fit_support_plane_from_side(
+    dag_path: om.MDagPath,
+    mfn: om.MFnMesh,
+    side: BoundarySide,
+) -> Optional[Tuple[om.MVector, om.MPoint]]:
+    if not side.neighbor_face_ids:
+        return None
+
+    poly_it = om.MItMeshPolygon(dag_path)
+    normals: List[om.MVector] = []
+    points: List[om.MPoint] = []
+
+    for fid in side.neighbor_face_ids:
+        try:
+            poly_it.setIndex(fid)
+        except RuntimeError:
+            continue
+        normals.append(poly_it.getNormal(om.MSpace.kObject))
+        points.append(poly_it.center(om.MSpace.kObject))
+
+    if not normals or not points:
+        return None
+
+    normal = _average_vector(normals)
+    if normal.length() < 1e-8:
+        return None
+    normal.normalize()
+    plane_point = _point_average(points)
+    return normal, plane_point
+
+
+def _intersect_two_planes(
+    n1: om.MVector,
+    p1: om.MPoint,
+    n2: om.MVector,
+    p2: om.MPoint,
+) -> Optional[Tuple[om.MPoint, om.MVector]]:
+    direction = n1 ^ n2
+    denom = direction.length() ** 2
+    if denom < 1e-12:
+        return None
+
+    d1 = n1 * om.MVector(p1.x, p1.y, p1.z)
+    d2 = n2 * om.MVector(p2.x, p2.y, p2.z)
+
+    c1 = n2 ^ direction
+    c2 = direction ^ n1
+
+    point_vec = ((c1 * d1) + (c2 * d2)) / denom
+    point = om.MPoint(point_vec.x, point_vec.y, point_vec.z)
+
+    if direction.length() < 1e-8:
+        return None
+    direction.normalize()
+    return point, direction
+
+
 
 def _point_average(points: List[om.MPoint]) -> om.MPoint:
     if not points:
@@ -326,6 +485,18 @@ def _point_average(points: List[om.MPoint]) -> om.MPoint:
     n = float(len(points))
     return om.MPoint(sx / n, sy / n, sz / n)
 
+
+def _average_vector(vectors: List[om.MVector]) -> om.MVector:
+    if not vectors:
+        return om.MVector(0.0, 0.0, 0.0)
+
+    sx = sy = sz = 0.0
+    for v in vectors:
+        sx += v.x
+        sy += v.y
+        sz += v.z
+    n = float(len(vectors))
+    return om.MVector(sx / n, sy / n, sz / n)
 
 
 def _principal_axis(points: List[om.MPoint]) -> om.MVector:

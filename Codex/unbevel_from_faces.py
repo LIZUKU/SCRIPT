@@ -475,12 +475,12 @@ def _split_group_by_support_signature(dag_path: om.MDagPath, face_ids: Set[int])
 
     # If not enough info, keep group as-is
     if len(all_outside_normals) < 2:
-        return [selected]
+        return _maybe_split_closed_loop_by_face_normals(dag_path, selected)
 
     cluster_reps = _cluster_normals(all_outside_normals, threshold_deg=20.0)
     if len(cluster_reps) <= 2:
         # Simple strip / corner / already coherent enough
-        return [selected]
+        return _maybe_split_closed_loop_by_face_normals(dag_path, selected)
 
     face_signatures: Dict[int, FrozenSet[int]] = {}
     for fid in selected:
@@ -542,6 +542,91 @@ def _split_group_by_support_signature(dag_path: om.MDagPath, face_ids: Set[int])
     logical_groups = _merge_tiny_logical_groups(dag_path, logical_groups, face_signatures)
 
     return logical_groups if logical_groups else [selected]
+
+
+def _maybe_split_closed_loop_by_face_normals(
+    dag_path: om.MDagPath,
+    face_ids: Set[int],
+    seam_angle_deg: float = 22.5,
+) -> List[Set[int]]:
+    """
+    Extra split pass for closed bevel loops (e.g. top bevel ring on a cube).
+
+    Signature-based split can keep the whole loop together when there are only two
+    support planes (top + sides). In that case, collapsing all faces as one group
+    can project everything toward a single axis. We detect closed loops and split
+    them at sharp normal changes so each side/ring segment unbevels independently.
+    """
+    selected = set(face_ids)
+    if len(selected) < 4:
+        return [selected]
+
+    if not _is_closed_face_loop(dag_path, selected):
+        return [selected]
+
+    face_normals: Dict[int, om.MVector] = {}
+    for fid in selected:
+        n = _face_normal(dag_path, fid)
+        if n is not None and n.length() > 1e-8:
+            n.normalize()
+            face_normals[fid] = n
+
+    if len(face_normals) < len(selected):
+        return [selected]
+
+    remaining = set(selected)
+    split_groups: List[Set[int]] = []
+
+    while remaining:
+        seed = next(iter(remaining))
+        queue = [seed]
+        group = set()
+
+        while queue:
+            fid = queue.pop()
+            if fid not in remaining:
+                continue
+
+            remaining.remove(fid)
+            group.add(fid)
+
+            n1 = face_normals.get(fid)
+            if n1 is None:
+                continue
+
+            for nb in _face_connected_selected_neighbors(dag_path, fid, selected):
+                if nb not in remaining:
+                    continue
+                n2 = face_normals.get(nb)
+                if n2 is None:
+                    continue
+
+                if _angle_deg(n1, n2) <= seam_angle_deg:
+                    queue.append(nb)
+
+        if group:
+            split_groups.append(group)
+
+    if len(split_groups) <= 1:
+        return [selected]
+
+    return split_groups
+
+
+def _is_closed_face_loop(dag_path: om.MDagPath, face_ids: Set[int]) -> bool:
+    """
+    Heuristic: closed loop if every selected face has exactly two selected neighbors.
+    This matches common bevel rings and avoids splitting open strips.
+    """
+    selected = set(face_ids)
+    if len(selected) < 3:
+        return False
+
+    for fid in selected:
+        nbs = _face_connected_selected_neighbors(dag_path, fid, selected)
+        if len(nbs) != 2:
+            return False
+    return True
 
 
 def _merge_tiny_logical_groups(

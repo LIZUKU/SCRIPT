@@ -706,12 +706,11 @@ def _hud_create_or_update(value):
         cmds.headsUpDisplay(_HUD_NAME, edit=True, label=txt)
         return
 
-    # Next free block in section 5 usually avoids collisions.
-    block = 0
-    while cmds.headsUpDisplay("tmp", section=5, block=block, exists=True):
-        block += 1
-        if block > 25:
-            break
+    # Query Maya for the next free HUD block (avoid invalid exists+section+block flag combos).
+    try:
+        block = int(cmds.headsUpDisplay(nextFreeBlock=5))
+    except Exception:
+        block = 0
 
     try:
         cmds.headsUpDisplay(
@@ -721,8 +720,6 @@ def _hud_create_or_update(value):
             blockSize="small",
             label=txt,
             labelFontSize="small",
-            command=lambda: "",
-            event="idle",
         )
     except Exception:
         # Fallback if HUD fails in this Maya UI layout.

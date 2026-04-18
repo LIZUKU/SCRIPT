@@ -2242,7 +2242,11 @@ def _get_curve_fn(node):
         raise RuntimeError("Selection invalide : pas de nurbsCurve.")
     sel = om.MSelectionList()
     sel.add(shape)
-    dag = sel.getDagPath(0)
+    try:
+        dag = sel.getDagPath(0)
+    except TypeError:
+        dag = om.MDagPath()
+        sel.getDagPath(0, dag)
     return om.MFnNurbsCurve(dag), shape
 
 
@@ -3041,7 +3045,11 @@ def delete_useless_verts(mesh):
     try:
         sl = om.MSelectionList()
         sl.add(mesh)
-        dp = sl.getDagPath(0)
+        try:
+            dp = sl.getDagPath(0)
+        except TypeError:
+            dp = om.MDagPath()
+            sl.getDagPath(0, dp)
         it = om.MItMeshVertex(dp)
         to_delete = []
         while not it.isDone():
@@ -4708,13 +4716,14 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         self.mirror_x_btn = PRColorBtn("X", tip="Mirror X", bg="#2a1a3a", fg=self.C_MIRROR, w=34)
         self.mirror_y_btn = PRColorBtn("Y", tip="Mirror Y", bg="#2a1a3a", fg=self.C_MIRROR, w=34)
         self.mirror_z_btn = PRColorBtn("Z", tip="Mirror Z", bg="#2a1a3a", fg=self.C_MIRROR, w=34)
-        self.mirror_negative_cb = QtWidgets.QCheckBox("Negative")
+        self.mirror_negative_cb = QtWidgets.QCheckBox("Neg")
         self.mirror_negative_cb.setToolTip("Use negative axis for quick mirror buttons (X/Y/Z -> -X/-Y/-Z).")
+        self.mirror_negative_cb.setMinimumWidth(46)
         row.addWidget(self.mirror_auto_btn)
+        row.addWidget(self.mirror_negative_cb)
         row.addWidget(self.mirror_x_btn)
         row.addWidget(self.mirror_y_btn)
         row.addWidget(self.mirror_z_btn)
-        row.addWidget(self.mirror_negative_cb)
         parent_layout.addLayout(row)
 
         self.mirror_adv_toggle = QtWidgets.QToolButton()

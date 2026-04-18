@@ -132,6 +132,51 @@ def pr_get_dagpath_and_fnmesh(mesh_transform):
         return None, None
 
 
+def pr_get_selection_scope(mesh, target="face"):
+    """
+    Return current component-selection scope on `mesh` converted to `target`.
+    target: "face" or "edge"
+    Returns [] when no usable component scope exists.
+    """
+    if target not in ("face", "edge"):
+        return []
+
+    sel = cmds.ls(selection=True, flatten=True, long=True) or []
+    if not sel:
+        return []
+
+    mesh_comps = []
+    for s in sel:
+        if "." not in s:
+            continue
+        comp_mesh = s.split(".", 1)[0]
+        if comp_mesh == mesh:
+            mesh_comps.append(s)
+
+    if not mesh_comps:
+        return []
+
+    try:
+        if target == "face":
+            converted = cmds.polyListComponentConversion(mesh_comps, toFace=True)
+            comps = cmds.ls(converted, flatten=True, long=True) or []
+            filtered = [c for c in comps if ".f[" in c and c.split(".", 1)[0] == mesh]
+        else:
+            converted = cmds.polyListComponentConversion(mesh_comps, toEdge=True)
+            comps = cmds.ls(converted, flatten=True, long=True) or []
+            filtered = [c for c in comps if ".e[" in c and c.split(".", 1)[0] == mesh]
+    except Exception:
+        return []
+
+    seen = set()
+    ordered = []
+    for c in filtered:
+        if c not in seen:
+            seen.add(c)
+            ordered.append(c)
+    return ordered
+
+
 # =============================================================================
 # SHORTEST PATH TOOL - Rewritten to match EdgeSensei logic exactly
 # =============================================================================
@@ -976,10 +1021,23 @@ class PR_SelectByAngle:
                     pn = [pn[0]/pnl, pn[1]/pnl, pn[2]/pnl]
                     use_plane = True
 
+        scope_faces = pr_get_selection_scope(mesh, target="face")
+        scope_ids = None
+        if scope_faces:
+            scope_ids = set()
+            for f in scope_faces:
+                fi = pr_parse_face_index(f)
+                if fi is not None:
+                    scope_ids.add(fi)
+
         dag, fn = pr_get_dagpath_and_fnmesh(mesh)
         if fn:
-            face_count = fn.numPolygons
-            for i in range(face_count):
+            if scope_ids is not None:
+                face_indices = sorted(scope_ids)
+            else:
+                face_indices = range(fn.numPolygons)
+
+            for i in face_indices:
                 n  = fn.getPolygonNormal(i, om2.MSpace.kWorld)
                 nl = n.length()
                 if nl < 1e-8:
@@ -1009,8 +1067,11 @@ class PR_SelectByAngle:
             pr_force_selection_faces_only()
             return len(cmds.ls(sl=True, fl=True) or [])
 
-        face_count = cmds.polyEvaluate(mesh, face=True)
-        for i in range(face_count):
+        if scope_ids is not None:
+            face_indices = sorted(scope_ids)
+        else:
+            face_indices = range(cmds.polyEvaluate(mesh, face=True))
+        for i in face_indices:
             face = "{}.f[{}]".format(mesh, i)
             info = cmds.polyInfo(face, faceNormals=True)
             if not info:
@@ -1291,17 +1352,22 @@ class PR_SelectTools:
 
     @classmethod
     def select_all_hard_edges(cls):
-        sel = cmds.ls(sl=True, o=True) or []
-        if not sel:
+        mesh = pr_get_mesh_from_selection()
+        if not mesh:
             cmds.warning("[PR] Select a mesh object first.")
             return 0
+        scope_edges = set(pr_get_selection_scope(mesh, target="edge"))
         cmds.selectMode(component=True)
         cmds.selectType(edge=True)
-        edge_count = cmds.polyEvaluate(sel[0], edge=True)
-        cmds.select("{}.e[0:{}]".format(sel[0], edge_count-1), r=True)
+        edge_count = cmds.polyEvaluate(mesh, edge=True)
+        cmds.select("{}.e[0:{}]".format(mesh, edge_count-1), r=True)
         cmds.polySelectConstraint(m=3, t=0x8000, angle=True, anglebound=(30, 180))
         cmds.polySelectConstraint(disable=True)
-        return len(cmds.ls(sl=True, fl=True) or [])
+        hard_edges = cmds.ls(sl=True, fl=True) or []
+        if scope_edges:
+            hard_edges = [e for e in hard_edges if e in scope_edges]
+            cmds.select(hard_edges, r=True)
+        return len(hard_edges)
 
     @classmethod
     def select_smoothing_hard_edges(cls):
@@ -1309,6 +1375,7 @@ class PR_SelectTools:
         if not mesh:
             cmds.warning("[PR] Select a mesh object first.")
             return 0
+        scope_edges = set(pr_get_selection_scope(mesh, target="edge"))
 
         try:
             cmds.selectMode(component=True)
@@ -1358,6 +1425,8 @@ class PR_SelectTools:
                 hard_edges = []
 
         if hard_edges:
+            if scope_edges:
+                hard_edges = [e for e in hard_edges if e in scope_edges]
             cmds.select(hard_edges, r=True)
             return len(hard_edges)
 
@@ -1371,6 +1440,7 @@ class PR_SelectTools:
         if not mesh:
             cmds.warning("[PR] Select a mesh object first.")
             return 0
+        scope_edges = set(pr_get_selection_scope(mesh, target="edge"))
         try:
             cmds.selectMode(component=True)
             cmds.selectType(edge=True)
@@ -1408,6 +1478,8 @@ class PR_SelectTools:
                 cmds.warning("[PR] Border edges (constraint) failed: {}".format(e))
                 edges = []
         if edges:
+            if scope_edges:
+                edges = [e for e in edges if e in scope_edges]
             cmds.select(edges, r=True)
             return len(edges)
         cmds.select(clear=True)
@@ -1416,10 +1488,10 @@ class PR_SelectTools:
 
     @classmethod
     def select_hard_edges(cls, min_a, max_a):
-        sel = cmds.ls(sl=True, o=True) or []
-        if not sel:
+        mesh = pr_get_mesh_from_selection()
+        if not mesh:
             return 0
-        mesh = sel[0]
+        scope_edges = set(pr_get_selection_scope(mesh, target="edge"))
         try:
             cmds.selectMode(component=True)
             cmds.selectType(edge=True)
@@ -1437,6 +1509,9 @@ class PR_SelectTools:
                 cmds.polySelectConstraint(disable=True)
             except Exception:
                 pass
+        if scope_edges:
+            result = [e for e in result if e in scope_edges]
+            cmds.select(result, r=True)
         return len(result)
 
     @classmethod

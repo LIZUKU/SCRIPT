@@ -335,16 +335,38 @@ def _compute_corner_line_from_boundaries(
     if len(sides) < 2:
         return None
 
-    # Keep the 2 most significant sides.
-    sides = sorted(sides, key=lambda s: len(s.edge_ids), reverse=True)[:2]
+    candidate_planes: List[Tuple[BoundarySide, om.MVector, om.MPoint]] = []
+    for side in sides:
+        plane = _fit_support_plane_from_side(dag_path, mfn, side)
+        if not plane:
+            continue
+        n, p = plane
+        candidate_planes.append((side, n, p))
 
-    plane_a = _fit_support_plane_from_side(dag_path, mfn, sides[0])
-    plane_b = _fit_support_plane_from_side(dag_path, mfn, sides[1])
-    if not plane_a or not plane_b:
+    if len(candidate_planes) < 2:
         return None
 
-    n1, p1 = plane_a
-    n2, p2 = plane_b
+    # Choose the pair that best represents opposite support faces.
+    # We prioritize:
+    #   1) normals least parallel (small |dot|)
+    #   2) larger boundary support (more edge coverage)
+    best_pair: Optional[Tuple[om.MVector, om.MPoint, om.MVector, om.MPoint]] = None
+    best_key: Optional[Tuple[float, int]] = None
+    for i in range(len(candidate_planes)):
+        side_a, n1, p1 = candidate_planes[i]
+        for j in range(i + 1, len(candidate_planes)):
+            side_b, n2, p2 = candidate_planes[j]
+            dot_val = abs(n1 * n2)
+            size_score = len(side_a.edge_ids) + len(side_b.edge_ids)
+            key = (dot_val, -size_score)
+            if best_key is None or key < best_key:
+                best_key = key
+                best_pair = (n1, p1, n2, p2)
+
+    if not best_pair:
+        return None
+
+    n1, p1, n2, p2 = best_pair
     return _intersect_two_planes(n1, p1, n2, p2)
 
 
@@ -702,9 +724,14 @@ def _on_finalize():
 def _hud_create_or_update(value):
     txt = "UnBevel Strength: {:.3f}".format(float(value))
 
-    if cmds.headsUpDisplay(_HUD_NAME, exists=True):
-        cmds.headsUpDisplay(_HUD_NAME, edit=True, label=txt)
-        return
+    try:
+        if cmds.headsUpDisplay(_HUD_NAME, exists=True):
+            cmds.headsUpDisplay(_HUD_NAME, edit=True, label=txt)
+            return
+    except Exception:
+        # In some Maya versions/layouts, querying/editing can throw
+        # "invalid flag combination"; fallback to recreate below.
+        pass
 
     # Query Maya for the next free HUD block (avoid invalid exists+section+block flag combos).
     try:
@@ -717,9 +744,7 @@ def _hud_create_or_update(value):
             _HUD_NAME,
             section=5,
             block=block,
-            blockSize="small",
             label=txt,
-            labelFontSize="small",
         )
     except Exception:
         # Fallback if HUD fails in this Maya UI layout.

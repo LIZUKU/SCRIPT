@@ -459,6 +459,14 @@ def _split_group_by_support_signature(dag_path: om.MDagPath, face_ids: Set[int])
         return []
 
     selected = set(face_ids)
+    if len(selected) <= 2:
+        return [selected]
+
+    # Priority pass: topology/support section signatures.
+    # This pass forces a split whenever support sections change, even if angles stay smooth.
+    section_split = _split_group_by_support_sections(dag_path, selected)
+    if len(section_split) > 1:
+        return section_split
 
     # Gather all outside support normals around this group
     all_outside_normals: List[om.MVector] = []
@@ -541,7 +549,236 @@ def _split_group_by_support_signature(dag_path: om.MDagPath, face_ids: Set[int])
     # Merge tiny accidental fragments back to nearest compatible group
     logical_groups = _merge_tiny_logical_groups(dag_path, logical_groups, face_signatures)
 
-    return logical_groups if logical_groups else [selected]
+    result = logical_groups if logical_groups else [selected]
+    return _merge_oversegmented_groups(dag_path, result, selected)
+
+
+def _split_group_by_support_sections(
+    dag_path: om.MDagPath,
+    face_ids: Set[int],
+    angle_fallback_deg: float = 18.0,
+) -> List[Set[int]]:
+    """
+    Topology-first segmentation.
+
+    Each selected face gets a support section signature from boundary contact
+    (which outside support region(s) it touches). Connected faces are split if
+    those section signatures differ. If signatures are missing/ambiguous, fall
+    back to local face-normal angle.
+    """
+    selected = set(face_ids)
+    if not selected:
+        return []
+
+    edge_it = om.MItMeshEdge(dag_path)
+    poly_it = om.MItMeshPolygon(dag_path)
+
+    # boundary edge -> outside neighbors
+    boundary_outside: Dict[int, Set[int]] = {}
+    face_boundary_edges: Dict[int, List[int]] = {}
+
+    for fid in selected:
+        if not _safe_set_face(poly_it, fid):
+            continue
+        try:
+            eids = poly_it.getEdges()
+        except Exception:
+            continue
+
+        local_boundary_edges = []
+        for eid in eids:
+            if not _safe_set_edge(edge_it, eid):
+                continue
+            try:
+                conn = set(edge_it.getConnectedFaces())
+            except Exception:
+                continue
+
+            outside = conn - selected
+            if not outside:
+                continue
+
+            local_boundary_edges.append(eid)
+            boundary_outside.setdefault(eid, set()).update(outside)
+
+        if local_boundary_edges:
+            face_boundary_edges[fid] = local_boundary_edges
+
+    if not boundary_outside:
+        return _maybe_split_closed_loop_by_face_normals(dag_path, selected)
+
+    # Build support regions from outside faces.
+    support_regions = _build_outside_support_regions(dag_path, boundary_outside)
+    if not support_regions:
+        return _maybe_split_closed_loop_by_face_normals(dag_path, selected)
+
+    outside_to_region: Dict[int, int] = {}
+    for ridx, region in enumerate(support_regions):
+        for ofid in region:
+            outside_to_region[ofid] = ridx
+
+    face_signatures: Dict[int, FrozenSet[int]] = {}
+    for fid in selected:
+        rset = set()
+        for eid in face_boundary_edges.get(fid, []):
+            for ofid in boundary_outside.get(eid, set()):
+                rid = outside_to_region.get(ofid)
+                if rid is not None:
+                    rset.add(rid)
+        face_signatures[fid] = frozenset(rset)
+
+    face_normals: Dict[int, om.MVector] = {}
+    for fid in selected:
+        n = _face_normal(dag_path, fid)
+        if n is not None and n.length() > 1e-8:
+            n.normalize()
+            face_normals[fid] = n
+
+    def is_compatible(a: int, b: int) -> bool:
+        sa = face_signatures.get(a, frozenset())
+        sb = face_signatures.get(b, frozenset())
+
+        # Hard section rule: if both have section ids and they differ => cut.
+        if sa and sb and sa != sb:
+            return False
+        if sa == sb:
+            return True
+
+        # If one side is missing section info (interior-like), use angle fallback.
+        na = face_normals.get(a)
+        nb = face_normals.get(b)
+        if na is None or nb is None:
+            return True
+        return _angle_deg(na, nb) <= angle_fallback_deg
+
+    groups: List[Set[int]] = []
+    remaining = set(selected)
+
+    while remaining:
+        seed = next(iter(remaining))
+        queue = [seed]
+        chunk = set()
+
+        while queue:
+            fid = queue.pop()
+            if fid not in remaining:
+                continue
+
+            remaining.remove(fid)
+            chunk.add(fid)
+
+            for nb in _face_connected_selected_neighbors(dag_path, fid, selected):
+                if nb in remaining and is_compatible(fid, nb):
+                    queue.append(nb)
+
+        if chunk:
+            groups.append(chunk)
+
+    return groups if groups else [selected]
+
+
+def _build_outside_support_regions(
+    dag_path: om.MDagPath,
+    boundary_outside: Dict[int, Set[int]],
+    normal_threshold_deg: float = 28.0,
+) -> List[Set[int]]:
+    """
+    Group outside support faces into regions.
+    Regions are connected components with similar normals, which helps separate
+    different topological supports even when they are coplanar-ish.
+    """
+    outside_faces = set()
+    for neigh in boundary_outside.values():
+        outside_faces.update(neigh)
+
+    if not outside_faces:
+        return []
+
+    normals: Dict[int, om.MVector] = {}
+    for fid in outside_faces:
+        n = _face_normal(dag_path, fid)
+        if n is not None and n.length() > 1e-8:
+            n.normalize()
+            normals[fid] = n
+
+    remaining = set(outside_faces)
+    regions: List[Set[int]] = []
+
+    while remaining:
+        seed = next(iter(remaining))
+        queue = [seed]
+        comp = set()
+
+        while queue:
+            fid = queue.pop()
+            if fid not in remaining:
+                continue
+
+            remaining.remove(fid)
+            comp.add(fid)
+
+            for nb in _face_connected_selected_neighbors(dag_path, fid, outside_faces):
+                if nb not in remaining:
+                    continue
+
+                n1 = normals.get(fid)
+                n2 = normals.get(nb)
+                if n1 is None or n2 is None:
+                    queue.append(nb)
+                    continue
+
+                if _angle_deg(n1, n2) <= normal_threshold_deg:
+                    queue.append(nb)
+
+        if comp:
+            regions.append(comp)
+
+    return regions
+
+
+def _merge_oversegmented_groups(
+    dag_path: om.MDagPath,
+    groups: List[Set[int]],
+    selected_faces: Set[int],
+    min_size: int = 2,
+) -> List[Set[int]]:
+    """
+    Conservative anti-oversegmentation:
+    merge tiny fragments only if they touch exactly one larger neighbor group.
+    """
+    if len(groups) <= 1:
+        return groups
+
+    large = [set(g) for g in groups if len(g) >= min_size]
+    small = [set(g) for g in groups if len(g) < min_size]
+    if not large or not small:
+        return groups
+
+    all_groups = [set(g) for g in groups]
+    merged = [set(g) for g in large]
+
+    for frag in small:
+        touching = []
+        for i, target in enumerate(merged):
+            found_touch = False
+            for fid in frag:
+                for nb in _face_connected_selected_neighbors(dag_path, fid, selected_faces):
+                    if nb in target:
+                        found_touch = True
+                        break
+                if found_touch:
+                    break
+            if found_touch:
+                touching.append(i)
+
+        if len(touching) == 1:
+            merged[touching[0]].update(frag)
+        else:
+            merged.append(frag)
+
+    # Keep deterministic order as much as possible using first face id.
+    merged.sort(key=lambda g: min(g) if g else 10**9)
+    return merged if merged else all_groups
 
 
 def _maybe_split_closed_loop_by_face_normals(

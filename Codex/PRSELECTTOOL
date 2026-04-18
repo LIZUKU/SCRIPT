@@ -1,0 +1,2254 @@
+# -*- coding: utf-8 -*-
+"""
+=============================================================================
+PR Select Tools v3.9c - Standalone Version
+=============================================================================
+Advanced selection tools for Maya 2022-2026
+- Angle select with live preview
+- Inner faces selection
+- Edge pattern selection
+- Hard/border edges detection
+- Shortest path selection (FIXED - rewritten from EdgeSensei logic)
+- Find identical meshes (Topology / Geometry / Exact)
+- Selection slots & more
+=============================================================================
+"""
+
+import math
+import re
+
+import maya.cmds as cmds
+import maya.mel as mel
+
+try:
+    import maya.api.OpenMaya as om2
+except Exception:
+    om2 = None
+
+try:
+    from PySide2 import QtWidgets, QtCore, QtGui
+    from shiboken2 import wrapInstance
+    PYSIDE_VER = 2
+except Exception:
+    from PySide6 import QtWidgets, QtCore, QtGui
+    from shiboken6 import wrapInstance
+    PYSIDE_VER = 6
+
+import maya.OpenMayaUI as omui
+import maya.OpenMaya as om
+
+
+# =============================================================================
+# SHARED - Maya main window
+# =============================================================================
+def get_maya_main_window():
+    try:
+        ptr = omui.MQtUtil.mainWindow()
+        if ptr:
+            return wrapInstance(int(ptr), QtWidgets.QWidget)
+    except Exception:
+        pass
+    return None
+
+
+# =============================================================================
+# HELPERS
+# =============================================================================
+def pr_ensure_face_component_mode():
+    try:
+        cmds.selectMode(component=True)
+    except Exception:
+        pass
+    try:
+        cmds.selectType(facet=True)
+    except Exception:
+        pass
+
+
+def pr_force_selection_faces_only():
+    try:
+        cmds.ConvertSelectionToFaces()
+    except Exception:
+        pass
+    try:
+        sel = cmds.ls(sl=True, fl=True) or []
+        only_faces = [c for c in sel if ".f[" in c]
+        cmds.select(only_faces, replace=True)
+    except Exception:
+        pass
+    pr_ensure_face_component_mode()
+
+
+def pr_get_mesh_from_selection():
+    sel = cmds.ls(selection=True, long=True) or []
+    if not sel:
+        return None
+    obj = sel[0].split(".")[0] if "." in sel[0] else sel[0]
+    shapes = cmds.listRelatives(obj, shapes=True, fullPath=True) or []
+    for s in shapes:
+        if cmds.nodeType(s) == "mesh":
+            return obj
+    if cmds.nodeType(obj) == "mesh":
+        p = cmds.listRelatives(obj, parent=True, fullPath=True)
+        return p[0] if p else None
+    return None
+
+
+def pr_get_camera_direction():
+    try:
+        panel = cmds.getPanel(withFocus=True)
+        if not panel or cmds.getPanel(typeOf=panel) != "modelPanel":
+            panels = cmds.getPanel(type="modelPanel") or []
+            panel = panels[0] if panels else None
+        if panel:
+            camera = cmds.modelPanel(panel, q=True, camera=True)
+            cam_matrix = cmds.xform(camera, q=True, m=True, ws=True)
+            direction = [cam_matrix[8], cam_matrix[9], cam_matrix[10]]
+            return direction
+    except Exception:
+        pass
+    return [0, 0, 1]
+
+
+def pr_parse_face_index(comp):
+    m = re.search(r"\.f\[(\d+)\]", comp)
+    if not m:
+        return None
+    return int(m.group(1))
+
+
+def pr_get_dagpath_and_fnmesh(mesh_transform):
+    if not om2:
+        return None, None
+    try:
+        sel = om2.MSelectionList()
+        sel.add(mesh_transform)
+        dag = sel.getDagPath(0)
+        if dag.apiType() != om2.MFn.kMesh:
+            dag.extendToShape()
+        fn = om2.MFnMesh(dag)
+        return dag, fn
+    except Exception:
+        return None, None
+
+
+# =============================================================================
+# SHORTEST PATH TOOL - Rewritten to match EdgeSensei logic exactly
+# =============================================================================
+PR_SP_CTX     = "PRShortestPathCtx"
+PR_SP_SET     = "preSelDisp"
+PR_SP_RUNNING = False
+
+_sp_sel_geo       = []
+_sp_store_edges   = []
+_sp_initial_list  = []
+_sp_ctx           = PR_SP_CTX
+
+
+def _sp_get_edge_number(comp):
+    return int(comp.split("[")[-1].split("]")[0])
+
+
+def _sp_ordered_vertices_from_edges(edge_list):
+    if not edge_list:
+        return []
+
+    sel_edges = edge_list
+    shape_node = cmds.listRelatives(sel_edges[0], fullPath=True, parent=True)
+    if not shape_node:
+        return []
+    transform_node = cmds.listRelatives(shape_node[0], fullPath=True, parent=True)
+    if not transform_node:
+        return []
+
+    edge_number_list = []
+    for a in sel_edges:
+        check_number = ((a.split(".")[1]).split("\n")[0]).split(" ")
+        for c in check_number:
+            find_number = "".join([n for n in c.split("|")[-1] if n.isdigit()])
+            if find_number:
+                edge_number_list.append(find_number)
+
+    get_number = []
+    for s in sel_edges:
+        evlist = cmds.polyInfo(s, ev=True)
+        if not evlist:
+            continue
+        check_number = ((evlist[0].split(":")[1]).split("\n")[0]).split(" ")
+        for c in check_number:
+            find_number = "".join([n for n in c.split("|")[-1] if n.isdigit()])
+            if find_number:
+                get_number.append(find_number)
+
+    dup = set([x for x in get_number if get_number.count(x) > 1])
+    get_head_tail = list(set(get_number) - dup)
+
+    vtf_order = []
+    final_list = []
+
+    if len(get_head_tail) > 0:
+        vtf_order.append(get_head_tail[0])
+        count = 0
+        while len(dup) > 0 and count < 100:
+            check_vtx = transform_node[0] + ".vtx[" + vtf_order[-1] + "]"
+            velist = cmds.polyInfo(check_vtx, ve=True)
+            if not velist:
+                break
+            get_number2 = []
+            check_number2 = ((velist[0].split(":")[1]).split("\n")[0]).split(" ")
+            for c in check_number2:
+                find_number = "".join([n for n in c.split("|")[-1] if n.isdigit()])
+                if find_number:
+                    get_number2.append(find_number)
+            find_next_edge = None
+            for g in get_number2:
+                if g in edge_number_list:
+                    find_next_edge = g
+                    break
+            if find_next_edge is None:
+                break
+            edge_number_list.remove(find_next_edge)
+            check_vtx2 = transform_node[0] + ".e[" + find_next_edge + "]"
+            find_vtx = cmds.polyInfo(check_vtx2, ev=True)
+            if not find_vtx:
+                break
+            get_number3 = []
+            check_number3 = ((find_vtx[0].split(":")[1]).split("\n")[0]).split(" ")
+            for c in check_number3:
+                find_number = "".join([n for n in c.split("|")[-1] if n.isdigit()])
+                if find_number:
+                    get_number3.append(find_number)
+            got_next_vtx = None
+            for g in get_number3:
+                if g in dup:
+                    got_next_vtx = g
+                    break
+            if got_next_vtx is None:
+                break
+            dup.discard(got_next_vtx)
+            vtf_order.append(got_next_vtx)
+            count += 1
+
+        if len(get_head_tail) > 1:
+            vtf_order.append(get_head_tail[1])
+
+        for v in vtf_order:
+            final_list.append(transform_node[0] + ".vtx[" + v + "]")
+
+    return final_list
+
+
+def _sp_get_edge_loop_groups(sel_edges):
+    if not sel_edges:
+        return []
+
+    trans = sel_edges[0].split(".")[0]
+    e2v_infos = cmds.polyInfo(sel_edges, ev=True)
+    e2v_dict = {}
+    f_edges = []
+
+    for info in e2v_infos:
+        ev_list = [int(i) for i in re.findall(r"\d+", info)]
+        e2v_dict.update(dict([(ev_list[0], ev_list[1:])]))
+
+    while True:
+        try:
+            start_edge, start_vtxs = e2v_dict.popitem()
+        except Exception:
+            break
+        edges_grp = [start_edge]
+        num = 0
+        for vtx in start_vtxs:
+            cur_vtx = vtx
+            while True:
+                next_edges = []
+                for k in e2v_dict:
+                    if cur_vtx in e2v_dict[k]:
+                        next_edges.append(k)
+                if next_edges:
+                    if len(next_edges) == 1:
+                        if num == 0:
+                            edges_grp.append(next_edges[0])
+                        else:
+                            edges_grp.insert(0, next_edges[0])
+                        next_vtxs = e2v_dict[next_edges[0]]
+                        cur_vtx = [v for v in next_vtxs if v != cur_vtx][0]
+                        e2v_dict.pop(next_edges[0])
+                    else:
+                        break
+                else:
+                    break
+            num += 1
+        f_edges.append(edges_grp)
+
+    ret_edges = []
+    for f in f_edges:
+        collect_list = []
+        for x in f:
+            get_com = trans + ".e[" + str(x) + "]"
+            collect_list.append(get_com)
+        ret_edges.append(collect_list)
+    return ret_edges
+
+
+def _sp_setup_attrs(geo):
+    for attr in ["start", "end", "nearest", "closeTo", "firstRun"]:
+        if not cmds.attributeQuery(attr, node=geo, exists=True):
+            cmds.addAttr(geo, at="long", ln=attr)
+
+
+def _sp_ensure_creas_set():
+    if not cmds.objExists(PR_SP_SET):
+        cmds.createNode("creaseSet")
+        cmds.rename(PR_SP_SET)
+    cmds.setAttr(PR_SP_SET + ".creaseLevel", 1)
+
+
+def _sp_cleanup():
+    if cmds.objExists(PR_SP_SET):
+        try:
+            cmds.setAttr(PR_SP_SET + ".creaseLevel", 0)
+        except Exception:
+            pass
+        try:
+            cmds.delete(PR_SP_SET)
+        except Exception:
+            pass
+
+
+def _sp_finish():
+    global PR_SP_RUNNING
+
+    PR_SP_RUNNING = False
+
+    try:
+        cmds.setToolTo("moveSuperContext")
+    except Exception:
+        pass
+    try:
+        cmds.polyOptions(dce=0)
+    except Exception:
+        pass
+
+    _sp_cleanup()
+
+    if cmds.draggerContext(PR_SP_CTX, exists=True):
+        try:
+            cmds.deleteUI(PR_SP_CTX)
+        except Exception:
+            pass
+
+
+def _sp_press():
+    global _sp_store_edges, _sp_sel_geo, _sp_initial_list
+
+    if not _sp_sel_geo:
+        _sp_finish()
+        return
+
+    geo = _sp_sel_geo[0]
+    check_run = cmds.getAttr(geo + ".firstRun")
+
+    if check_run == 0:
+        cmds.setAttr(geo + ".firstRun", 1)
+    else:
+        cmds.setAttr(geo + ".firstRun", 2)
+
+        get_edge_list = cmds.ls(sl=True, fl=True) or []
+        _sp_store_edges = get_edge_list
+
+        list_vtx = _sp_ordered_vertices_from_edges(get_edge_list)
+        if len(list_vtx) > 0:
+            list_head = list_vtx[0]
+            list_end  = list_vtx[-1]
+
+            if list_head in _sp_initial_list:
+                cmds.setAttr(geo + ".start", _sp_get_edge_number(list_vtx[0]))
+                cmds.setAttr(geo + ".end",   _sp_get_edge_number(list_vtx[-1]))
+            else:
+                cmds.setAttr(geo + ".start", _sp_get_edge_number(list_vtx[-1]))
+                cmds.setAttr(geo + ".end",   _sp_get_edge_number(list_vtx[0]))
+        else:
+            _sp_finish()
+
+
+def _sp_drag():
+    global _sp_store_edges, _sp_sel_geo
+
+    if not _sp_sel_geo:
+        _sp_finish()
+        return
+
+    geo = _sp_sel_geo[0]
+    check_run = cmds.getAttr(geo + ".firstRun")
+
+    modifiers = cmds.getModifiers()
+
+    vpX, vpY, _ = cmds.draggerContext(PR_SP_CTX, query=True, dragPoint=True)
+
+    pos_om  = om.MPoint()
+    dir_om  = om.MVector()
+    hitpoint = om.MFloatPoint()
+
+    try:
+        omui.M3dView.active3dView().viewToWorld(int(vpX), int(vpY), pos_om, dir_om)
+    except Exception:
+        return
+
+    pos2 = om.MFloatPoint(pos_om.x, pos_om.y, pos_om.z)
+
+    hit_face_ptr = om.MScriptUtil().asIntPtr()
+    hit_face_id  = None
+    final_x = final_y = final_z = 0.0
+
+    try:
+        sel_list = om.MSelectionList()
+        sel_list.add(geo)
+        dag_path = om.MDagPath()
+        sel_list.getDagPath(0, dag_path)
+        fn_mesh = om.MFnMesh(dag_path)
+
+        intersection = fn_mesh.closestIntersection(
+            om.MFloatPoint(pos2),
+            om.MFloatVector(dir_om),
+            None, None, False,
+            om.MSpace.kWorld,
+            99999, False, None,
+            hitpoint, None,
+            hit_face_ptr,
+            None, None, None
+        )
+
+        if not intersection:
+            return
+
+        final_x = hitpoint.x
+        final_y = hitpoint.y
+        final_z = hitpoint.z
+        hit_face_id = om.MScriptUtil(hit_face_ptr).asInt()
+
+    except Exception:
+        return
+
+    hit_face_name = geo + ".f[" + str(hit_face_id) + "]"
+    cv_list_raw = cmds.polyInfo(hit_face_name, fv=True)
+    if not cv_list_raw:
+        return
+
+    cv_list = cv_list_raw[0].split(":")[-1].split("  ")
+    most_close_cv_point = None
+    short_distance_check = 10000.0
+
+    for v in cv_list:
+        check_number = "".join([n for n in v.split("|")[-1] if n.isdigit()])
+        if len(check_number) > 0:
+            cv_point    = geo + ".vtx[" + str(check_number) + "]"
+            cv_position = cmds.pointPosition(cv_point)
+            check_cv_distance = math.sqrt(
+                (float(cv_position[0]) - final_x) ** 2 +
+                (float(cv_position[1]) - final_y) ** 2 +
+                (float(cv_position[2]) - final_z) ** 2
+            )
+            if check_cv_distance < short_distance_check:
+                short_distance_check = check_cv_distance
+                most_close_cv_point  = cv_point
+
+    if most_close_cv_point is None:
+        return
+
+    new_id = _sp_get_edge_number(most_close_cv_point)
+    cmds.setAttr(geo + ".nearest", new_id)
+
+    if check_run == 1:
+        check_close_to = cmds.getAttr(geo + ".nearest")
+        check_start    = cmds.getAttr(geo + ".start")
+        check_end      = cmds.getAttr(geo + ".end")
+
+        start_position = cmds.pointPosition(geo + ".vtx[" + str(check_start) + "]")
+        end_position   = cmds.pointPosition(geo + ".vtx[" + str(check_end)   + "]")
+        near_position  = cmds.pointPosition(geo + ".vtx[" + str(check_close_to) + "]")
+
+        dist_a = math.sqrt(
+            (float(near_position[0]) - start_position[0]) ** 2 +
+            (float(near_position[1]) - start_position[1]) ** 2 +
+            (float(near_position[2]) - start_position[2]) ** 2
+        )
+        dist_b = math.sqrt(
+            (float(near_position[0]) - end_position[0]) ** 2 +
+            (float(near_position[1]) - end_position[1]) ** 2 +
+            (float(near_position[2]) - end_position[2]) ** 2
+        )
+
+        if dist_a > dist_b:
+            cmds.setAttr(geo + ".end",   check_end)
+            cmds.setAttr(geo + ".start", check_start)
+        else:
+            cmds.setAttr(geo + ".end",   check_start)
+            cmds.setAttr(geo + ".start", check_end)
+
+    check_start   = cmds.getAttr(geo + ".start")
+    check_nearest = cmds.getAttr(geo + ".nearest")
+
+    sort_list = []
+    if modifiers == 4:
+        pa = geo + ".vtx[" + str(check_start) + "]"
+        pb = geo + ".vtx[" + str(check_nearest) + "]"
+        uva = cmds.polyListComponentConversion(pa, fv=True, tuv=True) or []
+        uvb = cmds.polyListComponentConversion(pb, fv=True, tuv=True) or []
+        if uva and uvb:
+            start_uv_id = _sp_get_edge_number(uva[0])
+            end_uv_id   = _sp_get_edge_number(uvb[0])
+            list_short  = cmds.polySelect(geo, q=True,
+                                          shortestEdgePathUV=(start_uv_id, end_uv_id))
+            if list_short:
+                sort_list = [geo + ".e[" + str(l) + "]" for l in list_short]
+    else:
+        list_short = cmds.polySelect(geo, q=True,
+                                     shortestEdgePath=(check_start, check_nearest))
+        if list_short:
+            sort_list = [geo + ".e[" + str(l) + "]" for l in list_short]
+
+    get_c = _sp_store_edges + sort_list
+
+    cmds.select(get_c)
+    _sp_ensure_creas_set()
+    try:
+        cmds.sets(geo + ".e[*]", remove=PR_SP_SET)
+    except Exception:
+        pass
+    if get_c:
+        cmds.sets(get_c, forceElement=PR_SP_SET)
+
+    cmds.refresh(cv=True, f=True)
+
+
+def _sp_release():
+    pass
+
+
+def _sp_start_interactive(geo, edge_list):
+    global _sp_store_edges, _sp_sel_geo, _sp_initial_list, _sp_ctx
+
+    _sp_store_edges = cmds.ls(sl=True, fl=True) or []
+    list_vtx = _sp_ordered_vertices_from_edges(_sp_store_edges)
+
+    if not list_vtx:
+        cmds.warning("[PR] Cannot order edge chain vertices.")
+        return
+
+    _sp_initial_list = list_vtx
+
+    start_id = _sp_get_edge_number(list_vtx[0])
+    end_id   = _sp_get_edge_number(list_vtx[-1])
+
+    cmds.setAttr(geo + ".start",    start_id)
+    cmds.setAttr(geo + ".end",      end_id)
+    cmds.setAttr(geo + ".firstRun", 0)
+
+    _sp_ensure_creas_set()
+    try:
+        cmds.sets(geo + ".e[*]", remove=PR_SP_SET)
+    except Exception:
+        pass
+    cmds.sets(_sp_store_edges, forceElement=PR_SP_SET)
+
+    cmds.polyOptions(dce=1)
+
+    if cmds.draggerContext(PR_SP_CTX, exists=True):
+        cmds.deleteUI(PR_SP_CTX)
+
+    cmds.draggerContext(
+        PR_SP_CTX,
+        pressCommand   = _sp_press,
+        releaseCommand = _sp_release,
+        dragCommand    = _sp_drag,
+        fnz            = _sp_finish,
+        name           = PR_SP_CTX,
+        cursor         = "crossHair",
+        undoMode       = "step"
+    )
+    cmds.setToolTo(PR_SP_CTX)
+
+
+def pr_shortest_path_select(use_uv=False):
+    global _sp_sel_geo, _sp_store_edges, _sp_initial_list, PR_SP_RUNNING
+
+    _sp_finish()
+    PR_SP_RUNNING = True
+
+    test_any_sel = cmds.ls(sl=True) or []
+    if not test_any_sel:
+        cmds.warning("[PR] Nothing selected.")
+        PR_SP_RUNNING = False
+        return 0
+
+    check_edge_sel  = cmds.filterExpand(sm=32) or []
+    check_other_sel = cmds.filterExpand(sm=(31, 34, 35)) or []
+
+    verts = cmds.filterExpand(cmds.ls(sl=True, fl=True), sm=31) or []
+    if len(verts) == 2 and not check_edge_sel:
+        mesh_a = verts[0].split(".")[0]
+        mesh_b = verts[1].split(".")[0]
+        if mesh_a != mesh_b:
+            cmds.warning("[PR] Both vertices must be on the same mesh.")
+            PR_SP_RUNNING = False
+            return 0
+
+        geo = mesh_a
+        id_a = _sp_get_edge_number(verts[0])
+        id_b = _sp_get_edge_number(verts[1])
+        result = cmds.polySelect(geo, q=True, shortestEdgePath=(id_a, id_b))
+        if result:
+            edges = [geo + ".e[" + str(e) + "]" for e in result]
+            cmds.select(edges, r=True)
+            try:
+                mel.eval('doMenuComponentSelectionExt("' + geo + '", "edge", 0);')
+            except Exception:
+                pass
+            cmds.select(edges, r=True)
+            PR_SP_RUNNING = False
+            return len(edges)
+        PR_SP_RUNNING = False
+        return 0
+
+    if len(check_edge_sel) == 2:
+        mesh_a = check_edge_sel[0].split(".")[0]
+        mesh_b = check_edge_sel[1].split(".")[0]
+        if mesh_a != mesh_b:
+            cmds.warning("[PR] Both edges must be on the same mesh.")
+            PR_SP_RUNNING = False
+            return 0
+
+        geo = mesh_a
+        e1_verts = cmds.ls(cmds.polyListComponentConversion(check_edge_sel[0], tv=True), fl=True) or []
+        e2_verts = cmds.ls(cmds.polyListComponentConversion(check_edge_sel[1], tv=True), fl=True) or []
+
+        best_path = []
+        for a in e1_verts:
+            for b in e2_verts:
+                result = cmds.polySelect(geo, q=True,
+                                         shortestEdgePath=(_sp_get_edge_number(a),
+                                                           _sp_get_edge_number(b)))
+                if result and (not best_path or len(result) < len(best_path)):
+                    best_path = result
+
+        if best_path:
+            edges = [geo + ".e[" + str(e) + "]" for e in best_path]
+            cmds.select(edges, r=True)
+            try:
+                mel.eval('doMenuComponentSelectionExt("' + geo + '", "edge", 0);')
+            except Exception:
+                pass
+            cmds.select(edges, r=True)
+            PR_SP_RUNNING = False
+            return len(edges)
+
+        cmds.warning("[PR] No shortest path found between selected edges.")
+        PR_SP_RUNNING = False
+        return 0
+
+    if check_edge_sel:
+        loop_grp = _sp_get_edge_loop_groups(check_edge_sel)
+        if len(loop_grp) != 1:
+            cmds.select(check_edge_sel)
+
+        list_vtx = _sp_ordered_vertices_from_edges(check_edge_sel)
+        if not list_vtx:
+            cmds.warning("[PR] Please select a simple open edge chain.")
+            PR_SP_RUNNING = False
+            return 0
+
+        check_poly = cmds.ls(hl=True) or []
+        if check_poly:
+            geo = check_poly[0]
+        else:
+            geo = check_edge_sel[0].split(".")[0]
+
+        _sp_sel_geo = [geo]
+
+        _sp_setup_attrs(geo)
+        cmds.setAttr(geo + ".firstRun", 0)
+
+        cmds.select(check_edge_sel, r=True)
+        try:
+            mel.eval('doMenuComponentSelectionExt("' + geo + '", "edge", 0);')
+        except Exception:
+            pass
+        cmds.select(check_edge_sel, r=True)
+
+        _sp_start_interactive(geo, check_edge_sel)
+        return len(check_edge_sel)
+
+    if check_other_sel:
+        check_poly = cmds.ls(hl=True) or []
+    else:
+        check_poly = cmds.ls(sl=True, fl=True, o=True) or []
+
+    if not check_poly:
+        cmds.warning("[PR] Select a mesh or an edge chain.")
+        PR_SP_RUNNING = False
+        return 0
+
+    geo = check_poly[0]
+    _sp_sel_geo = [geo]
+
+    _sp_setup_attrs(geo)
+
+    try:
+        mel.eval('doMenuComponentSelectionExt("' + geo + '", "edge", 0);')
+    except Exception:
+        pass
+    cmds.select(cl=True)
+
+    cmds.setAttr(geo + ".firstRun", 0)
+
+    _sp_ensure_creas_set()
+    try:
+        cmds.sets(geo + ".e[*]", remove=PR_SP_SET)
+    except Exception:
+        pass
+
+    _sp_store_edges = []
+    _sp_initial_list = []
+
+    if cmds.draggerContext(PR_SP_CTX, exists=True):
+        cmds.deleteUI(PR_SP_CTX)
+
+    cmds.draggerContext(
+        PR_SP_CTX,
+        pressCommand   = _sp_press_from_object,
+        releaseCommand = _sp_release,
+        dragCommand    = _sp_drag,
+        fnz            = _sp_finish,
+        name           = PR_SP_CTX,
+        cursor         = "crossHair",
+        undoMode       = "step"
+    )
+    cmds.setToolTo(PR_SP_CTX)
+
+    print("[PR] Shortest Path: click an edge to start, then drag. Ctrl = UV mode.")
+    return 0
+
+
+def _sp_press_from_object():
+    global _sp_store_edges, _sp_initial_list
+
+    if not _sp_sel_geo:
+        _sp_finish()
+        return
+
+    geo = _sp_sel_geo[0]
+    check_run = cmds.getAttr(geo + ".firstRun")
+
+    if check_run == 0:
+        cmds.setAttr(geo + ".firstRun", 1)
+        return
+
+    _sp_press()
+
+
+# =============================================================================
+# IDENTICAL MESH DETECTION
+# =============================================================================
+PR_IDENTICAL_EPSILON = 1e-6
+
+
+def pr_get_mesh_hash(mesh_transform, ignore_scale=False):
+    try:
+        shapes = cmds.listRelatives(mesh_transform, shapes=True, type="mesh", fullPath=True) or []
+        if not shapes:
+            return None
+
+        vtx_count  = cmds.polyEvaluate(mesh_transform, vertex=True)
+        edge_count = cmds.polyEvaluate(mesh_transform, edge=True)
+        face_count = cmds.polyEvaluate(mesh_transform, face=True)
+        area       = cmds.polyEvaluate(mesh_transform, worldArea=True)
+
+        bbox   = cmds.exactWorldBoundingBox(mesh_transform)
+        volume = (bbox[3]-bbox[0]) * (bbox[4]-bbox[1]) * (bbox[5]-bbox[2])
+
+        if ignore_scale and vtx_count > 0:
+            area   = area   / (vtx_count ** 0.5)        if area   != 0 else 0
+            volume = volume / (vtx_count ** (2.0/3.0))  if volume != 0 else 0
+
+        return (int(vtx_count), int(edge_count), int(face_count), float(area), float(volume))
+    except Exception:
+        return None
+
+
+def pr_compare_mesh_topology(mesh1, mesh2, ignore_scale=False):
+    h1 = pr_get_mesh_hash(mesh1, ignore_scale=ignore_scale)
+    h2 = pr_get_mesh_hash(mesh2, ignore_scale=ignore_scale)
+    if not h1 or not h2:
+        return False
+    return h1[0] == h2[0] and h1[1] == h2[1] and h1[2] == h2[2]
+
+
+def pr_compare_mesh_geometry(mesh1, mesh2, tolerance=0.01, ignore_scale=False):
+    h1 = pr_get_mesh_hash(mesh1, ignore_scale=ignore_scale)
+    h2 = pr_get_mesh_hash(mesh2, ignore_scale=ignore_scale)
+    if not h1 or not h2:
+        return False
+    if h1[0] != h2[0] or h1[1] != h2[1] or h1[2] != h2[2]:
+        return False
+    area1, area2 = abs(h1[3]), abs(h2[3])
+    if area1 > PR_IDENTICAL_EPSILON:
+        if abs(area1 - area2) / area1 > tolerance:
+            return False
+    vol1, vol2 = abs(h1[4]), abs(h2[4])
+    if vol1 > PR_IDENTICAL_EPSILON:
+        if abs(vol1 - vol2) / vol1 > tolerance:
+            return False
+    return True
+
+
+def pr_compare_mesh_exact(mesh1, mesh2, pos_tolerance=0.001, ignore_scale=False):
+    if not pr_compare_mesh_topology(mesh1, mesh2, ignore_scale=ignore_scale):
+        return False
+    try:
+        vtx1 = cmds.xform("{0}.vtx[*]".format(mesh1), q=True, ws=True, t=True)
+        vtx2 = cmds.xform("{0}.vtx[*]".format(mesh2), q=True, ws=True, t=True)
+        if len(vtx1) != len(vtx2):
+            return False
+        if ignore_scale:
+            bbox1  = cmds.exactWorldBoundingBox(mesh1)
+            bbox2  = cmds.exactWorldBoundingBox(mesh2)
+            size1  = max(bbox1[3]-bbox1[0], bbox1[4]-bbox1[1], bbox1[5]-bbox1[2])
+            size2  = max(bbox2[3]-bbox2[0], bbox2[4]-bbox2[1], bbox2[5]-bbox2[2])
+            if size1 < PR_IDENTICAL_EPSILON or size2 < PR_IDENTICAL_EPSILON:
+                return False
+            center1 = [(bbox1[i]+bbox1[i+3])/2.0 for i in range(3)]
+            center2 = [(bbox2[i]+bbox2[i+3])/2.0 for i in range(3)]
+            for i in range(0, len(vtx1), 3):
+                n1   = [(vtx1[i+j]-center1[j])/size1 for j in range(3)]
+                n2   = [(vtx2[i+j]-center2[j])/size2 for j in range(3)]
+                dist = math.sqrt(sum((n1[j]-n2[j])**2 for j in range(3)))
+                if dist > pos_tolerance:
+                    return False
+        else:
+            for i in range(0, len(vtx1), 3):
+                dist = math.sqrt(
+                    (vtx1[i]-vtx2[i])**2 +
+                    (vtx1[i+1]-vtx2[i+1])**2 +
+                    (vtx1[i+2]-vtx2[i+2])**2
+                )
+                if dist > pos_tolerance:
+                    return False
+        return True
+    except Exception:
+        return False
+
+
+def pr_get_mesh_material(mesh_transform):
+    try:
+        shapes = cmds.listRelatives(mesh_transform, shapes=True, type="mesh", fullPath=True) or []
+        if not shapes:
+            return None
+        sgs    = cmds.listConnections(shapes[0], type="shadingEngine") or []
+        if not sgs:
+            return None
+        shader = cmds.listConnections("{0}.surfaceShader".format(sgs[0]), source=True) or []
+        return shader[0] if shader else None
+    except Exception:
+        return None
+
+
+def pr_find_identical_meshes(method="geometry", tolerance=0.01, source_mesh=None,
+                             ignore_scale=True, filter_by_material=False, select_result=True):
+    cmds.undoInfo(openChunk=True)
+    try:
+        if source_mesh and cmds.objExists(source_mesh):
+            source = source_mesh
+        else:
+            sel = cmds.ls(selection=True, type="transform", long=True) or []
+            if not sel:
+                cmds.warning("[PR] Select a source mesh first.")
+                return []
+            source = sel[0]
+
+        if not cmds.listRelatives(source, shapes=True, type="mesh"):
+            cmds.warning("[PR] Selected object is not a mesh.")
+            return []
+
+        source_material = None
+        if filter_by_material:
+            source_material = pr_get_mesh_material(source)
+            if not source_material:
+                filter_by_material = False
+
+        all_transforms = cmds.ls(type="transform", long=True) or []
+        mesh_transforms = []
+        for t in all_transforms:
+            if cmds.listRelatives(t, shapes=True, type="mesh"):
+                if filter_by_material:
+                    if pr_get_mesh_material(t) == source_material:
+                        mesh_transforms.append(t)
+                else:
+                    mesh_transforms.append(t)
+
+        if not mesh_transforms:
+            cmds.warning("[PR] No meshes found in scene.")
+            return []
+
+        matches = [source]
+
+        cmds.progressWindow(
+            title="Find Identical Meshes",
+            progress=0,
+            status="Scanning...",
+            isInterruptable=True,
+            maxValue=len(mesh_transforms)
+        )
+
+        for i, mesh in enumerate(mesh_transforms):
+            if cmds.progressWindow(query=True, isCancelled=True):
+                break
+            cmds.progressWindow(edit=True, progress=i+1,
+                                status="{0}/{1}".format(i+1, len(mesh_transforms)))
+            if mesh == source:
+                continue
+            is_match = False
+            if method == "topology":
+                is_match = pr_compare_mesh_topology(source, mesh, ignore_scale=ignore_scale)
+            elif method == "geometry":
+                is_match = pr_compare_mesh_geometry(source, mesh, tolerance=tolerance, ignore_scale=ignore_scale)
+            elif method == "exact":
+                is_match = pr_compare_mesh_exact(source, mesh, pos_tolerance=tolerance, ignore_scale=ignore_scale)
+            if is_match:
+                matches.append(mesh)
+
+        try:
+            cmds.progressWindow(endProgress=True)
+        except Exception:
+            pass
+
+        if len(matches) > 1:
+            if select_result:
+                cmds.select(matches, r=True)
+            return matches
+
+        cmds.warning("[PR] No identical meshes found.")
+        return []
+
+    finally:
+        try:
+            cmds.progressWindow(endProgress=True)
+        except Exception:
+            pass
+        cmds.undoInfo(closeChunk=True)
+
+
+# =============================================================================
+# SELECT BY ANGLE
+# =============================================================================
+class PR_SelectByAngle:
+    _cached_mesh = None
+
+    @classmethod
+    def run(cls, angle, direction, both=False, plane_ref=None, plane_tol=0.001):
+        mesh = pr_get_mesh_from_selection()
+        if not mesh:
+            if cls._cached_mesh and cmds.objExists(cls._cached_mesh):
+                mesh = cls._cached_mesh
+            else:
+                return 0
+
+        cls._cached_mesh = mesh
+        pr_ensure_face_component_mode()
+
+        ref    = list(direction)
+        length = math.sqrt(sum(v**2 for v in ref))
+        if length < 1e-8:
+            cmds.select(clear=True)
+            return 0
+        ref = [v/length for v in ref]
+
+        cos_thresh = math.cos(math.radians(angle))
+        faces      = []
+
+        use_plane = False
+        p0 = pn = None
+        if plane_ref and isinstance(plane_ref, (tuple, list)) and len(plane_ref) == 2:
+            p0, pn = plane_ref
+            if p0 and pn:
+                pnl = math.sqrt(pn[0]**2 + pn[1]**2 + pn[2]**2)
+                if pnl > 1e-8 and plane_tol is not None and plane_tol > 0.0:
+                    pn = [pn[0]/pnl, pn[1]/pnl, pn[2]/pnl]
+                    use_plane = True
+
+        dag, fn = pr_get_dagpath_and_fnmesh(mesh)
+        if fn:
+            face_count = fn.numPolygons
+            for i in range(face_count):
+                n  = fn.getPolygonNormal(i, om2.MSpace.kWorld)
+                nl = n.length()
+                if nl < 1e-8:
+                    continue
+                n    = n / nl
+                dotv = (n.x*ref[0]) + (n.y*ref[1]) + (n.z*ref[2])
+                if both:
+                    dotv = abs(dotv)
+                if dotv >= cos_thresh:
+                    if use_plane:
+                        vids   = fn.getPolygonVertices(i)
+                        max_d  = 0.0
+                        for vid in vids:
+                            pt = fn.getPoint(vid, om2.MSpace.kWorld)
+                            dx = pt.x - p0[0]
+                            dy = pt.y - p0[1]
+                            dz = pt.z - p0[2]
+                            d  = abs((dx*pn[0]) + (dy*pn[1]) + (dz*pn[2]))
+                            if d > max_d:
+                                max_d = d
+                                if max_d > plane_tol:
+                                    break
+                        if max_d > plane_tol:
+                            continue
+                    faces.append("{}.f[{}]".format(mesh, i))
+            cmds.select(faces if faces else [], replace=True)
+            pr_force_selection_faces_only()
+            return len(cmds.ls(sl=True, fl=True) or [])
+
+        face_count = cmds.polyEvaluate(mesh, face=True)
+        for i in range(face_count):
+            face = "{}.f[{}]".format(mesh, i)
+            info = cmds.polyInfo(face, faceNormals=True)
+            if not info:
+                continue
+            p = info[0].split()
+            n = [float(p[2]), float(p[3]), float(p[4])]
+            nl = math.sqrt(sum(v**2 for v in n))
+            if nl < 1e-8:
+                continue
+            n    = [v/nl for v in n]
+            dotv = sum(n[j]*ref[j] for j in range(3))
+            if both:
+                dotv = abs(dotv)
+            if dotv >= cos_thresh:
+                faces.append(face)
+
+        cmds.select(faces if faces else [], replace=True)
+        pr_force_selection_faces_only()
+        return len(cmds.ls(sl=True, fl=True) or [])
+
+    @staticmethod
+    def get_face_normal_and_plane_ref():
+        sel = cmds.ls(sl=True, fl=True) or []
+        face_comp = None
+        for item in sel:
+            if ".f[" in item:
+                face_comp = item
+                break
+        if not face_comp:
+            return None, None
+
+        mesh = face_comp.split(".")[0]
+        fi   = pr_parse_face_index(face_comp)
+        if fi is None:
+            return None, None
+
+        dag, fn = pr_get_dagpath_and_fnmesh(mesh)
+        if fn:
+            n  = fn.getPolygonNormal(fi, om2.MSpace.kWorld)
+            nl = n.length()
+            if nl < 1e-8:
+                return None, None
+            n      = n / nl
+            normal = [n.x, n.y, n.z]
+            vids   = fn.getPolygonVertices(fi)
+            if not vids:
+                return normal, (None, None)
+            sx = sy = sz = 0.0
+            for vid in vids:
+                pt = fn.getPoint(vid, om2.MSpace.kWorld)
+                sx += pt.x; sy += pt.y; sz += pt.z
+            inv = 1.0 / float(len(vids))
+            p0  = [sx*inv, sy*inv, sz*inv]
+            return normal, (p0, normal)
+
+        info = cmds.polyInfo(face_comp, faceNormals=True)
+        if info:
+            p  = info[0].split()
+            n  = [float(p[2]), float(p[3]), float(p[4])]
+            nl = math.sqrt(sum(v**2 for v in n))
+            if nl > 1e-8:
+                n = [v/nl for v in n]
+            return n, (None, None)
+        return None, None
+
+
+# =============================================================================
+# SELECT INNER FACES
+# =============================================================================
+class PR_SelectInnerFaces:
+    @staticmethod
+    def _get_edge_loops_from_selection(edges):
+        if not edges:
+            return []
+        edges_flat      = cmds.ls(edges, fl=True)
+        edges_remaining = set(edges_flat)
+        loops           = []
+        while edges_remaining:
+            start_edge   = next(iter(edges_remaining))
+            current_loop = set([start_edge])
+            to_process   = [start_edge]
+            while to_process:
+                edge  = to_process.pop()
+                verts = cmds.polyListComponentConversion(edge, fromEdge=True, toVertex=True)
+                verts = cmds.ls(verts, fl=True) or []
+                for vert in verts:
+                    connected_edges = cmds.polyListComponentConversion(vert, fromVertex=True, toEdge=True)
+                    connected_edges = cmds.ls(connected_edges, fl=True) or []
+                    for ce in connected_edges:
+                        if ce in edges_remaining and ce not in current_loop:
+                            current_loop.add(ce)
+                            to_process.append(ce)
+            loops.append(list(current_loop))
+            edges_remaining -= current_loop
+        return loops
+
+    @classmethod
+    def run(cls):
+        selected_edges = cmds.filterExpand(sm=32) or []
+        if not selected_edges:
+            cmds.warning("[PR] Select one or two edge loop(s).")
+            return 0
+
+        cmds.undoInfo(openChunk=True, infinity=True)
+        try:
+            all_edges = cmds.ls(sl=True, fl=True) or []
+            sel_obj   = cmds.ls(sl=True, fl=True, o=True) or []
+            if not sel_obj:
+                cmds.warning("[PR] Cannot determine object.")
+                return 0
+
+            loops     = cls._get_edge_loops_from_selection(all_edges)
+            num_loops = len(loops)
+
+            if num_loops == 0:
+                cmds.warning("[PR] No edge loop detected.")
+                return 0
+            elif num_loops > 2:
+                cmds.warning("[PR] {} edge loops detected. Maximum 2 supported.".format(num_loops))
+                return 0
+
+            cmds.select(all_edges, r=True)
+            cmds.ConvertSelectionToFaces()
+            adjacent_faces = cmds.ls(sl=True, fl=True) or []
+            if not adjacent_faces:
+                cmds.warning("[PR] Cannot convert to faces.")
+                return 0
+
+            cmds.polyProjection(
+                sel_obj[0], ch=1, type="Planar", ibd=False, cm=True,
+                uvSetName="PRSelect_EdgeLoop_UV", kir=True, md="c"
+            )
+            cmds.polyUVSet(cuv=True, uvSet="PRSelect_EdgeLoop_UV")
+            cmds.select(all_edges, r=True)
+            cmds.polyMapCut()
+
+            if num_loops == 1:
+                cmds.select(adjacent_faces[0], r=True)
+                cmds.SelectMeshUVShell()
+            else:
+                cmds.select(loops[0], r=True)
+                cmds.ConvertSelectionToFaces()
+                faces_loop1 = set(cmds.ls(sl=True, fl=True) or [])
+                cmds.select(loops[1], r=True)
+                cmds.ConvertSelectionToFaces()
+                faces_loop2  = set(cmds.ls(sl=True, fl=True) or [])
+                common_faces = faces_loop1 & faces_loop2
+                if common_faces:
+                    cmds.select(list(common_faces)[0], r=True)
+                    cmds.SelectMeshUVShell()
+                else:
+                    cmds.select(list(faces_loop1)[0], r=True)
+                    cmds.SelectMeshUVShell()
+
+            inner_faces = cmds.ls(sl=True, fl=True) or []
+            inner_faces = [f for f in inner_faces if ".f[" in f]
+
+            try:
+                cmds.polyUVSet(d=True, uvSet="PRSelect_EdgeLoop_UV")
+            except Exception:
+                pass
+
+            if inner_faces:
+                cmds.select(inner_faces, r=True)
+                pr_force_selection_faces_only()
+
+            return len(cmds.ls(sl=True, fl=True) or [])
+
+        except Exception as e:
+            cmds.warning("[PR] Inner faces selection failed: {}".format(e))
+            return 0
+        finally:
+            cmds.undoInfo(closeChunk=True)
+
+
+# =============================================================================
+# EDGE & FACE TOOLS
+# =============================================================================
+class PR_SelectTools:
+    saved_slots = [None, None, None]
+
+    identical_method          = "geometry"
+    identical_ignore_scale    = True
+    identical_filter_material = False
+    identical_tolerance       = 0.01
+
+    @staticmethod
+    def _parse_edge_component(edge_comp):
+        m = re.search(r"^(.*)\.e\[(\d+)\]$", edge_comp)
+        if not m:
+            return None, None
+        return m.group(1), int(m.group(2))
+
+    @staticmethod
+    def _build_edge_components(mesh, edge_ids):
+        return ["{}.e[{}]".format(mesh, i) for i in edge_ids]
+
+    @classmethod
+    def _get_edge_path_indices(cls, mesh, start_idx, end_idx, mode):
+        candidates = []
+        if mode in (1, 3):
+            try:
+                loop_path = cmds.polySelect(mesh, edgeLoopPath=(start_idx, end_idx), noSelection=True) or []
+                if loop_path:
+                    candidates.append(loop_path)
+            except Exception:
+                pass
+        if mode in (2, 3):
+            try:
+                ring_path = cmds.polySelect(mesh, edgeRingPath=(start_idx, end_idx), noSelection=True) or []
+                if ring_path:
+                    candidates.append(ring_path)
+            except Exception:
+                pass
+        if not candidates:
+            return []
+        candidates.sort(key=len)
+        return candidates[0]
+
+    @classmethod
+    def _apply_pattern_on_path(cls, mesh, path_indices, skip, invert=False):
+        if not path_indices:
+            cmds.select(clear=True)
+            return 0
+        skip   = max(2, int(skip))
+        picked = []
+        for i, edge_id in enumerate(path_indices):
+            if i % skip == 0:
+                picked.append(edge_id)
+        if path_indices[-1] not in picked:
+            picked.append(path_indices[-1])
+        seen    = set()
+        ordered = []
+        for e in picked:
+            if e not in seen:
+                seen.add(e)
+                ordered.append(e)
+        comps = cls._build_edge_components(mesh, ordered)
+        if invert:
+            edge_count = cmds.polyEvaluate(mesh, edge=True)
+            all_edges  = ["{}.e[{}]".format(mesh, i) for i in range(edge_count)]
+            final_sel  = [e for e in all_edges if e not in comps]
+            cmds.select(final_sel, r=True)
+            return len(final_sel)
+        cmds.select(comps, r=True)
+        return len(comps)
+
+    @classmethod
+    def select_pattern(cls, skip, mode, invert=False):
+        sel   = cmds.ls(sl=True, fl=True) or []
+        edges = [s for s in sel if ".e[" in s]
+        if not edges:
+            cmds.warning("[PR] Select edges.")
+            return 0
+
+        if len(edges) == 2:
+            mesh_a, edge_a = cls._parse_edge_component(edges[0])
+            mesh_b, edge_b = cls._parse_edge_component(edges[1])
+            if mesh_a is None or mesh_b is None or edge_a is None or edge_b is None:
+                cmds.warning("[PR] Invalid edge selection.")
+                return 0
+            if mesh_a != mesh_b:
+                cmds.warning("[PR] Please select 2 edges on the same mesh.")
+                return 0
+            path_indices = cls._get_edge_path_indices(mesh_a, edge_a, edge_b, mode)
+            if not path_indices:
+                cmds.warning("[PR] No valid loop/ring path found between selected edges.")
+                return 0
+            return cls._apply_pattern_on_path(mesh_a, path_indices, skip, invert=invert)
+
+        if mode in [1, 3]:
+            mel.eval('polySelectEdgesEveryN "edgeLoop" {}'.format(skip))
+        if mode in [2, 3]:
+            mel.eval('polySelectEdgesEveryN "edgeRing" {}'.format(skip))
+        if invert:
+            cmds.InvertSelection()
+        return len(cmds.ls(sl=True, fl=True) or [])
+
+    @classmethod
+    def select_all_hard_edges(cls):
+        sel = cmds.ls(sl=True, o=True) or []
+        if not sel:
+            cmds.warning("[PR] Select a mesh object first.")
+            return 0
+        cmds.selectMode(component=True)
+        cmds.selectType(edge=True)
+        edge_count = cmds.polyEvaluate(sel[0], edge=True)
+        cmds.select("{}.e[0:{}]".format(sel[0], edge_count-1), r=True)
+        cmds.polySelectConstraint(m=3, t=0x8000, angle=True, anglebound=(30, 180))
+        cmds.polySelectConstraint(disable=True)
+        return len(cmds.ls(sl=True, fl=True) or [])
+
+    @classmethod
+    def select_smoothing_hard_edges(cls):
+        mesh = pr_get_mesh_from_selection()
+        if not mesh:
+            cmds.warning("[PR] Select a mesh object first.")
+            return 0
+
+        try:
+            cmds.selectMode(component=True)
+            cmds.selectType(edge=True)
+        except Exception:
+            pass
+
+        hard_edges = []
+
+        if om2:
+            try:
+                sel_list = om2.MSelectionList()
+                sel_list.add(mesh)
+                dag = sel_list.getDagPath(0)
+                if dag.apiType() != om2.MFn.kMesh:
+                    dag.extendToShape()
+
+                it = om2.MItMeshEdge(dag)
+                while not it.isDone():
+                    try:
+                        is_smooth = it.isSmooth()
+                    except TypeError:
+                        is_smooth = it.isSmooth
+
+                    if not is_smooth:
+                        hard_edges.append("{}.e[{}]".format(mesh, it.index()))
+                    it.next()
+
+            except Exception as e:
+                cmds.warning("[PR] Smoothing hard edges (om2) failed: {}".format(e))
+                hard_edges = []
+
+        if not hard_edges:
+            try:
+                edge_count = cmds.polyEvaluate(mesh, edge=True)
+                if edge_count and edge_count > 0:
+                    cmds.select("{}.e[0:{}]".format(mesh, edge_count - 1), r=True)
+                    cmds.polySelectConstraint(m=3, t=0x8000, smoothness=1)
+                    cmds.polySelectConstraint(disable=True)
+                    hard_edges = cmds.ls(sl=True, fl=True) or []
+            except Exception as e:
+                try:
+                    cmds.polySelectConstraint(disable=True)
+                except Exception:
+                    pass
+                cmds.warning("[PR] Smoothing hard edges fallback failed: {}".format(e))
+                hard_edges = []
+
+        if hard_edges:
+            cmds.select(hard_edges, r=True)
+            return len(hard_edges)
+
+        cmds.select(clear=True)
+        cmds.warning("[PR] No smoothing hard edges found.")
+        return 0
+
+    @classmethod
+    def select_border_edges(cls):
+        mesh = pr_get_mesh_from_selection()
+        if not mesh:
+            cmds.warning("[PR] Select a mesh object first.")
+            return 0
+        try:
+            cmds.selectMode(component=True)
+            cmds.selectType(edge=True)
+        except Exception:
+            pass
+        edges = []
+        if om2:
+            try:
+                sel_list = om2.MSelectionList()
+                sel_list.add(mesh)
+                dag = sel_list.getDagPath(0)
+                if dag.apiType() != om2.MFn.kMesh:
+                    dag.extendToShape()
+                it = om2.MItMeshEdge(dag)
+                while not it.isDone():
+                    if it.onBoundary():
+                        edges.append("{}.e[{}]".format(mesh, it.index()))
+                    it.next()
+            except Exception as e:
+                cmds.warning("[PR] Border edges (om2) failed: {}".format(e))
+                edges = []
+        if not edges:
+            try:
+                edge_count = cmds.polyEvaluate(mesh, edge=True)
+                if edge_count and edge_count > 0:
+                    cmds.select("{}.e[0:{}]".format(mesh, edge_count-1), r=True)
+                    cmds.polySelectConstraint(m=3, t=0x8000, where=1)
+                    cmds.polySelectConstraint(disable=True)
+                    edges = cmds.ls(sl=True, fl=True) or []
+            except Exception as e:
+                try:
+                    cmds.polySelectConstraint(disable=True)
+                except Exception:
+                    pass
+                cmds.warning("[PR] Border edges (constraint) failed: {}".format(e))
+                edges = []
+        if edges:
+            cmds.select(edges, r=True)
+            return len(edges)
+        cmds.select(clear=True)
+        cmds.warning("[PR] No border edges found.")
+        return 0
+
+    @classmethod
+    def select_hard_edges(cls, min_a, max_a):
+        sel = cmds.ls(sl=True, o=True) or []
+        if not sel:
+            return 0
+        mesh = sel[0]
+        try:
+            cmds.selectMode(component=True)
+            cmds.selectType(edge=True)
+        except Exception:
+            pass
+        edge_count = cmds.polyEvaluate(mesh, edge=True)
+        if not edge_count:
+            return 0
+        try:
+            cmds.select("{}.e[0:{}]".format(mesh, edge_count-1), r=True)
+            cmds.polySelectConstraint(m=3, t=0x8000, angle=True, anglebound=(min_a, max_a))
+            result = cmds.ls(sl=True, fl=True) or []
+        finally:
+            try:
+                cmds.polySelectConstraint(disable=True)
+            except Exception:
+                pass
+        return len(result)
+
+    @classmethod
+    def select_creased(cls):
+        sel = cmds.ls(sl=True) or []
+        if not sel:
+            return 0
+        if cmds.objectType(sel[0]) != "transform":
+            cmds.selectMode(object=True)
+            sel = cmds.ls(sl=True, o=True) or []
+        cmds.selectMode(component=True)
+        cmds.selectType(edge=True)
+        edge_count = cmds.polyEvaluate(sel[0], edge=True)
+        cmds.select("{}.e[0:{}]".format(sel[0], edge_count-1), r=True)
+        all_e   = cmds.filterExpand(cmds.polyListComponentConversion(te=True), sm=32, expand=True) or []
+        creased = []
+        for e in all_e:
+            try:
+                if cmds.polyCrease(e, q=True, v=True)[0] > 0:
+                    creased.append(e)
+            except Exception:
+                pass
+        if creased:
+            cmds.select(creased, r=True)
+            return len(creased)
+        cmds.select(clear=True)
+        return 0
+
+    @classmethod
+    def select_contiguous_by_angle(cls, max_angle=60):
+        pr_ensure_face_component_mode()
+        sel         = cmds.ls(sl=True, fl=True) or []
+        start_faces = [s for s in sel if ".f[" in s]
+        if not start_faces:
+            cmds.warning("[PR] Select a face first.")
+            return 0
+
+        mesh = start_faces[0].split(".")[0]
+
+        def get_normal(face):
+            fi = pr_parse_face_index(face)
+            if fi is None:
+                return None
+            dag, fn = pr_get_dagpath_and_fnmesh(mesh)
+            if fn:
+                n  = fn.getPolygonNormal(fi, om2.MSpace.kWorld)
+                nl = n.length()
+                if nl < 1e-8:
+                    return None
+                n = n / nl
+                return [n.x, n.y, n.z]
+            info = cmds.polyInfo(face, faceNormals=True)
+            if not info:
+                return None
+            p  = info[0].split()
+            n  = [float(p[2]), float(p[3]), float(p[4])]
+            nl = math.sqrt(sum(v**2 for v in n))
+            if nl < 1e-8:
+                return None
+            return [v/nl for v in n]
+
+        def angle_between(n1, n2):
+            dotv = sum(n1[i]*n2[i] for i in range(3))
+            dotv = max(-1.0, min(1.0, dotv))
+            return math.degrees(math.acos(dotv))
+
+        selected = set(start_faces)
+        to_check = list(start_faces)
+        checked  = set()
+
+        while to_check:
+            face        = to_check.pop(0)
+            if face in checked:
+                continue
+            checked.add(face)
+            face_normal = get_normal(face)
+            if not face_normal:
+                continue
+            edges     = cmds.polyListComponentConversion(face, fromFace=True, toEdge=True)
+            edges     = cmds.ls(edges, fl=True) or []
+            for edge in edges:
+                adj_faces = cmds.polyListComponentConversion(edge, fromEdge=True, toFace=True)
+                adj_faces = cmds.ls(adj_faces, fl=True) or []
+                for adj in adj_faces:
+                    if adj in selected or adj in checked:
+                        continue
+                    adj_normal = get_normal(adj)
+                    if not adj_normal:
+                        continue
+                    if angle_between(face_normal, adj_normal) <= max_angle:
+                        selected.add(adj)
+                        to_check.append(adj)
+
+        if selected:
+            cmds.select(list(selected), replace=True)
+            pr_force_selection_faces_only()
+        return len(cmds.ls(sl=True, fl=True) or [])
+
+    @classmethod
+    def select_similar_faces(cls):
+        pr_ensure_face_component_mode()
+        sel   = cmds.ls(sl=True, fl=True) or []
+        faces = [s for s in sel if ".f[" in s]
+        if not faces:
+            cmds.warning("[PR] Select a face first.")
+            return 0
+
+        mesh = faces[0].split(".")[0]
+        fi   = pr_parse_face_index(faces[0])
+        if fi is None:
+            return 0
+
+        ref     = None
+        dag, fn = pr_get_dagpath_and_fnmesh(mesh)
+        if fn:
+            n  = fn.getPolygonNormal(fi, om2.MSpace.kWorld)
+            nl = n.length()
+            if nl < 1e-8:
+                return 0
+            n   = n / nl
+            ref = [n.x, n.y, n.z]
+        else:
+            info = cmds.polyInfo(faces[0], faceNormals=True)
+            if not info:
+                return 0
+            p  = info[0].split()
+            ref = [float(p[2]), float(p[3]), float(p[4])]
+            rl  = math.sqrt(sum(v**2 for v in ref))
+            if rl < 1e-8:
+                return 0
+            ref = [v/rl for v in ref]
+
+        cos_thresh = math.cos(math.radians(15))
+        similar    = []
+
+        if fn:
+            for i in range(fn.numPolygons):
+                n  = fn.getPolygonNormal(i, om2.MSpace.kWorld)
+                nl = n.length()
+                if nl < 1e-8:
+                    continue
+                n    = n / nl
+                dotv = (n.x*ref[0]) + (n.y*ref[1]) + (n.z*ref[2])
+                if dotv >= cos_thresh:
+                    similar.append("{}.f[{}]".format(mesh, i))
+        else:
+            for i in range(cmds.polyEvaluate(mesh, face=True)):
+                face = "{}.f[{}]".format(mesh, i)
+                info = cmds.polyInfo(face, faceNormals=True)
+                if not info:
+                    continue
+                p  = info[0].split()
+                n  = [float(p[2]), float(p[3]), float(p[4])]
+                nl = math.sqrt(sum(v**2 for v in n))
+                if nl < 1e-8:
+                    continue
+                n    = [v/nl for v in n]
+                dotv = sum(n[j]*ref[j] for j in range(3))
+                if dotv >= cos_thresh:
+                    similar.append(face)
+
+        if similar:
+            cmds.select(similar, replace=True)
+            pr_force_selection_faces_only()
+        return len(cmds.ls(sl=True, fl=True) or [])
+
+    @classmethod
+    def select_identical_meshes(cls):
+        return len(pr_find_identical_meshes(
+            method=cls.identical_method,
+            tolerance=cls.identical_tolerance,
+            source_mesh=None,
+            ignore_scale=cls.identical_ignore_scale,
+            filter_by_material=cls.identical_filter_material,
+            select_result=True
+        ))
+
+    @classmethod
+    def set_identical_method(cls, method):
+        cls.identical_method = method
+
+    @classmethod
+    def set_identical_ignore_scale(cls, state):
+        cls.identical_ignore_scale = bool(state)
+
+    @classmethod
+    def set_identical_filter_material(cls, state):
+        cls.identical_filter_material = bool(state)
+
+    @classmethod
+    def set_identical_tolerance(cls, value):
+        cls.identical_tolerance = max(0.0001, float(value))
+
+    @classmethod
+    def select_ngons(cls):
+        sel = cmds.ls(sl=True, o=True) or []
+        if not sel:
+            cmds.warning("[PR] Select an object.")
+            return 0
+        pr_ensure_face_component_mode()
+        face_count = cmds.polyEvaluate(sel[0], face=True)
+        cmds.select("{}.f[0:{}]".format(sel[0], face_count-1), r=True)
+        cmds.polySelectConstraint(m=3, t=0x0008, size=3)
+        cmds.polySelectConstraint(disable=True)
+        pr_force_selection_faces_only()
+        return len(cmds.ls(sl=True, fl=True) or [])
+
+    @classmethod
+    def select_tris(cls):
+        sel = cmds.ls(sl=True, o=True) or []
+        if not sel:
+            cmds.warning("[PR] Select an object.")
+            return 0
+        pr_ensure_face_component_mode()
+        face_count = cmds.polyEvaluate(sel[0], face=True)
+        cmds.select("{}.f[0:{}]".format(sel[0], face_count-1), r=True)
+        cmds.polySelectConstraint(m=3, t=0x0008, size=1)
+        cmds.polySelectConstraint(disable=True)
+        pr_force_selection_faces_only()
+        return len(cmds.ls(sl=True, fl=True) or [])
+
+    @classmethod
+    def unlock_normals(cls):
+        try:
+            cmds.polyNormalPerVertex(ufn=True)
+        except Exception:
+            try:
+                mel.eval("UnlockNormals;")
+            except Exception:
+                pass
+
+    @classmethod
+    def save(cls, slot):
+        sel = cmds.ls(sl=True, fl=True) or []
+        if sel:
+            cls.saved_slots[slot] = sel
+            return len(sel)
+        return 0
+
+    @classmethod
+    def load(cls, slot):
+        if cls.saved_slots[slot]:
+            valid = [s for s in cls.saved_slots[slot] if cmds.objExists(s.split(".")[0])]
+            if valid:
+                cmds.select(valid, replace=True)
+                return True
+        return False
+
+    @classmethod
+    def shortest_path_select(cls, use_uv=False):
+        return pr_shortest_path_select(use_uv=use_uv)
+
+
+# =============================================================================
+# UI WIDGETS
+# =============================================================================
+class PR_ColorBtn(QtWidgets.QPushButton):
+    def __init__(self, text="", tip="", bg="#2d2d2d", fg="#a0a0a0", w=32, h=26, parent=None):
+        super(PR_ColorBtn, self).__init__(text, parent)
+        self.setFixedSize(w, h)
+        self.setToolTip(tip)
+        self._bg      = bg
+        self._fg      = fg
+        self._base_bg = bg
+        self._base_fg = fg
+        self._update()
+
+    def _update(self):
+        self.setStyleSheet("""
+            QPushButton {{
+                background-color: {bg}; color: {fg};
+                border: 1px solid #222; border-radius: 3px;
+                font-weight: bold; font-size: 10px;
+            }}
+            QPushButton:hover {{ background-color: {bgh}; border-color: #444; }}
+            QPushButton:pressed {{ background-color: #1a1a1a; }}
+        """.format(bg=self._bg, fg=self._fg,
+                   bgh=QtGui.QColor(self._bg).lighter(125).name()))
+
+    def set_active(self, active):
+        self._bg = "#3a4a3a" if active else self._base_bg
+        self._fg = "#a0ffa0" if active else self._base_fg
+        self._update()
+
+    def set_has_data(self, has_data):
+        if has_data:
+            self._bg = "#2d3d2d"
+            self._fg = "#80c080"
+        else:
+            self._bg = self._base_bg
+            self._fg = "#505050"
+        self._update()
+
+
+class PR_Toast(QtWidgets.QLabel):
+    def __init__(self, parent=None):
+        super(PR_Toast, self).__init__(parent)
+        self.setAlignment(QtCore.Qt.AlignCenter)
+        self.setStyleSheet("""
+            background-color: #3a5a3a; color: #c0ffc0;
+            border-radius: 4px; padding: 6px 12px;
+            font-size: 10px; font-weight: bold;
+        """)
+        self.setWindowFlags(QtCore.Qt.ToolTip | QtCore.Qt.FramelessWindowHint)
+        self._timer = QtCore.QTimer()
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self.hide)
+
+    def show_msg(self, text, ms=800, pos=None):
+        self.setText(text)
+        self.adjustSize()
+        if pos:
+            self.move(pos)
+        self.show()
+        self.raise_()
+        self._timer.start(ms)
+
+
+# =============================================================================
+# MAIN UI
+# =============================================================================
+class PRSelectToolsUI(QtWidgets.QDialog):
+    _instance = None
+
+    def __init__(self, parent=get_maya_main_window()):
+        super(PRSelectToolsUI, self).__init__(parent)
+        self.setObjectName("PRSelectToolsWindow")
+        self.setWindowTitle("PR Select Tools v3.9c")
+        self.setMinimumWidth(290)
+        self.setWindowFlags(QtCore.Qt.Window | QtCore.Qt.WindowCloseButtonHint)
+        self.setAttribute(QtCore.Qt.WA_DeleteOnClose)
+
+        self._direction = [0, 1, 0]
+        self._skip      = 2
+        self._edge_mode = 2
+        self._live      = True
+        self._plane_ref = None
+
+        self._timer = QtCore.QTimer()
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(80)
+        self._timer.timeout.connect(self._do_live_select)
+
+        self._toast = PR_Toast()
+        self._build_ui()
+        self._apply_style()
+        self._connect()
+
+    def _label(self, text):
+        lbl = QtWidgets.QLabel(text)
+        lbl.setStyleSheet(
+            "color:#454545; font-size:9px; font-weight:bold;"
+            " padding:2px 0 1px 0; border-bottom:1px solid #282828;"
+        )
+        return lbl
+
+    def _build_ui(self):
+        m = QtWidgets.QVBoxLayout(self)
+        m.setContentsMargins(6, 6, 6, 6)
+        m.setSpacing(4)
+
+        # ANGLE SELECT
+        m.addWidget(self._label("ANGLE SELECT"))
+        d_row = QtWidgets.QHBoxLayout()
+        d_row.setSpacing(2)
+        self.dir_btns = {}
+        for txt, vec, col in [
+            ("+Y", [0,1,0],  "#4a9eff"),
+            ("-Y", [0,-1,0], "#4a9eff"),
+            ("+X", [1,0,0],  "#ff6060"),
+            ("-X", [-1,0,0], "#ff6060"),
+            ("+Z", [0,0,1],  "#50c850"),
+            ("-Z", [0,0,-1], "#50c850"),
+        ]:
+            btn = PR_ColorBtn(txt, txt, "#2a2a2a", col, 32, 24)
+            self.dir_btns[txt] = (btn, vec)
+            d_row.addWidget(btn)
+        self.cam_btn = PR_ColorBtn("CAM", "Select faces visible from camera",
+                                   "#2a2a2a", "#e0a030", 38, 24)
+        d_row.addWidget(self.cam_btn)
+        m.addLayout(d_row)
+
+        a_row = QtWidgets.QHBoxLayout()
+        a_row.setSpacing(3)
+        self.angle_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.angle_slider.setRange(0, 180)
+        self.angle_slider.setValue(30)
+        self.angle_spin = QtWidgets.QSpinBox()
+        self.angle_spin.setRange(0, 180)
+        self.angle_spin.setValue(30)
+        self.angle_spin.setSuffix("°")
+        self.angle_spin.setFixedWidth(45)
+        self.angle_spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+        self.face_btn  = PR_ColorBtn("?", "From face normal", "#2a2a2a", "#ffaa00", 24, 22)
+        self.live_chk  = QtWidgets.QCheckBox("Live")
+        self.live_chk.setChecked(True)
+        self.sel_angle_btn = PR_ColorBtn("SEL", "Select faces by angle",
+                                         "#1e5030", "#80ff80", 34, 22)
+        a_row.addWidget(self.angle_slider)
+        a_row.addWidget(self.angle_spin)
+        a_row.addWidget(self.face_btn)
+        a_row.addWidget(self.live_chk)
+        a_row.addWidget(self.sel_angle_btn)
+        m.addLayout(a_row)
+
+        r_row = QtWidgets.QHBoxLayout()
+        r_row.setSpacing(6)
+        self.both_chk  = QtWidgets.QCheckBox("Both")
+        self.plane_chk = QtWidgets.QCheckBox("Plane")
+        self.plane_tol = QtWidgets.QDoubleSpinBox()
+        self.plane_tol.setRange(0.000001, 999999.0)
+        self.plane_tol.setDecimals(6)
+        self.plane_tol.setSingleStep(0.001)
+        self.plane_tol.setValue(0.001)
+        self.plane_tol.setFixedWidth(62)
+        tol_lbl = QtWidgets.QLabel("Tol")
+        tol_lbl.setStyleSheet("color:#606060; font-size:9px;")
+        r_row.addWidget(self.both_chk)
+        r_row.addWidget(self.plane_chk)
+        r_row.addWidget(tol_lbl)
+        r_row.addWidget(self.plane_tol)
+        r_row.addStretch()
+        m.addLayout(r_row)
+
+        # FACES
+        m.addWidget(self._label("FACES"))
+        f_row = QtWidgets.QHBoxLayout()
+        f_row.setSpacing(2)
+        self.inner_btn     = PR_ColorBtn("Inner",    "Select faces inside edge loop(s)", "#1e3a50", "#70b0ff", 42, 24)
+        self.contiguous_btn= PR_ColorBtn("Contig",   "Grow by similar normals (60°)",    "#1e3a50", "#70b0ff", 48, 24)
+        self.similar_btn   = PR_ColorBtn("Similar",  "Find identical meshes",             "#1e3a50", "#70b0ff", 48, 24)
+        self.shortest_btn  = PR_ColorBtn("Shortest", "Shortest path tool",                "#1e3a50", "#70b0ff", 54, 24)
+        self.similar_btn.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        f_row.addWidget(self.inner_btn)
+        f_row.addWidget(self.contiguous_btn)
+        f_row.addWidget(self.similar_btn)
+        f_row.addWidget(self.shortest_btn)
+        m.addLayout(f_row)
+
+        f_row2 = QtWidgets.QHBoxLayout()
+        f_row2.setSpacing(3)
+        self.ngon_btn = PR_ColorBtn("N-Gon", "Select n-gons",     "#50301e", "#ffaa70", 46, 24)
+        self.tri_btn  = PR_ColorBtn("Tri",   "Select triangles",  "#50301e", "#ffaa70", 32, 24)
+        f_row2.addWidget(self.ngon_btn)
+        f_row2.addWidget(self.tri_btn)
+        f_row2.addStretch()
+        m.addLayout(f_row2)
+
+        # EDGE PATTERN
+        m.addWidget(self._label("EDGE PATTERN"))
+        e_row = QtWidgets.QHBoxLayout()
+        e_row.setSpacing(2)
+        self.skip_btns = {}
+        for n in [2, 3, 4]:
+            btn = PR_ColorBtn(str(n), "Skip {}".format(n), "#2a2a2a", "#909090", 26, 22)
+            self.skip_btns[n] = btn
+            e_row.addWidget(btn)
+        self.skip_btns[2].set_active(True)
+        self.skip_spin = QtWidgets.QSpinBox()
+        self.skip_spin.setRange(2, 50)
+        self.skip_spin.setValue(2)
+        self.skip_spin.setFixedWidth(38)
+        self.skip_spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+        e_row.addWidget(self.skip_spin)
+        e_row.addSpacing(4)
+        self.loop_btn = PR_ColorBtn("L", "Loop", "#2a2a2a", "#909090", 22, 22)
+        self.ring_btn = PR_ColorBtn("R", "Ring", "#2a2a2a", "#909090", 22, 22)
+        self.both_btn = PR_ColorBtn("B", "Both", "#2a2a2a", "#909090", 22, 22)
+        self.ring_btn.set_active(True)
+        e_row.addWidget(self.loop_btn)
+        e_row.addWidget(self.ring_btn)
+        e_row.addWidget(self.both_btn)
+        self.edge_inv_chk = QtWidgets.QCheckBox("Inv")
+        e_row.addWidget(self.edge_inv_chk)
+        self.edge_sel_btn = PR_ColorBtn("SEL", "Apply pattern", "#1e5030", "#80ff80", 32, 22)
+        e_row.addWidget(self.edge_sel_btn)
+        m.addLayout(e_row)
+
+        # HARD EDGES
+        m.addWidget(self._label("HARD EDGES"))
+        h_quick_row = QtWidgets.QHBoxLayout()
+        h_quick_row.setSpacing(3)
+        self.hard_edges_btn  = PR_ColorBtn("By Angle", "Select hard edges by angle",
+                                           "#1e5030", "#80ff80", 70, 24)
+        self.smooth_hard_btn = PR_ColorBtn("Hard/Smooth", "Select real hard edges from smoothing",
+                                           "#1e5030", "#80ff80", 85, 24)
+        self.border_edges_btn= PR_ColorBtn("Border", "Select border/open edges",
+                                           "#1e5030", "#80ff80", 55, 24)
+        h_quick_row.addWidget(self.hard_edges_btn)
+        h_quick_row.addWidget(self.smooth_hard_btn)
+        h_quick_row.addWidget(self.border_edges_btn)
+        h_quick_row.addStretch()
+        m.addLayout(h_quick_row)
+
+        h_row = QtWidgets.QHBoxLayout()
+        h_row.setSpacing(3)
+        self.min_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.min_slider.setRange(0, 180)
+        self.min_slider.setValue(30)
+        self.min_slider.setFixedWidth(55)
+        self.min_spin = QtWidgets.QSpinBox()
+        self.min_spin.setRange(0, 180)
+        self.min_spin.setValue(30)
+        self.min_spin.setSuffix("°")
+        self.min_spin.setFixedWidth(42)
+        self.min_spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+        self.max_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.max_slider.setRange(0, 180)
+        self.max_slider.setValue(150)
+        self.max_slider.setFixedWidth(55)
+        self.max_spin = QtWidgets.QSpinBox()
+        self.max_spin.setRange(0, 180)
+        self.max_spin.setValue(150)
+        self.max_spin.setSuffix("°")
+        self.max_spin.setFixedWidth(42)
+        self.max_spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+        h_row.addWidget(self.min_slider)
+        h_row.addWidget(self.min_spin)
+        h_row.addWidget(self.max_slider)
+        h_row.addWidget(self.max_spin)
+        m.addLayout(h_row)
+
+        h_row2 = QtWidgets.QHBoxLayout()
+        h_row2.setSpacing(3)
+        self.crease_btn = PR_ColorBtn("Creased",  "Select creased edges",  "#2a2a2a", "#ffa040", 55, 22)
+        self.unlock_btn = PR_ColorBtn("Unlock N", "Unlock normals",        "#2a2a2a", "#909090", 55, 22)
+        h_row2.addWidget(self.crease_btn)
+        h_row2.addWidget(self.unlock_btn)
+        h_row2.addStretch()
+        m.addLayout(h_row2)
+
+        # SELECTION
+        m.addWidget(self._label("SELECTION"))
+        s_row = QtWidgets.QHBoxLayout()
+        s_row.setSpacing(2)
+        self.save_btns = []
+        self.load_btns = []
+        for i in range(3):
+            save_btn = PR_ColorBtn("S{}".format(i+1), "Save slot {}".format(i+1), "#2a2a2a", "#505050", 26, 22)
+            load_btn = PR_ColorBtn("L{}".format(i+1), "Load slot {}".format(i+1), "#2a2a2a", "#505050", 26, 22)
+            self.save_btns.append(save_btn)
+            self.load_btns.append(load_btn)
+            s_row.addWidget(save_btn)
+            s_row.addWidget(load_btn)
+            if i < 2:
+                s_row.addSpacing(2)
+        m.addLayout(s_row)
+
+        s_row2 = QtWidgets.QHBoxLayout()
+        s_row2.setSpacing(3)
+        self.invert_btn = PR_ColorBtn("Invert", "Invert selection", "#2a2a2a", "#909090", 45, 22)
+        self.set_btn    = PR_ColorBtn("Set+", "Create set (right-click = delete)",
+                                      "#2a2a2a", "#c0c060", 42, 22)
+        self.set_btn.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        s_row2.addWidget(self.invert_btn)
+        s_row2.addWidget(self.set_btn)
+        s_row2.addStretch()
+        m.addLayout(s_row2)
+        m.addStretch()
+
+    def _apply_style(self):
+        self.setStyleSheet("""
+            QDialog { background-color: #1a1a1a; }
+            QSlider::groove:horizontal { height:3px; background:#252525; border-radius:1px; }
+            QSlider::handle:horizontal { background:#5a8a5a; width:10px; margin:-3px 0; border-radius:5px; }
+            QSlider::handle:horizontal:hover { background:#70a070; }
+            QSlider::sub-page:horizontal { background:#3a5a3a; border-radius:1px; }
+            QSpinBox, QDoubleSpinBox { background:#252525; color:#a0a0a0; border:1px solid #303030;
+                border-radius:2px; padding:1px; font-size:10px; }
+            QCheckBox { color:#606060; font-size:9px; spacing:2px; }
+            QCheckBox::indicator { width:11px; height:11px; border-radius:2px;
+                border:1px solid #3a3a3a; background:#252525; }
+            QCheckBox::indicator:checked { background:#5a8a5a; border-color:#70a070; }
+            QMenu { background:#252525; color:#a0a0a0; border:1px solid #303030; }
+            QMenu::item:selected { background:#3a3a3a; }
+            QMenu::separator { height:1px; background:#333; margin:4px 8px; }
+        """)
+
+    def _connect(self):
+        for _txt, (btn, vec) in self.dir_btns.items():
+            btn.clicked.connect(lambda checked=False, v=vec: self._set_dir(v))
+        self.cam_btn.clicked.connect(self._use_camera)
+        self.angle_slider.valueChanged.connect(self.angle_spin.setValue)
+        self.angle_spin.valueChanged.connect(self.angle_slider.setValue)
+        self.angle_slider.valueChanged.connect(self._on_angle_change)
+        self.face_btn.clicked.connect(self._use_face)
+        self.live_chk.stateChanged.connect(
+            lambda s: setattr(self, "_live", s == QtCore.Qt.Checked))
+        self.sel_angle_btn.clicked.connect(self._select_angle)
+        self.both_chk.stateChanged.connect(lambda s: self._trigger_live_if_needed())
+        self.plane_chk.stateChanged.connect(lambda s: self._trigger_live_if_needed())
+        self.plane_tol.valueChanged.connect(lambda v: self._trigger_live_if_needed())
+
+        self.inner_btn.clicked.connect(PR_SelectInnerFaces.run)
+        self.contiguous_btn.clicked.connect(lambda: PR_SelectTools.select_contiguous_by_angle(60))
+        self.similar_btn.clicked.connect(lambda: self._run_identical_mesh_search())
+        self.similar_btn.customContextMenuRequested.connect(self._show_similar_context_menu)
+        self.shortest_btn.clicked.connect(lambda: PR_SelectTools.shortest_path_select())
+        self.ngon_btn.clicked.connect(PR_SelectTools.select_ngons)
+        self.tri_btn.clicked.connect(PR_SelectTools.select_tris)
+
+        for n, btn in self.skip_btns.items():
+            btn.clicked.connect(lambda checked=False, val=n: self._set_skip(val))
+        self.skip_spin.valueChanged.connect(lambda v: setattr(self, "_skip", v))
+        self.loop_btn.clicked.connect(lambda: self._set_mode(1))
+        self.ring_btn.clicked.connect(lambda: self._set_mode(2))
+        self.both_btn.clicked.connect(lambda: self._set_mode(3))
+        self.edge_sel_btn.clicked.connect(self._select_pattern)
+
+        self.hard_edges_btn.clicked.connect(PR_SelectTools.select_all_hard_edges)
+        self.smooth_hard_btn.clicked.connect(PR_SelectTools.select_smoothing_hard_edges)
+        self.border_edges_btn.clicked.connect(PR_SelectTools.select_border_edges)
+        self.min_slider.valueChanged.connect(self.min_spin.setValue)
+        self.min_spin.valueChanged.connect(self.min_slider.setValue)
+        self.max_slider.valueChanged.connect(self.max_spin.setValue)
+        self.max_spin.valueChanged.connect(self.max_slider.setValue)
+        self.min_spin.valueChanged.connect(self._update_hard)
+        self.max_spin.valueChanged.connect(self._update_hard)
+        self.crease_btn.clicked.connect(PR_SelectTools.select_creased)
+        self.unlock_btn.clicked.connect(PR_SelectTools.unlock_normals)
+
+        for i, (save_btn, load_btn) in enumerate(zip(self.save_btns, self.load_btns)):
+            save_btn.clicked.connect(lambda checked=False, slot=i: self._save_slot(slot))
+            load_btn.clicked.connect(lambda checked=False, slot=i: self._load_slot(slot))
+
+        self.invert_btn.clicked.connect(lambda: cmds.InvertSelection())
+        self.set_btn.clicked.connect(self._create_set)
+        self.set_btn.customContextMenuRequested.connect(self._delete_set_menu)
+
+    def _trigger_live_if_needed(self):
+        if PR_SP_RUNNING:
+            return
+        if self._live:
+            self._timer.start()
+
+    def _set_dir(self, vec):
+        self._direction = vec
+        if self._live:
+            self._do_live_select()
+
+    def _use_camera(self):
+        self._direction = pr_get_camera_direction()
+        if self._live:
+            self._do_live_select()
+
+    def _on_angle_change(self):
+        if self._live:
+            self._timer.start()
+
+    def _do_live_select(self):
+        if PR_SP_RUNNING:
+            return
+        PR_SelectByAngle.run(
+            self.angle_spin.value(),
+            self._direction,
+            both=self.both_chk.isChecked(),
+            plane_ref=self._plane_ref if self.plane_chk.isChecked() else None,
+            plane_tol=self.plane_tol.value(),
+        )
+
+    def _use_face(self):
+        normal, plane_ref = PR_SelectByAngle.get_face_normal_and_plane_ref()
+        if normal:
+            self._direction = normal
+            self._plane_ref = plane_ref if plane_ref and plane_ref[0] and plane_ref[1] else None
+            if self._live:
+                self._do_live_select()
+
+    def _select_angle(self):
+        PR_SelectByAngle.run(
+            self.angle_spin.value(),
+            self._direction,
+            both=self.both_chk.isChecked(),
+            plane_ref=self._plane_ref if self.plane_chk.isChecked() else None,
+            plane_tol=self.plane_tol.value(),
+        )
+
+    def _set_skip(self, n):
+        self._skip = n
+        self.skip_spin.setValue(n)
+        for val, btn in self.skip_btns.items():
+            btn.set_active(val == n)
+
+    def _set_mode(self, mode):
+        self._edge_mode = mode
+        self.loop_btn.set_active(mode == 1)
+        self.ring_btn.set_active(mode == 2)
+        self.both_btn.set_active(mode == 3)
+
+    def _select_pattern(self):
+        PR_SelectTools.select_pattern(self._skip, self._edge_mode, self.edge_inv_chk.isChecked())
+
+    def _update_hard(self):
+        PR_SelectTools.select_hard_edges(self.min_spin.value(), self.max_spin.value())
+
+    def _run_identical_mesh_search(self):
+        count = PR_SelectTools.select_identical_meshes()
+        if count > 0:
+            msg = "{} identical".format(count)
+            pos = self.similar_btn.mapToGlobal(QtCore.QPoint(0, -25))
+            self._toast.show_msg(msg, 900, pos)
+
+    def _show_similar_context_menu(self, pos):
+        menu = QtWidgets.QMenu(self)
+        method_menu = menu.addMenu("Method")
+        ag = QtGui.QActionGroup(menu)
+        ag.setExclusive(True)
+        for key, label in [("topology","Topology"),("geometry","Geometry"),("exact","Exact")]:
+            act = method_menu.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(PR_SelectTools.identical_method == key)
+            act.triggered.connect(lambda checked=False, m=key: PR_SelectTools.set_identical_method(m))
+            ag.addAction(act)
+        menu.addSeparator()
+        ignore_act = menu.addAction("Ignore Scale")
+        ignore_act.setCheckable(True)
+        ignore_act.setChecked(PR_SelectTools.identical_ignore_scale)
+        ignore_act.toggled.connect(lambda state: PR_SelectTools.set_identical_ignore_scale(state))
+        mat_act = menu.addAction("Same Material Only")
+        mat_act.setCheckable(True)
+        mat_act.setChecked(PR_SelectTools.identical_filter_material)
+        mat_act.toggled.connect(lambda state: PR_SelectTools.set_identical_filter_material(state))
+        menu.addSeparator()
+        tol_act = menu.addAction("Set Tolerance...")
+        tol_act.triggered.connect(self._prompt_identical_tolerance)
+        run_act = menu.addAction("Run Similar")
+        run_act.triggered.connect(self._run_identical_mesh_search)
+        gp = self.similar_btn.mapToGlobal(pos)
+        if hasattr(menu, "exec"):
+            menu.exec(gp)
+        else:
+            menu.exec_(gp)
+
+    def _prompt_identical_tolerance(self):
+        value, ok = QtWidgets.QInputDialog.getDouble(
+            self, "Similar Tolerance", "Tolerance:",
+            PR_SelectTools.identical_tolerance, 0.0001, 10.0, 4)
+        if ok:
+            PR_SelectTools.set_identical_tolerance(value)
+
+    def _save_slot(self, slot):
+        count = PR_SelectTools.save(slot)
+        if count > 0:
+            self.save_btns[slot].set_has_data(True)
+            self.load_btns[slot].set_has_data(True)
+            pos = self.save_btns[slot].mapToGlobal(QtCore.QPoint(0, -25))
+            self._toast.show_msg("{}".format(count), 700, pos)
+
+    def _load_slot(self, slot):
+        if PR_SelectTools.load(slot):
+            pos = self.load_btns[slot].mapToGlobal(QtCore.QPoint(0, -25))
+            self._toast.show_msg("Loaded", 500, pos)
+
+    def _create_set(self):
+        sel = cmds.ls(sl=True, fl=True) or []
+        if not sel:
+            return
+        result = cmds.promptDialog(
+            title="Create Set", message="Name:",
+            button=["OK","Cancel"], defaultButton="OK",
+            cancelButton="Cancel"
+        )
+        if result == "OK":
+            name = cmds.promptDialog(q=True, text=True)
+            if name:
+                cmds.sets(sel, name=name)
+
+    def _delete_set_menu(self, pos):
+        menu = QtWidgets.QMenu(self)
+        menu.setStyleSheet(
+            "QMenu { background-color: #2a2a2a; color: #a0a0a0; }"
+            " QMenu::item:selected { background-color: #3a3a3a; }"
+        )
+        all_sets = cmds.ls(type="objectSet") or []
+        user_sets = [
+            s for s in all_sets
+            if not s.startswith("default")
+            and ":" not in s
+            and not s.startswith("initial")
+            and s not in ["initialParticleSE", "initialShadingGroup"]
+        ]
+        if user_sets:
+            for s in user_sets[:20]:
+                action = menu.addAction("Delete " + s)
+                action.triggered.connect(lambda checked=False, name=s: cmds.delete(name))
+        else:
+            menu.addAction("No sets").setEnabled(False)
+        gp = self.set_btn.mapToGlobal(pos)
+        if hasattr(menu, "exec"):
+            menu.exec(gp)
+        else:
+            menu.exec_(gp)
+
+    @classmethod
+    def show_ui(cls):
+        if cls._instance:
+            try:
+                cls._instance.close()
+                cls._instance.deleteLater()
+            except Exception:
+                pass
+        cls._instance = cls()
+        cls._instance.show()
+        return cls._instance
+
+
+# =============================================================================
+# ENTRY POINT
+# =============================================================================
+def show_ui():
+    return PRSelectToolsUI.show_ui()
+
+
+if __name__ == "__main__":
+    show_ui()

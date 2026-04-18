@@ -52,6 +52,13 @@ def compute_normal_vector(pts):
     return (nx / length, ny / length, nz / length)
 
 
+def detect_normal_vector(curve_transform):
+    pts = get_cvs_world(curve_transform)
+    if len(pts) < 3:
+        return (0.0, 1.0, 0.0)
+    return compute_normal_vector(pts)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -243,7 +250,7 @@ def _run_boolean_internal(operation_str):
 
     # Vecteur normal reel de la curve A (Newell)
     pts_a = get_cvs_world(curve_a)
-    normal_vec = compute_normal_vector(pts_a)
+    normal_vec = detect_normal_vector(curve_a)
     nx, ny, nz = normal_vec
     print("[Boolean NURBS] Vecteur normal : ({:.3f}, {:.3f}, {:.3f})".format(nx, ny, nz))
 

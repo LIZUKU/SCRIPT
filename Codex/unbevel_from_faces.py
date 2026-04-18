@@ -556,100 +556,54 @@ def _split_group_by_support_signature(dag_path: om.MDagPath, face_ids: Set[int])
 def _split_group_by_support_sections(
     dag_path: om.MDagPath,
     face_ids: Set[int],
-    angle_fallback_deg: float = 18.0,
+    angle_fallback_deg: float = 35.0,
 ) -> List[Set[int]]:
     """
-    Topology-first segmentation.
+    Section-aware segmentation.
 
-    Each selected face gets a support section signature from boundary contact
-    (which outside support region(s) it touches). Connected faces are split if
-    those section signatures differ. If signatures are missing/ambiguous, fall
-    back to local face-normal angle.
+    Build a face graph for the selected group, cut adjacency links when local
+    section/support topology changes, then rebuild connected components.
     """
     selected = set(face_ids)
     if not selected:
         return []
+    if len(selected) <= 2:
+        return [selected]
 
-    edge_it = om.MItMeshEdge(dag_path)
-    poly_it = om.MItMeshPolygon(dag_path)
-
-    # boundary edge -> outside neighbors
-    boundary_outside: Dict[int, Set[int]] = {}
-    face_boundary_edges: Dict[int, List[int]] = {}
-
-    for fid in selected:
-        if not _safe_set_face(poly_it, fid):
-            continue
-        try:
-            eids = poly_it.getEdges()
-        except Exception:
-            continue
-
-        local_boundary_edges = []
-        for eid in eids:
-            if not _safe_set_edge(edge_it, eid):
-                continue
-            try:
-                conn = set(edge_it.getConnectedFaces())
-            except Exception:
-                continue
-
-            outside = conn - selected
-            if not outside:
-                continue
-
-            local_boundary_edges.append(eid)
-            boundary_outside.setdefault(eid, set()).update(outside)
-
-        if local_boundary_edges:
-            face_boundary_edges[fid] = local_boundary_edges
-
-    if not boundary_outside:
+    outside_face_to_region = _build_outside_support_regions(dag_path, selected)
+    edge_to_chain, _ = _build_boundary_edge_chains(dag_path, selected)
+    if not edge_to_chain:
         return _maybe_split_closed_loop_by_face_normals(dag_path, selected)
 
-    # Build support regions from outside faces.
-    support_regions = _build_outside_support_regions(dag_path, boundary_outside)
-    if not support_regions:
-        return _maybe_split_closed_loop_by_face_normals(dag_path, selected)
-
-    outside_to_region: Dict[int, int] = {}
-    for ridx, region in enumerate(support_regions):
-        for ofid in region:
-            outside_to_region[ofid] = ridx
-
-    face_signatures: Dict[int, FrozenSet[int]] = {}
+    face_signatures: Dict[int, dict] = {}
     for fid in selected:
-        rset = set()
-        for eid in face_boundary_edges.get(fid, []):
-            for ofid in boundary_outside.get(eid, set()):
-                rid = outside_to_region.get(ofid)
-                if rid is not None:
-                    rset.add(rid)
-        face_signatures[fid] = frozenset(rset)
+        face_signatures[fid] = _build_face_section_signature(
+            dag_path,
+            fid,
+            selected,
+            edge_to_chain,
+            outside_face_to_region,
+        )
 
-    face_normals: Dict[int, om.MVector] = {}
+    adjacency: Dict[int, List[int]] = {fid: [] for fid in selected}
     for fid in selected:
-        n = _face_normal(dag_path, fid)
-        if n is not None and n.length() > 1e-8:
-            n.normalize()
-            face_normals[fid] = n
+        for nb in _face_connected_selected_neighbors(dag_path, fid, selected):
+            if nb < fid:
+                continue
+            cut = _should_cut_between_faces(
+                dag_path,
+                fid,
+                nb,
+                face_signatures[fid],
+                face_signatures[nb],
+                angle_threshold_deg=angle_fallback_deg,
+            )
+            if not cut:
+                adjacency[fid].append(nb)
+                adjacency[nb].append(fid)
 
-    def is_compatible(a: int, b: int) -> bool:
-        sa = face_signatures.get(a, frozenset())
-        sb = face_signatures.get(b, frozenset())
-
-        # Hard section rule: if both have section ids and they differ => cut.
-        if sa and sb and sa != sb:
-            return False
-        if sa == sb:
-            return True
-
-        # If one side is missing section info (interior-like), use angle fallback.
-        na = face_normals.get(a)
-        nb = face_normals.get(b)
-        if na is None or nb is None:
-            return True
-        return _angle_deg(na, nb) <= angle_fallback_deg
+    if not any(adjacency.values()):
+        return [selected]
 
     groups: List[Set[int]] = []
     remaining = set(selected)
@@ -667,42 +621,38 @@ def _split_group_by_support_sections(
             remaining.remove(fid)
             chunk.add(fid)
 
-            for nb in _face_connected_selected_neighbors(dag_path, fid, selected):
-                if nb in remaining and is_compatible(fid, nb):
+            for nb in adjacency.get(fid, []):
+                if nb in remaining:
                     queue.append(nb)
 
         if chunk:
             groups.append(chunk)
 
+    groups = _merge_tiny_section_groups(dag_path, groups, face_signatures)
     return groups if groups else [selected]
 
 
 def _build_outside_support_regions(
     dag_path: om.MDagPath,
-    boundary_outside: Dict[int, Set[int]],
-    normal_threshold_deg: float = 28.0,
-) -> List[Set[int]]:
+    selected_faces: Set[int],
+) -> Dict[int, int]:
     """
-    Group outside support faces into regions.
-    Regions are connected components with similar normals, which helps separate
-    different topological supports even when they are coplanar-ish.
+    Build topological outside support regions.
+    Region id is based on connected components in the mesh *outside* selection.
     """
-    outside_faces = set()
-    for neigh in boundary_outside.values():
-        outside_faces.update(neigh)
+    poly_it = om.MItMeshPolygon(dag_path)
+    try:
+        face_count = poly_it.count()
+    except Exception:
+        return {}
 
+    outside_faces = set(range(face_count)) - set(selected_faces)
     if not outside_faces:
-        return []
+        return {}
 
-    normals: Dict[int, om.MVector] = {}
-    for fid in outside_faces:
-        n = _face_normal(dag_path, fid)
-        if n is not None and n.length() > 1e-8:
-            n.normalize()
-            normals[fid] = n
-
+    face_to_region: Dict[int, int] = {}
     remaining = set(outside_faces)
-    regions: List[Set[int]] = []
+    region_id = 0
 
     while remaining:
         seed = next(iter(remaining))
@@ -717,23 +667,221 @@ def _build_outside_support_regions(
             remaining.remove(fid)
             comp.add(fid)
 
-            for nb in _face_connected_selected_neighbors(dag_path, fid, outside_faces):
-                if nb not in remaining:
-                    continue
-
-                n1 = normals.get(fid)
-                n2 = normals.get(nb)
-                if n1 is None or n2 is None:
-                    queue.append(nb)
-                    continue
-
-                if _angle_deg(n1, n2) <= normal_threshold_deg:
+            poly_it2 = om.MItMeshPolygon(dag_path)
+            if not _safe_set_face(poly_it2, fid):
+                continue
+            for nb in poly_it2.getConnectedFaces():
+                if nb in remaining:
                     queue.append(nb)
 
         if comp:
-            regions.append(comp)
+            for ofid in comp:
+                face_to_region[ofid] = region_id
+            region_id += 1
 
-    return regions
+    return face_to_region
+
+
+def _build_boundary_edge_chains(
+    dag_path: om.MDagPath,
+    selected_faces: Set[int],
+) -> Tuple[Dict[int, int], List[Set[int]]]:
+    selected = set(selected_faces)
+    edge_it = om.MItMeshEdge(dag_path)
+    poly_it = om.MItMeshPolygon(dag_path)
+
+    boundary_edges: Set[int] = set()
+
+    for fid in selected:
+        if not _safe_set_face(poly_it, fid):
+            continue
+        for eid in poly_it.getEdges():
+            if not _safe_set_edge(edge_it, eid):
+                continue
+            connected_faces = set(edge_it.getConnectedFaces())
+            inside = connected_faces.intersection(selected)
+            outside = connected_faces - selected
+            if inside and outside:
+                boundary_edges.add(eid)
+
+    if not boundary_edges:
+        return {}, []
+
+    edge_to_vertices: Dict[int, Set[int]] = {}
+    for eid in boundary_edges:
+        if not _safe_set_edge(edge_it, eid):
+            continue
+        edge_to_vertices[eid] = {edge_it.vertexId(0), edge_it.vertexId(1)}
+
+    edge_to_chain: Dict[int, int] = {}
+    chains: List[Set[int]] = []
+    remaining = set(edge_to_vertices.keys())
+
+    while remaining:
+        seed = next(iter(remaining))
+        stack = [seed]
+        chain = set()
+
+        while stack:
+            eid = stack.pop()
+            if eid not in remaining:
+                continue
+
+            remaining.remove(eid)
+            chain.add(eid)
+            ev = edge_to_vertices[eid]
+
+            for other in list(remaining):
+                if ev.intersection(edge_to_vertices[other]):
+                    stack.append(other)
+
+        if chain:
+            cid = len(chains)
+            chains.append(chain)
+            for eid in chain:
+                edge_to_chain[eid] = cid
+
+    return edge_to_chain, chains
+
+
+def _build_face_section_signature(
+    dag_path: om.MDagPath,
+    fid: int,
+    selected_faces: Set[int],
+    edge_to_chain: Dict[int, int],
+    outside_face_to_region: Dict[int, int],
+) -> dict:
+    selected = set(selected_faces)
+    poly_it = om.MItMeshPolygon(dag_path)
+    edge_it = om.MItMeshEdge(dag_path)
+
+    if not _safe_set_face(poly_it, fid):
+        return {"boundary_count": 0, "chain_ids": tuple(), "region_ids": tuple()}
+
+    infos = []
+    for eid in poly_it.getEdges():
+        if not _safe_set_edge(edge_it, eid):
+            continue
+        connected_faces = set(edge_it.getConnectedFaces())
+        outside = sorted(f for f in connected_faces if f not in selected)
+        if not outside:
+            continue
+
+        chain_id = edge_to_chain.get(eid, -1)
+        region_ids = sorted(
+            set(outside_face_to_region[ofid] for ofid in outside if ofid in outside_face_to_region)
+        )
+        region_id = region_ids[0] if region_ids else -1
+        infos.append((chain_id, region_id))
+
+    infos.sort()
+    return {
+        "boundary_count": len(infos),
+        "chain_ids": tuple(x[0] for x in infos),
+        "region_ids": tuple(x[1] for x in infos),
+    }
+
+
+def _should_cut_between_faces(
+    dag_path: om.MDagPath,
+    f1: int,
+    f2: int,
+    sig1: dict,
+    sig2: dict,
+    angle_threshold_deg: float = 35.0,
+) -> bool:
+    # Strong topological/section cuts first.
+    if sig1["boundary_count"] != sig2["boundary_count"]:
+        return True
+    if sig1["region_ids"] != sig2["region_ids"]:
+        return True
+    if sig1["chain_ids"] != sig2["chain_ids"]:
+        return True
+
+    # Angle as fallback only.
+    d1 = _estimate_face_flow_direction(dag_path, f1)
+    d2 = _estimate_face_flow_direction(dag_path, f2)
+    if d1 is not None and d2 is not None:
+        if _angle_deg(d1, d2) > angle_threshold_deg:
+            return True
+    return False
+
+
+def _estimate_face_flow_direction(dag_path: om.MDagPath, fid: int) -> Optional[om.MVector]:
+    poly_it = om.MItMeshPolygon(dag_path)
+    if not _safe_set_face(poly_it, fid):
+        return None
+    try:
+        verts = poly_it.getPoints(om.MSpace.kObject)
+    except Exception:
+        return None
+    if len(verts) < 2:
+        return None
+    axis = _principal_axis(list(verts))
+    if axis.length() < 1e-8:
+        return None
+    axis.normalize()
+    return axis
+
+
+def _merge_tiny_section_groups(
+    dag_path: om.MDagPath,
+    groups: List[Set[int]],
+    face_signatures: Dict[int, dict],
+    tiny_size: int = 1,
+) -> List[Set[int]]:
+    if len(groups) <= 1:
+        return groups
+
+    big_groups = [set(g) for g in groups if len(g) > tiny_size]
+    small_groups = [set(g) for g in groups if len(g) <= tiny_size]
+
+    if not big_groups or not small_groups:
+        return groups
+
+    all_faces = set().union(*groups)
+
+    def dominant_signature(group: Set[int]) -> Tuple[int, Tuple[int, ...], Tuple[int, ...]]:
+        freq: Dict[Tuple[int, Tuple[int, ...], Tuple[int, ...]], int] = {}
+        for fid in group:
+            sig = face_signatures.get(fid, {})
+            key = (
+                int(sig.get("boundary_count", 0)),
+                tuple(sig.get("chain_ids", tuple())),
+                tuple(sig.get("region_ids", tuple())),
+            )
+            freq[key] = freq.get(key, 0) + 1
+        if not freq:
+            return 0, tuple(), tuple()
+        return max(freq.items(), key=lambda x: x[1])[0]
+
+    big_sigs = [dominant_signature(g) for g in big_groups]
+
+    for small in small_groups:
+        best_idx = None
+        best_score = None
+        s_sig = dominant_signature(small)
+
+        for i, big in enumerate(big_groups):
+            shared_border = 0
+            for fid in small:
+                for nb in _face_connected_selected_neighbors(dag_path, fid, all_faces):
+                    if nb in big:
+                        shared_border += 1
+
+            same_sig = 1 if s_sig == big_sigs[i] else 0
+            score = (same_sig, shared_border, len(big))
+            if best_score is None or score > best_score:
+                best_score = score
+                best_idx = i
+
+        if best_idx is not None:
+            big_groups[best_idx].update(small)
+        else:
+            big_groups.append(set(small))
+            big_sigs.append(s_sig)
+
+    return big_groups
 
 
 def _merge_oversegmented_groups(

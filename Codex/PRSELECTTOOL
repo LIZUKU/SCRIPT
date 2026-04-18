@@ -117,13 +117,6 @@ def pr_parse_face_index(comp):
     return int(m.group(1))
 
 
-def pr_parse_edge_index(comp):
-    m = re.search(r"\.e\[(\d+)\]", comp)
-    if not m:
-        return None
-    return int(m.group(1))
-
-
 def pr_get_dagpath_and_fnmesh(mesh_transform):
     if not om2:
         return None, None
@@ -137,84 +130,6 @@ def pr_get_dagpath_and_fnmesh(mesh_transform):
         return dag, fn
     except Exception:
         return None, None
-
-
-def pr_get_selection_scope(mesh, target, source_selection=None):
-    """
-    Convert current/component selection to a stable scope for one mesh.
-    target: "faces" or "edges"
-    Returns:
-      - None => no explicit component scope (object mode / whole mesh behavior)
-      - list[str] => deduplicated components on the mesh
-    """
-    if target not in ("faces", "edges"):
-        return None
-    if not mesh or not cmds.objExists(mesh):
-        return None
-
-    sel = source_selection if source_selection is not None else (cmds.ls(sl=True, fl=True, long=True) or [])
-    if not sel:
-        return None
-
-    mesh_long = cmds.ls(mesh, long=True) or [mesh]
-    mesh_long = mesh_long[0]
-    shape_paths = cmds.listRelatives(mesh_long, shapes=True, fullPath=True) or []
-    mesh_shapes = set([s for s in shape_paths if cmds.nodeType(s) == "mesh"])
-
-    mesh_items = []
-    has_component_on_mesh = False
-    for item in sel:
-        if "." in item:
-            base = item.split(".")[0]
-            base_long = cmds.ls(base, long=True) or [base]
-            base_long = base_long[0]
-            if base_long == mesh_long:
-                has_component_on_mesh = True
-                mesh_items.append(item)
-        else:
-            item_long = cmds.ls(item, long=True) or [item]
-            item_long = item_long[0]
-            if item_long == mesh_long:
-                mesh_items.append(item)
-                continue
-            if item_long in mesh_shapes:
-                has_component_on_mesh = True
-                mesh_items.append(item)
-
-    if not mesh_items:
-        return None
-    if not has_component_on_mesh:
-        # Object mode / transform selection => keep existing "full mesh" behavior.
-        return None
-
-    conv_kwargs = dict(fromFace=True, fromEdge=True, fromVertex=True, fromVertexFace=True, fromUV=True)
-    if target == "faces":
-        conv = cmds.polyListComponentConversion(mesh_items, toFace=True, **conv_kwargs)
-        comps = cmds.ls(conv, fl=True, long=True) or []
-        parsed = []
-        for c in comps:
-            idx = pr_parse_face_index(c)
-            if idx is not None:
-                parsed.append("{}.f[{}]".format(mesh_long, idx))
-    else:
-        conv = cmds.polyListComponentConversion(mesh_items, toEdge=True, **conv_kwargs)
-        comps = cmds.ls(conv, fl=True, long=True) or []
-        parsed = []
-        for c in comps:
-            idx = pr_parse_edge_index(c)
-            if idx is not None:
-                parsed.append("{}.e[{}]".format(mesh_long, idx))
-
-    if not parsed:
-        return []
-
-    dedup = []
-    seen = set()
-    for c in parsed:
-        if c not in seen:
-            seen.add(c)
-            dedup.append(c)
-    return dedup
 
 
 # =============================================================================
@@ -1030,7 +945,7 @@ class PR_SelectByAngle:
     _cached_mesh = None
 
     @classmethod
-    def run(cls, angle, direction, both=False, plane_ref=None, plane_tol=0.001, scope_selection=None):
+    def run(cls, angle, direction, both=False, plane_ref=None, plane_tol=0.001):
         mesh = pr_get_mesh_from_selection()
         if not mesh:
             if cls._cached_mesh and cmds.objExists(cls._cached_mesh):
@@ -1062,18 +977,9 @@ class PR_SelectByAngle:
                     use_plane = True
 
         dag, fn = pr_get_dagpath_and_fnmesh(mesh)
-        scope_face_indices = None
-        if scope_selection is not None:
-            scope_face_indices = []
-            for face_comp in scope_selection:
-                idx = pr_parse_face_index(face_comp)
-                if idx is not None:
-                    scope_face_indices.append(idx)
-            scope_face_indices = sorted(set(scope_face_indices))
-
         if fn:
-            face_indices = scope_face_indices if scope_face_indices is not None else range(fn.numPolygons)
-            for i in face_indices:
+            face_count = fn.numPolygons
+            for i in range(face_count):
                 n  = fn.getPolygonNormal(i, om2.MSpace.kWorld)
                 nl = n.length()
                 if nl < 1e-8:
@@ -1103,8 +1009,8 @@ class PR_SelectByAngle:
             pr_force_selection_faces_only()
             return len(cmds.ls(sl=True, fl=True) or [])
 
-        face_indices = scope_face_indices if scope_face_indices is not None else range(cmds.polyEvaluate(mesh, face=True))
-        for i in face_indices:
+        face_count = cmds.polyEvaluate(mesh, face=True)
+        for i in range(face_count):
             face = "{}.f[{}]".format(mesh, i)
             info = cmds.polyInfo(face, faceNormals=True)
             if not info:
@@ -1384,7 +1290,7 @@ class PR_SelectTools:
         return len(cmds.ls(sl=True, fl=True) or [])
 
     @classmethod
-    def select_all_hard_edges(cls, scope_selection=None):
+    def select_all_hard_edges(cls):
         sel = cmds.ls(sl=True, o=True) or []
         if not sel:
             cmds.warning("[PR] Select a mesh object first.")
@@ -1395,14 +1301,10 @@ class PR_SelectTools:
         cmds.select("{}.e[0:{}]".format(sel[0], edge_count-1), r=True)
         cmds.polySelectConstraint(m=3, t=0x8000, angle=True, anglebound=(30, 180))
         cmds.polySelectConstraint(disable=True)
-        result = cmds.ls(sl=True, fl=True) or []
-        if scope_selection is not None:
-            result = [e for e in result if e in set(scope_selection)]
-            cmds.select(result, r=True)
-        return len(result)
+        return len(cmds.ls(sl=True, fl=True) or [])
 
     @classmethod
-    def select_smoothing_hard_edges(cls, scope_selection=None):
+    def select_smoothing_hard_edges(cls):
         mesh = pr_get_mesh_from_selection()
         if not mesh:
             cmds.warning("[PR] Select a mesh object first.")
@@ -1456,9 +1358,6 @@ class PR_SelectTools:
                 hard_edges = []
 
         if hard_edges:
-            if scope_selection is not None:
-                scope_set = set(scope_selection)
-                hard_edges = [e for e in hard_edges if e in scope_set]
             cmds.select(hard_edges, r=True)
             return len(hard_edges)
 
@@ -1467,7 +1366,7 @@ class PR_SelectTools:
         return 0
 
     @classmethod
-    def select_border_edges(cls, scope_selection=None):
+    def select_border_edges(cls):
         mesh = pr_get_mesh_from_selection()
         if not mesh:
             cmds.warning("[PR] Select a mesh object first.")
@@ -1509,9 +1408,6 @@ class PR_SelectTools:
                 cmds.warning("[PR] Border edges (constraint) failed: {}".format(e))
                 edges = []
         if edges:
-            if scope_selection is not None:
-                scope_set = set(scope_selection)
-                edges = [e for e in edges if e in scope_set]
             cmds.select(edges, r=True)
             return len(edges)
         cmds.select(clear=True)
@@ -1519,7 +1415,7 @@ class PR_SelectTools:
         return 0
 
     @classmethod
-    def select_hard_edges(cls, min_a, max_a, scope_selection=None):
+    def select_hard_edges(cls, min_a, max_a):
         sel = cmds.ls(sl=True, o=True) or []
         if not sel:
             return 0
@@ -1541,10 +1437,6 @@ class PR_SelectTools:
                 cmds.polySelectConstraint(disable=True)
             except Exception:
                 pass
-        if scope_selection is not None:
-            scope_set = set(scope_selection)
-            result = [e for e in result if e in scope_set]
-            cmds.select(result, r=True)
         return len(result)
 
     @classmethod
@@ -1882,10 +1774,6 @@ class PRSelectToolsUI(QtWidgets.QDialog):
         self._edge_mode = 2
         self._live      = True
         self._plane_ref = None
-        self._angle_scope_seed = None
-        self._hard_scope_seed = None
-        self._ignore_selection_changed = False
-        self._selection_job = None
 
         self._timer = QtCore.QTimer()
         self._timer.setSingleShot(True)
@@ -1896,7 +1784,6 @@ class PRSelectToolsUI(QtWidgets.QDialog):
         self._build_ui()
         self._apply_style()
         self._connect()
-        self._install_selection_changed_hook()
 
     def _label(self, text):
         lbl = QtWidgets.QLabel(text)
@@ -2135,9 +2022,6 @@ class PRSelectToolsUI(QtWidgets.QDialog):
         self.angle_slider.valueChanged.connect(self.angle_spin.setValue)
         self.angle_spin.valueChanged.connect(self.angle_slider.setValue)
         self.angle_slider.valueChanged.connect(self._on_angle_change)
-        self.angle_slider.sliderPressed.connect(self._capture_angle_scope_seed)
-        self.angle_slider.sliderReleased.connect(self._clear_angle_scope_seed)
-        self.angle_spin.editingFinished.connect(self._clear_angle_scope_seed)
         self.face_btn.clicked.connect(self._use_face)
         self.live_chk.stateChanged.connect(
             lambda s: setattr(self, "_live", s == QtCore.Qt.Checked))
@@ -2162,19 +2046,13 @@ class PRSelectToolsUI(QtWidgets.QDialog):
         self.both_btn.clicked.connect(lambda: self._set_mode(3))
         self.edge_sel_btn.clicked.connect(self._select_pattern)
 
-        self.hard_edges_btn.clicked.connect(self._select_all_hard_edges)
-        self.smooth_hard_btn.clicked.connect(self._select_smoothing_hard_edges)
-        self.border_edges_btn.clicked.connect(self._select_border_edges)
+        self.hard_edges_btn.clicked.connect(PR_SelectTools.select_all_hard_edges)
+        self.smooth_hard_btn.clicked.connect(PR_SelectTools.select_smoothing_hard_edges)
+        self.border_edges_btn.clicked.connect(PR_SelectTools.select_border_edges)
         self.min_slider.valueChanged.connect(self.min_spin.setValue)
         self.min_spin.valueChanged.connect(self.min_slider.setValue)
         self.max_slider.valueChanged.connect(self.max_spin.setValue)
         self.max_spin.valueChanged.connect(self.max_slider.setValue)
-        self.min_slider.sliderPressed.connect(self._capture_hard_scope_seed)
-        self.max_slider.sliderPressed.connect(self._capture_hard_scope_seed)
-        self.min_slider.sliderReleased.connect(self._clear_hard_scope_seed)
-        self.max_slider.sliderReleased.connect(self._clear_hard_scope_seed)
-        self.min_spin.editingFinished.connect(self._clear_hard_scope_seed)
-        self.max_spin.editingFinished.connect(self._clear_hard_scope_seed)
         self.min_spin.valueChanged.connect(self._update_hard)
         self.max_spin.valueChanged.connect(self._update_hard)
         self.crease_btn.clicked.connect(PR_SelectTools.select_creased)
@@ -2208,57 +2086,16 @@ class PRSelectToolsUI(QtWidgets.QDialog):
         if self._live:
             self._timer.start()
 
-    def _install_selection_changed_hook(self):
-        try:
-            if self._selection_job and cmds.scriptJob(exists=self._selection_job):
-                cmds.scriptJob(kill=self._selection_job, force=True)
-        except Exception:
-            pass
-        try:
-            self._selection_job = cmds.scriptJob(
-                event=["SelectionChanged", self._on_selection_changed],
-                parent=self.objectName()
-            )
-        except Exception:
-            self._selection_job = None
-
-    def _on_selection_changed(self):
-        if self._ignore_selection_changed:
-            return
-        self._clear_angle_scope_seed()
-        self._clear_hard_scope_seed()
-
-    def _capture_angle_scope_seed(self):
-        mesh = pr_get_mesh_from_selection()
-        self._angle_scope_seed = pr_get_selection_scope(mesh, "faces") if mesh else None
-
-    def _clear_angle_scope_seed(self):
-        self._angle_scope_seed = None
-
-    def _capture_hard_scope_seed(self):
-        mesh = pr_get_mesh_from_selection()
-        self._hard_scope_seed = pr_get_selection_scope(mesh, "edges") if mesh else None
-
-    def _clear_hard_scope_seed(self):
-        self._hard_scope_seed = None
-
     def _do_live_select(self):
         if PR_SP_RUNNING:
             return
-        if self._angle_scope_seed is None:
-            self._capture_angle_scope_seed()
-        self._ignore_selection_changed = True
-        try:
-            PR_SelectByAngle.run(
-                self.angle_spin.value(),
-                self._direction,
-                both=self.both_chk.isChecked(),
-                plane_ref=self._plane_ref if self.plane_chk.isChecked() else None,
-                plane_tol=self.plane_tol.value(),
-                scope_selection=self._angle_scope_seed,
-            )
-        finally:
-            self._ignore_selection_changed = False
+        PR_SelectByAngle.run(
+            self.angle_spin.value(),
+            self._direction,
+            both=self.both_chk.isChecked(),
+            plane_ref=self._plane_ref if self.plane_chk.isChecked() else None,
+            plane_tol=self.plane_tol.value(),
+        )
 
     def _use_face(self):
         normal, plane_ref = PR_SelectByAngle.get_face_normal_and_plane_ref()
@@ -2269,21 +2106,13 @@ class PRSelectToolsUI(QtWidgets.QDialog):
                 self._do_live_select()
 
     def _select_angle(self):
-        if self._angle_scope_seed is None:
-            self._capture_angle_scope_seed()
-        self._ignore_selection_changed = True
-        try:
-            PR_SelectByAngle.run(
-                self.angle_spin.value(),
-                self._direction,
-                both=self.both_chk.isChecked(),
-                plane_ref=self._plane_ref if self.plane_chk.isChecked() else None,
-                plane_tol=self.plane_tol.value(),
-                scope_selection=self._angle_scope_seed,
-            )
-        finally:
-            self._ignore_selection_changed = False
-            self._clear_angle_scope_seed()
+        PR_SelectByAngle.run(
+            self.angle_spin.value(),
+            self._direction,
+            both=self.both_chk.isChecked(),
+            plane_ref=self._plane_ref if self.plane_chk.isChecked() else None,
+            plane_tol=self.plane_tol.value(),
+        )
 
     def _set_skip(self, n):
         self._skip = n
@@ -2301,47 +2130,7 @@ class PRSelectToolsUI(QtWidgets.QDialog):
         PR_SelectTools.select_pattern(self._skip, self._edge_mode, self.edge_inv_chk.isChecked())
 
     def _update_hard(self):
-        if self._hard_scope_seed is None:
-            self._capture_hard_scope_seed()
-        self._ignore_selection_changed = True
-        try:
-            PR_SelectTools.select_hard_edges(
-                self.min_spin.value(),
-                self.max_spin.value(),
-                scope_selection=self._hard_scope_seed
-            )
-        finally:
-            self._ignore_selection_changed = False
-
-    def _select_all_hard_edges(self):
-        mesh = pr_get_mesh_from_selection()
-        scope = pr_get_selection_scope(mesh, "edges") if mesh else None
-        self._ignore_selection_changed = True
-        try:
-            PR_SelectTools.select_all_hard_edges(scope_selection=scope)
-        finally:
-            self._ignore_selection_changed = False
-            self._clear_hard_scope_seed()
-
-    def _select_smoothing_hard_edges(self):
-        mesh = pr_get_mesh_from_selection()
-        scope = pr_get_selection_scope(mesh, "edges") if mesh else None
-        self._ignore_selection_changed = True
-        try:
-            PR_SelectTools.select_smoothing_hard_edges(scope_selection=scope)
-        finally:
-            self._ignore_selection_changed = False
-            self._clear_hard_scope_seed()
-
-    def _select_border_edges(self):
-        mesh = pr_get_mesh_from_selection()
-        scope = pr_get_selection_scope(mesh, "edges") if mesh else None
-        self._ignore_selection_changed = True
-        try:
-            PR_SelectTools.select_border_edges(scope_selection=scope)
-        finally:
-            self._ignore_selection_changed = False
-            self._clear_hard_scope_seed()
+        PR_SelectTools.select_hard_edges(self.min_spin.value(), self.max_spin.value())
 
     def _run_identical_mesh_search(self):
         count = PR_SelectTools.select_identical_meshes()

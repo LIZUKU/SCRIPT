@@ -64,12 +64,14 @@ def _kill_existing_unbevel_job():
     state = getattr(__main__, "_unbevel_state", None)
     if not state:
         return
-    jid = state.get("toolChangeJob")
-    if jid and cmds.scriptJob(exists=jid):
-        try:
-            cmds.scriptJob(kill=jid, force=True)
-        except Exception:
-            pass
+    # Nettoie tous les jobs liés à la session UnBevel.
+    for job_key in ["toolChangeJob", "selectionJob"]:
+        jid = state.get(job_key)
+        if jid and cmds.scriptJob(exists=jid):
+            try:
+                cmds.scriptJob(kill=jid, force=True)
+            except Exception:
+                pass
 
 
 def _modifier_flags():
@@ -918,8 +920,54 @@ def _ensure_unbevel_runtime_data(state, reason=""):
 # UnBevel – dragger context
 # --------------------------------------------------------------------------
 
+def _on_selection_changed():
+    """Rebuild runtime data quand la sélection d'edges change en cours d'UnBevel."""
+    state = getattr(__main__, "_unbevel_state", None)
+    if not state or state.get("finalized"):
+        return
+
+    ctx = "unBevelCtx"
+    if not cmds.draggerContext(ctx, exists=True):
+        return
+    try:
+        if cmds.currentCtx() != state.get("activeContext", ctx):
+            return
+    except Exception:
+        return
+
+    sel_edges = cmds.filterExpand(expand=True, sm=32)
+    if not sel_edges:
+        return
+
+    data = _build_unbevel_runtime_data(sel_edges)
+    if not data:
+        cmds.warning("[BevelUnbevel] Échec de la mise à jour runtime après changement de sélection.")
+        return
+
+    state["ppData"] = data["ppData"]
+    state["vLData"] = data["vLData"]
+    state["cLData"] = data["cLData"]
+    state["cumulative_fractions"] = data["cumulative_fractions"]
+
+    if cmds.objExists(SAVE_SEL_SET_NAME):
+        cmds.delete(SAVE_SEL_SET_NAME)
+    cmds.sets(sel_edges, name=SAVE_SEL_SET_NAME, text=SAVE_SEL_SET_NAME)
+
+    try:
+        cmds.inViewMessage(
+            amg="<hl>UnBevel :</hl> Topologie mise à jour.",
+            pos='midCenterBot',
+            fade=True,
+            fts=10
+        )
+    except Exception:
+        pass
+
 def _start_unbevel(final_edges, bevel_nodes=None, transforms=None, source_groups=None):
     """Lance le dragger UnBevel sur final_edges (liste d'edges déjà sélectionnées)."""
+
+    # S'assurer qu'aucune ancienne session ne laisse des jobs actifs.
+    _kill_existing_unbevel_job()
 
     cmds.select(final_edges, r=True)
     selEdge = cmds.filterExpand(expand=True, sm=32)
@@ -937,6 +985,11 @@ def _start_unbevel(final_edges, bevel_nodes=None, transforms=None, source_groups
         cmds.warning("[BevelUnbevel] Impossible de construire les données UnBevel.")
         return
 
+    sel_job_id = cmds.scriptJob(
+        event=["SelectionChanged", "__import__('__main__')._on_selection_changed()"],
+        protected=True
+    )
+
     # Stocker l'état dans __main__
     seg = _query_bevel_segments(bevel_nodes)
     __main__._unbevel_state = {
@@ -952,6 +1005,7 @@ def _start_unbevel(final_edges, bevel_nodes=None, transforms=None, source_groups
         "storeCountB": 100,
         "activeContext": "unBevelCtx",
         "toolChangeJob": None,
+        "selectionJob": sel_job_id,
         "finalized": False,
         "bevel_nodes": _existing_bevel_nodes(bevel_nodes),
         "transforms": transforms or [],
@@ -976,7 +1030,6 @@ def _start_unbevel(final_edges, bevel_nodes=None, transforms=None, source_groups
     )
     cmds.setToolTo(ctx)
 
-    _kill_existing_unbevel_job()
     job = cmds.scriptJob(
         event=["ToolChanged",
                "__import__('__main__')._unbevel_tool_changed_callback()"],

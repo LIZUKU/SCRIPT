@@ -636,11 +636,141 @@ def _calculate_edge_distances(vertex_list):
         distances.append((v2-v1).length())
     return distances
 
+def _build_unbevel_runtime_data(sel_edges):
+    """Construit les buffers nécessaires au drag UnBevel à partir d'edges."""
+    sel_edges = cmds.ls(sel_edges, fl=True) or []
+    if not sel_edges:
+        return None
+
+    ppData = []
+    vLData = []
+    cLData = []
+
+    sortGrp = _get_edge_ring_group(sel_edges)
+    if not sortGrp:
+        return None
+    for e in sortGrp:
+        newP, listVtx, storeDist = _unbevel_edge_loop(e)
+        if newP is None:
+            continue
+        ppData.append(newP)
+        vLData.append(listVtx)
+        cLData.append(storeDist)
+
+    if not ppData:
+        return None
+
+    tVer = cmds.ls(cmds.polyListComponentConversion(sel_edges, tv=True), fl=True)
+    tFac = cmds.ls(cmds.polyListComponentConversion(tVer, tf=True, internal=1), fl=True)
+    tEdg = cmds.ls(cmds.polyListComponentConversion(tFac, te=True, internal=1), fl=True)
+    findLoop = list(set(tEdg) - set(sel_edges))
+    if findLoop:
+        oneLoop = cmds.polySelectSp(findLoop[0], q=1, loop=1)
+    else:
+        oneLoop = sel_edges
+    oneLoop = cmds.ls(oneLoop, fl=1)
+    _, getVOrder = _vtx_loop_order_check(oneLoop)
+    if not getVOrder or len(getVOrder) < 2:
+        return None
+
+    distances = _calculate_edge_distances(getVOrder)
+    if not distances:
+        return None
+    distances.insert(0, 0)
+    total_distance = sum(distances)
+    if total_distance <= 1e-8:
+        return None
+
+    cumulative_fractions = []
+    cumulative_sum = 0
+    for d in distances:
+        cumulative_sum += d
+        cumulative_fractions.append(round(cumulative_sum / total_distance, 3))
+
+    return {
+        "ppData": ppData,
+        "vLData": vLData,
+        "cLData": cLData,
+        "cumulative_fractions": cumulative_fractions,
+    }
+
+
+def _existing_bevel_nodes(nodes):
+    return [n for n in (nodes or []) if cmds.objExists(n) and (cmds.nodeType(n) or "").startswith("polyBevel")]
+
+
+def _query_bevel_segments(nodes):
+    valid = _existing_bevel_nodes(nodes)
+    if not valid:
+        return None
+    node = valid[0]
+    if not cmds.attributeQuery("segments", node=node, exists=True):
+        return None
+    try:
+        return int(round(cmds.getAttr("{}.segments".format(node))))
+    except Exception:
+        return None
+
+
+def _set_bevel_segments(nodes, value):
+    valid = _existing_bevel_nodes(nodes)
+    if not valid:
+        return False
+    target = max(1, int(value))
+    changed = False
+    for node in valid:
+        if not cmds.attributeQuery("segments", node=node, exists=True):
+            continue
+        try:
+            current = int(round(cmds.getAttr("{}.segments".format(node))))
+            if current != target:
+                cmds.setAttr("{}.segments".format(node), target)
+                changed = True
+        except Exception:
+            continue
+    return changed
+
+
+def _resolve_unbevel_edges_from_state(state):
+    """Retrouve les edges cibles après changement de topologie (ex: segments bevel)."""
+    transforms = state.get("transforms", []) or []
+    source_groups = state.get("source_groups", []) or []
+    final = []
+
+    if transforms and source_groups:
+        all_edges = _flatten(cmds.ls(_all_edges_pattern(transforms), fl=True)) or []
+        if all_edges:
+            kept_by_group, _ = _filter_edges(all_edges, source_groups)
+            final = _collect_final_edges(kept_by_group, source_groups)
+            final = _extend_final_edges_once(final)
+
+    if not final and cmds.objExists('saveSel'):
+        final = _flatten(cmds.sets('saveSel', q=True))
+        final = [e for e in (final or []) if cmds.objExists(e)]
+
+    return final or []
+
+
+def _rebuild_unbevel_data_from_state(state):
+    edges = _resolve_unbevel_edges_from_state(state)
+    if not edges:
+        return False
+
+    data = _build_unbevel_runtime_data(edges)
+    if not data:
+        return False
+
+    state.update(data)
+    if cmds.objExists('saveSel'):
+        cmds.delete('saveSel')
+    cmds.sets(edges, name="saveSel", text="saveSel")
+    return True
+
 # --------------------------------------------------------------------------
 # UnBevel – dragger context
 # --------------------------------------------------------------------------
 
-def _start_unbevel(final_edges):
+def _start_unbevel(final_edges, bevel_nodes=None, transforms=None, source_groups=None):
     """Lance le dragger UnBevel sur final_edges (liste d'edges déjà sélectionnées)."""
 
     cmds.select(final_edges, r=True)
@@ -654,62 +784,18 @@ def _start_unbevel(final_edges):
         cmds.delete('saveSel')
     cmds.sets(name="saveSel", text="saveSel")
 
-    # Construire les données UnBevel
-    ppData = []
-    vLData = []
-    cLData = []
-
-    sortGrp = _get_edge_ring_group(selEdge)
-    if not sortGrp:
-        cmds.warning("[BevelUnbevel] Groupement d'edges invalide.")
+    data = _build_unbevel_runtime_data(selEdge)
+    if not data:
+        cmds.warning("[BevelUnbevel] Impossible de construire les données UnBevel.")
         return
-    for e in sortGrp:
-        newP, listVtx, storeDist = _unbevel_edge_loop(e)
-        if newP is None:
-            continue
-        ppData.append(newP)
-        vLData.append(listVtx)
-        cLData.append(storeDist)
-
-    if not ppData:
-        cmds.warning("[BevelUnbevel] Impossible de calculer les données UnBevel.")
-        return
-
-    # Calcul des fractions cumulées (pour le mode Shift/Ctrl)
-    tVer = cmds.ls(cmds.polyListComponentConversion(selEdge, tv=True), fl=True)
-    tFac = cmds.ls(cmds.polyListComponentConversion(tVer, tf=True, internal=1), fl=True)
-    tEdg = cmds.ls(cmds.polyListComponentConversion(tFac, te=True, internal=1), fl=True)
-    findLoop = list(set(tEdg) - set(selEdge))
-    if findLoop:
-        oneLoop = cmds.polySelectSp(findLoop[0], q=1, loop=1)
-    else:
-        oneLoop = selEdge
-    oneLoop = cmds.ls(oneLoop, fl=1)
-    _, getVOrder = _vtx_loop_order_check(oneLoop)
-    if not getVOrder or len(getVOrder) < 2:
-        cmds.warning("[BevelUnbevel] Ordre des vertices invalide.")
-        return
-    distances = _calculate_edge_distances(getVOrder)
-    if not distances:
-        cmds.warning("[BevelUnbevel] Distances vides, impossible de démarrer l'UnBevel.")
-        return
-    distances.insert(0, 0)
-    total_distance = sum(distances)
-    if total_distance <= 1e-8:
-        cmds.warning("[BevelUnbevel] Distance totale nulle, impossible de démarrer l'UnBevel.")
-        return
-    cumulative_fractions = []
-    cumulative_sum = 0
-    for d in distances:
-        cumulative_sum += d
-        cumulative_fractions.append(round(cumulative_sum / total_distance, 3))
 
     # Stocker l'état dans __main__
+    seg = _query_bevel_segments(bevel_nodes)
     __main__._unbevel_state = {
-        "ppData": ppData,
-        "vLData": vLData,
-        "cLData": cLData,
-        "cumulative_fractions": cumulative_fractions,
+        "ppData": data["ppData"],
+        "vLData": data["vLData"],
+        "cLData": data["cLData"],
+        "cumulative_fractions": data["cumulative_fractions"],
         "screenX": 0,
         "lockCount": 50,
         "storeCount": 0,
@@ -719,6 +805,12 @@ def _start_unbevel(final_edges):
         "activeContext": "unBevelCtx",
         "toolChangeJob": None,
         "finalized": False,
+        "bevel_nodes": _existing_bevel_nodes(bevel_nodes),
+        "transforms": transforms or [],
+        "source_groups": source_groups or [],
+        "segmentDragStart": seg if seg is not None else 1,
+        "segmentDragAnchorX": 0,
+        "currentSegments": seg if seg is not None else 1,
     }
 
     # Dragger context
@@ -747,7 +839,7 @@ def _start_unbevel(final_edges):
     print("[BevelUnbevel] UnBevel démarré. Drag pour ajuster.")
     try:
         cmds.inViewMessage(
-            amg='UnBevel actif — Drag: uniforme | <hl>Shift</hl>: A | <hl>Ctrl</hl>: B | <hl>Ctrl+Alt</hl>: reset',
+            amg='UnBevel actif — Drag: uniforme | <hl>Shift</hl>: A | <hl>Ctrl</hl>: B | <hl>Shift+Alt</hl>: segments | <hl>Ctrl+Alt</hl>: reset',
             pos='midCenterTop', fade=True
         )
     except Exception:
@@ -771,6 +863,8 @@ def _unbevel_press():
     ctx = 'unBevelCtx'
     vpX, vpY, _ = cmds.draggerContext(ctx, query=True, anchorPoint=True)
     state["screenX"] = vpX
+    state["segmentDragAnchorX"] = vpX
+    state["segmentDragStart"] = state.get("currentSegments", _query_bevel_segments(state.get("bevel_nodes")) or 1)
     # Conserver la continuité entre plusieurs drags :
     # on repart de la moyenne A/B actuellement stockée plutôt que de reset à 50.
     start_a = state.get("storeCountA", 100)
@@ -833,6 +927,26 @@ def _unbevel_drag():
     is_alt = bool(modifiers & 8)
     legacy_reset = (modifiers == 5)
     legacy_fine = (modifiers in (8, 13))
+
+    # Shift + Alt: ajuste les segments du polyBevel (rebuild robuste des données de drag)
+    if is_shift and is_alt and not is_ctrl:
+        nodes = state.get("bevel_nodes", [])
+        if not nodes:
+            cmds.warning("[BevelUnbevel] Aucun node polyBevel valide pour changer les segments.")
+            return
+        anchor_x = state.get("segmentDragAnchorX", vpX)
+        start_seg = int(max(1, state.get("segmentDragStart", 1)))
+        delta = int((vpX - anchor_x) / 18.0)
+        target_seg = max(1, start_seg + delta)
+        if target_seg != state.get("currentSegments", 1):
+            if _set_bevel_segments(nodes, target_seg):
+                state["currentSegments"] = target_seg
+                if _rebuild_unbevel_data_from_state(state):
+                    _apply_unbevel_counts(state, state.get("storeCountA", 100), state.get("storeCountB", 100))
+                else:
+                    cmds.warning("[BevelUnbevel] Segments changés mais rebuild UnBevel impossible.")
+        cmds.refresh(f=True)
+        return
 
     # Alt (ou combo legacy) → reset à 0 explicite
     if (is_alt and not is_shift and not is_ctrl) or legacy_reset or (is_alt and is_ctrl):
@@ -1031,7 +1145,12 @@ def _bevel_tool_changed_callback():
         len(new_edges), sum(len(v) for v in kept_by_group.values()), len(final)))
 
     # ── Enchaîner directement avec UnBevel ──
-    _start_unbevel(final)
+    _start_unbevel(
+        final,
+        bevel_nodes=state.get("bevel_nodes", []),
+        transforms=transforms,
+        source_groups=source_groups
+    )
 
 # --------------------------------------------------------------------------
 # Point d'entrée
@@ -1078,6 +1197,7 @@ def start_bevel_unbevel():
         "transforms": transforms,
         "all_edges_set": all_set,
         "source_groups": groups,
+        "bevel_nodes": [],
     }
 
     mel.eval('dR_DoCmd("bevelPress");')
@@ -1085,6 +1205,7 @@ def start_bevel_unbevel():
     after_nodes = _bevel_nodes(transforms)
     new_nodes = list(after_nodes - before_nodes) or list(after_nodes)
     _configure_bevel(new_nodes)
+    __main__._bevel_listener_state["bevel_nodes"] = new_nodes
 
     jid = cmds.scriptJob(
         event=["ToolChanged",

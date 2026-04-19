@@ -112,6 +112,24 @@ def _modifier_mode(flags):
         return "fine_equalized"
     return "uniform"
 
+
+def _query_dragger_point(ctx_name, point_flag, default_x=0, default_y=0):
+    """
+    Lit un point du draggerContext de manière sûre.
+    Maya peut parfois lever `No object was specified...` si le contexte n'est
+    pas encore complètement initialisé (timing UI).
+    """
+    try:
+        point = cmds.draggerContext(ctx_name, query=True, **{point_flag: True})
+    except Exception:
+        return float(default_x), float(default_y), 0.0
+    if not point or len(point) < 2:
+        return float(default_x), float(default_y), 0.0
+    x = point[0] if point[0] is not None else default_x
+    y = point[1] if point[1] is not None else default_y
+    z = point[2] if len(point) > 2 and point[2] is not None else 0.0
+    return float(x), float(y), float(z)
+
 def _transform_from_edge(edge):
     obj = edge.split(".e[")[0]
     if cmds.objExists(obj) and cmds.nodeType(obj) == "mesh":
@@ -943,11 +961,12 @@ def _unbevel_press():
     if not _ensure_unbevel_runtime_data(state, reason="press"):
         return
     ctx = 'unBevelCtx'
-    try:
-        vpX, vpY, _ = cmds.draggerContext(ctx, query=True, anchorPoint=True)
-    except Exception:
-        cmds.warning("[BevelUnbevel] Impossible de lire le draggerContext '{}'. Relancer l'outil.".format(ctx))
-        return
+    vpX, vpY, _ = _query_dragger_point(
+        ctx_name=ctx,
+        point_flag="anchorPoint",
+        default_x=state.get("screenX", 0),
+        default_y=0
+    )
     state["screenX"] = vpX
     state["segmentDragAnchorX"] = vpX
     state["segmentDragStart"] = state.get("currentSegments", _query_bevel_segments(state.get("bevel_nodes")) or 1)
@@ -962,11 +981,15 @@ def _unbevel_press():
         cmds.headsUpDisplay('HUDunBevelStep', rem=True)
     except Exception:
         pass
-    cmds.headsUpDisplay(
-        'HUDunBevelStep', section=3, block=1, blockSize='large',
-        label='unBevel', labelFontSize='large',
-        command='_unbevel_current_step()', atr=1, ao=1
-    )
+    try:
+        cmds.headsUpDisplay(
+            'HUDunBevelStep', section=3, block=1, blockSize='large',
+            label='unBevel', labelFontSize='large',
+            command='_unbevel_current_step()', atr=1, ao=1
+        )
+    except Exception:
+        # Ne pas casser le drag si le HUD échoue.
+        pass
 
 
 def _apply_unbevel_counts(state, count_a, count_b):
@@ -1003,7 +1026,12 @@ def _unbevel_drag():
     vLData   = state["vLData"]
     cLData   = state["cLData"]
 
-    vpX, vpY, _ = cmds.draggerContext(ctx, query=True, dragPoint=True)
+    vpX, vpY, _ = _query_dragger_point(
+        ctx_name=ctx,
+        point_flag="dragPoint",
+        default_x=state.get("screenX", 0),
+        default_y=0
+    )
     mods = _modifier_flags()
     screenX = state["screenX"]
     lockCount = state["lockCount"]
@@ -1014,10 +1042,10 @@ def _unbevel_drag():
 
     # Ctrl + Shift: ajuste les segments du polyBevel (évite Alt réservé à la navigation Maya).
     if mode == "segments":
-        nodes = state.get("bevel_nodes", [])
+        nodes = _existing_bevel_nodes(state.get("bevel_nodes", []))
         # Fallback robuste : si les nodes ont été reconstruits/renommés par Maya,
         # on les re-résout depuis l'historique.
-        if not nodes and state.get("transforms"):
+        if state.get("transforms"):
             nodes = list(_bevel_nodes(state["transforms"]))
             state["bevel_nodes"] = _existing_bevel_nodes(nodes)
             nodes = state["bevel_nodes"]
@@ -1030,7 +1058,7 @@ def _unbevel_drag():
         target_seg = max(1, start_seg + delta)
         if target_seg != state.get("currentSegments", 1):
             if _set_bevel_segments(nodes, target_seg):
-                state["currentSegments"] = target_seg
+                state["currentSegments"] = _query_bevel_segments(nodes) or target_seg
                 if _rebuild_unbevel_data_from_state(state):
                     _apply_unbevel_counts(state, state.get("storeCountA", 100), state.get("storeCountB", 100))
                 else:

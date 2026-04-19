@@ -6,10 +6,11 @@ BevelUnbevel - Script fusionné
 3. Appuyer sur Q → les edges résultantes sont auto-sélectionnées
 4. Le dragger UnBevel démarre automatiquement
    - Drag          : ajuste uniformément A et B
-   - Shift + Drag  : ajuste A uniquement
-   - Ctrl + Drag   : ajuste B uniquement
-   - Ctrl+Shift    : pas à pas fin
-   - Ctrl+Alt      : reset à 0
+   - Shift + Drag      : ajuste A uniquement
+   - Ctrl + Drag       : ajuste B uniquement
+   - Ctrl+Shift + Drag : ajuste les segments du bevel
+   - Ctrl+Shift+Alt    : pas à pas fin (A/B verrouillés)
+   - Ctrl+Alt          : reset à 0
 """
 
 import maya.cmds as cmds
@@ -851,7 +852,7 @@ def _start_unbevel(final_edges, bevel_nodes=None, transforms=None, source_groups
     print("[BevelUnbevel] UnBevel démarré. Drag pour ajuster.")
     try:
         cmds.inViewMessage(
-            amg='UnBevel actif — Drag: uniforme | <hl>Shift</hl>: A | <hl>Ctrl</hl>: B | <hl>Shift+Alt</hl>: segments | <hl>Ctrl+Alt</hl>: reset',
+            amg='UnBevel actif — Drag: uniforme | <hl>Shift</hl>: A | <hl>Ctrl</hl>: B | <hl>Ctrl+Shift</hl>: segments | <hl>Ctrl+Alt</hl>: reset',
             pos='midCenterTop', fade=True
         )
     except Exception:
@@ -939,11 +940,11 @@ def _unbevel_drag():
     is_alt = mods["alt"]
 
     # Combinaisons explicites (évite les collisions dues aux anciens "magic numbers").
-    do_segment_drag = is_shift and is_alt and not is_ctrl
+    do_segment_drag = is_shift and is_ctrl and not is_alt
     do_reset = is_alt and is_ctrl and not is_shift
-    do_fine_equalized_drag = is_shift and is_ctrl and not is_alt
+    do_fine_equalized_drag = is_shift and is_ctrl and is_alt
 
-    # Shift + Alt: ajuste les segments du polyBevel (rebuild robuste des données de drag)
+    # Ctrl + Shift: ajuste les segments du polyBevel (évite Alt réservé à la navigation Maya).
     if do_segment_drag:
         nodes = state.get("bevel_nodes", [])
         # Fallback robuste : si les nodes ont été reconstruits/renommés par Maya,
@@ -982,7 +983,7 @@ def _unbevel_drag():
         cmds.refresh(f=True)
         return
 
-    # Ctrl + Shift : verrouille A et B à la même valeur + pas fin.
+    # Ctrl + Shift + Alt : verrouille A et B à la même valeur + pas fin.
     if do_fine_equalized_drag:
         lockCount += move_sign * 1
         state["screenX"] = vpX

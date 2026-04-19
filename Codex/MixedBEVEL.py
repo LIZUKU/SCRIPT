@@ -130,6 +130,21 @@ def _query_dragger_point(ctx_name, point_flag, default_x=0, default_y=0):
     z = point[2] if len(point) > 2 and point[2] is not None else 0.0
     return float(x), float(y), float(z)
 
+
+def _consume_drag_notches(state, vp_x, pixels_per_notch=6.0):
+    """
+    Convertit un delta souris en "notches" stables pour éviter la dérive
+    dépendante de la fréquence des événements drag.
+    """
+    pixels_per_notch = max(1.0, float(pixels_per_notch))
+    anchor_x = float(state.get("screenX", vp_x))
+    delta_x = float(vp_x) - anchor_x
+    notches = int(math.trunc(delta_x / pixels_per_notch))
+    if notches == 0:
+        return 0
+    state["screenX"] = anchor_x + (notches * pixels_per_notch)
+    return notches
+
 def _transform_from_edge(edge):
     obj = edge.split(".e[")[0]
     if cmds.objExists(obj) and cmds.nodeType(obj) == "mesh":
@@ -1033,9 +1048,7 @@ def _unbevel_drag():
         default_y=0
     )
     mods = _modifier_flags()
-    screenX = state["screenX"]
     lockCount = state["lockCount"]
-    move_sign = -1 if screenX > vpX else 1
 
     # Interprétation robuste des modificateurs (bitmask Maya).
     mode = _modifier_mode(mods)
@@ -1081,9 +1094,11 @@ def _unbevel_drag():
 
     # Alt (ou Ctrl+Shift+Alt historique) : pas fin uniforme (A et B lockés ensemble).
     if mode in ("fine_equalized", "fine_equalized_legacy"):
-        lockCount += move_sign * 1.0
+        notches = _consume_drag_notches(state, vpX, pixels_per_notch=4.0)
+        if notches == 0:
+            return
+        lockCount += notches * 1.0
         lockCount = max(0.1, lockCount)
-        state["screenX"] = vpX
         getX = int(lockCount / 10) * 10
         state["storeCount"] = getX
         state["storeCountA"] = lockCount
@@ -1095,12 +1110,12 @@ def _unbevel_drag():
         return
 
     # Déplacement standard
-    step = 5
-    if mode in ("fine_a",):
-        step = 1
-
-    lockCount += move_sign * step
-    state["screenX"] = vpX
+    step = 1 if mode in ("fine_a",) else 5
+    pixels_per_notch = 4.0 if mode in ("fine_a", "a", "b") else 6.0
+    notches = _consume_drag_notches(state, vpX, pixels_per_notch=pixels_per_notch)
+    if notches == 0:
+        return
+    lockCount += notches * step
 
     if lockCount > 0:
         # Shift → ajuste A uniquement

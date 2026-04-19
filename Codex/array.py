@@ -338,6 +338,76 @@ def apply_shared_style(widget):
 
 
 class SliderMixin(object):
+    class _AdaptiveSpinBoxMixin(object):
+        def _init_adaptive_spinbox(self):
+            self._ctrl_drag_active = False
+            self._ctrl_drag_start_x = 0
+            self._ctrl_drag_start_value = 0.0
+
+        def _ctrl_drag_step_multiplier(self):
+            return 0.2 if (QtWidgets.QApplication.keyboardModifiers() & QtCore.Qt.ShiftModifier) else 1.0
+
+        def mousePressEvent(self, event):
+            if (
+                event.button() == QtCore.Qt.LeftButton and
+                (event.modifiers() & QtCore.Qt.ControlModifier)
+            ):
+                self._ctrl_drag_active = True
+                self._ctrl_drag_start_x = event.globalPosition().x() if hasattr(event, "globalPosition") else event.globalX()
+                self._ctrl_drag_start_value = float(self.value())
+                self.setCursor(QtCore.Qt.SizeHorCursor)
+                event.accept()
+                return
+            return super().mousePressEvent(event)
+
+        def mouseMoveEvent(self, event):
+            if self._ctrl_drag_active:
+                current_x = event.globalPosition().x() if hasattr(event, "globalPosition") else event.globalX()
+                delta_px = current_x - self._ctrl_drag_start_x
+                step_px = 6.0
+                delta_steps = int(delta_px / step_px)
+                step_value = max(float(self.singleStep()), 1e-6) * self._ctrl_drag_step_multiplier()
+                new_value = self._ctrl_drag_start_value + (delta_steps * step_value)
+                self.setValue(new_value)
+                event.accept()
+                return
+            return super().mouseMoveEvent(event)
+
+        def mouseReleaseEvent(self, event):
+            if self._ctrl_drag_active and event.button() == QtCore.Qt.LeftButton:
+                self._ctrl_drag_active = False
+                self.unsetCursor()
+                event.accept()
+                return
+            return super().mouseReleaseEvent(event)
+
+    class FloatSpinBox(_AdaptiveSpinBoxMixin, QtWidgets.QDoubleSpinBox):
+        def __init__(self, parent=None):
+            super(SliderMixin.FloatSpinBox, self).__init__(parent)
+            self._init_adaptive_spinbox()
+
+        def valueFromText(self, text):
+            normalized = text.strip().replace(",", ".")
+            try:
+                return float(normalized)
+            except Exception:
+                return float(self.value())
+
+        def validate(self, text, pos):
+            candidate = text.strip().replace(",", ".")
+            if candidate in ("", "-", ".", "-."):
+                return (QtGui.QValidator.Intermediate, text, pos)
+            try:
+                float(candidate)
+                return (QtGui.QValidator.Acceptable, text, pos)
+            except Exception:
+                return (QtGui.QValidator.Invalid, text, pos)
+
+    class IntSpinBox(_AdaptiveSpinBoxMixin, QtWidgets.QSpinBox):
+        def __init__(self, parent=None):
+            super(SliderMixin.IntSpinBox, self).__init__(parent)
+            self._init_adaptive_spinbox()
+
     def _add_slider(self, parent_layout, label, min_val, max_val, default, decimals, label_width=105):
         row = QtWidgets.QHBoxLayout()
         row.setSpacing(6)
@@ -353,22 +423,35 @@ class SliderMixin(object):
         row.addWidget(slider)
 
         if decimals > 0:
-            spinbox = QtWidgets.QDoubleSpinBox()
+            spinbox = self.FloatSpinBox()
             spinbox.setDecimals(decimals)
             spinbox.setMinimum(min_val)
             spinbox.setMaximum(max_val if max_val < 999999 else 999999)
             step = (max_val - min_val) / 1000.0 if max_val > min_val else 0.01
-            spinbox.setSingleStep(step)
+            spinbox.setSingleStep(max(step, 10 ** (-decimals)))
         else:
-            spinbox = QtWidgets.QSpinBox()
+            spinbox = self.IntSpinBox()
             spinbox.setMinimum(int(min_val))
             spinbox.setMaximum(int(max_val if max_val < 999999 else 999999))
+            spinbox.setSingleStep(1)
 
         spinbox.setFixedWidth(82 if label_width >= 110 else 80)
         spinbox.setFixedHeight(20)
         spinbox.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
         spinbox.setValue(default if decimals > 0 else int(default))
         row.addWidget(spinbox)
+
+        btn_minus = QtWidgets.QPushButton("-")
+        btn_minus.setToolTip("Decrease by one step")
+        btn_minus.setFixedSize(18, 18)
+        btn_minus.setStyleSheet("font-size: 10px; padding: 0px;")
+        row.addWidget(btn_minus)
+
+        btn_plus = QtWidgets.QPushButton("+")
+        btn_plus.setToolTip("Increase by one step")
+        btn_plus.setFixedSize(18, 18)
+        btn_plus.setStyleSheet("font-size: 10px; padding: 0px;")
+        row.addWidget(btn_plus)
 
         reset_btn = QtWidgets.QPushButton("R")
         reset_btn.setToolTip("Reset to default")
@@ -395,8 +478,19 @@ class SliderMixin(object):
             slider.blockSignals(False)
             self._on_rebuild()
 
+        def nudge_spin(direction):
+            delta = float(spinbox.singleStep()) * float(direction)
+            current = float(spinbox.value())
+            target = current + delta
+            if isinstance(spinbox, QtWidgets.QSpinBox):
+                spinbox.setValue(int(round(target)))
+            else:
+                spinbox.setValue(target)
+
         slider.valueChanged.connect(update_spinbox)
         spinbox.valueChanged.connect(update_slider)
+        btn_minus.clicked.connect(lambda: nudge_spin(-1))
+        btn_plus.clicked.connect(lambda: nudge_spin(1))
         reset_btn.clicked.connect(lambda: spinbox.setValue(default if decimals > 0 else int(default)))
 
         ratio = (float(default) - min_val) / (max_val - min_val) if (max_val - min_val) > 0 else 0
@@ -1045,6 +1139,35 @@ def get_curve_tangent_and_normal(curve, u_ratio):
     return tangent, normal
 
 
+def get_curve_sample(curve, u_ratio, even_spacing=True):
+    u_ratio = clamp(float(u_ratio), 0.0, 1.0)
+    if even_spacing:
+        try:
+            sel = om.MSelectionList()
+            sel.add(curve)
+            dag_path = sel.getDagPath(0)
+            if dag_path.apiType() == om.MFn.kTransform:
+                dag_path.extendToShape()
+            fn_curve = om.MFnNurbsCurve(dag_path)
+            total_length = fn_curve.length()
+            target_length = u_ratio * total_length
+            param = fn_curve.findParamFromLength(target_length)
+            point = fn_curve.getPointAtParam(param, om.MSpace.kWorld)
+            tangent_vec = fn_curve.tangent(param, om.MSpace.kWorld)
+            normal_vec = fn_curve.normal(param, om.MSpace.kWorld)
+            return (
+                [point.x, point.y, point.z],
+                [tangent_vec.x, tangent_vec.y, tangent_vec.z],
+                [normal_vec.x, normal_vec.y, normal_vec.z]
+            )
+        except Exception:
+            pass
+
+    pos = cmds.pointOnCurve(curve, pr=u_ratio, p=True, top=True)
+    tangent, normal = get_curve_tangent_and_normal(curve, u_ratio)
+    return pos, tangent, normal
+
+
 def get_random_for_index(seed, index, axis_index):
     rnd = random.Random((seed * 1000003) + (index * 9176) + (axis_index * 131))
     return rnd.uniform(-1.0, 1.0)
@@ -1103,6 +1226,7 @@ def build_curve_distribution(
     name_prefix="",
     orient_mode="world_up",
     center_on_bbox=False,
+    even_spacing=True,
 ):
     if not _safe_exists(mesh) or not _safe_exists(curve):
         return []
@@ -1130,7 +1254,9 @@ def build_curve_distribution(
             max_count=max_count
         )
 
-    count = max(1, int(count))
+    count = max(0, int(count))
+    if count == 0:
+        return []
     results = []
     local_center_offset = get_mesh_center_offset_local(mesh)
 
@@ -1192,8 +1318,7 @@ def build_curve_distribution(
                 u = trimmed_start_u + ((trimmed_end_u - trimmed_start_u) * t)
 
             try:
-                pos = cmds.pointOnCurve(curve, pr=u, p=True, top=True)
-                tangent, curve_normal = get_curve_tangent_and_normal(curve, u)
+                pos, tangent, curve_normal = get_curve_sample(curve, u, even_spacing=even_spacing)
             except:
                 continue
 
@@ -1924,7 +2049,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
 
     def load_settings(self, settings):
         settings.beginGroup("curve")
-        count_max = int(float(settings.value("count_max", 30)))
+        count_max = int(float(settings.value("count_max", 15)))
         self._set_count_max(count_max)
         for widget, default_value in self._settings_defaults:
             key = widget.property("settings_key")
@@ -1960,7 +2085,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
                 widget.setValue(default_value)
             elif isinstance(widget, (QtWidgets.QCheckBox, QtWidgets.QRadioButton)):
                 widget.setChecked(default_value)
-        self._set_count_max(30)
+        self._set_count_max(15)
 
     def _request_parent_resize(self):
         parent = self.window()
@@ -2047,7 +2172,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         dist_label.setObjectName("sectionLabel")
         layout.addWidget(dist_label)
 
-        self.count_slider, self.count_spin = self._add_slider(layout, "Count", 1, 1000, 10, 0, label_width=110)
+        self.count_slider, self.count_spin = self._add_slider(layout, "Count", 0, 15, 10, 0, label_width=110)
         self.count_spin.setProperty("settings_key", "count")
         self._register_default(self.count_spin, 10)
         self._add_count_range_controls(layout)
@@ -2078,6 +2203,13 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         self.chk_trim_ends.setProperty("settings_key", "trim_ends")
         self._register_default(self.chk_trim_ends, True)
         layout.addWidget(self.chk_trim_ends)
+
+        self.chk_even_spacing = QtWidgets.QCheckBox("Even Spacing (Arc Length)")
+        self.chk_even_spacing.setChecked(True)
+        self.chk_even_spacing.toggled.connect(self._on_rebuild)
+        self.chk_even_spacing.setProperty("settings_key", "even_spacing")
+        self._register_default(self.chk_even_spacing, True)
+        layout.addWidget(self.chk_even_spacing)
 
         self.padding_slider, self.padding_spin = self._add_slider(layout, "Padding", -10.0, 50.0, 0.0, 3, label_width=110)
         self.safety_slider, self.safety_spin = self._add_slider(layout, "Fit Safety", 0.5, 3.0, 1.05, 3, label_width=110)
@@ -2252,7 +2384,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
             self._register_default(widget, default_value)
 
     def _set_count_max(self, max_value):
-        max_value = int(clamp(max_value, 10, 5000))
+        max_value = int(clamp(max_value, 15, 5000))
         self.count_spin.setMaximum(max_value)
         current = int(self.count_spin.value())
         if current > max_value:
@@ -2260,7 +2392,9 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
 
     def _sync_count_preset_from_range(self):
         max_v = int(self.count_spin.maximum())
-        if max_v <= 30:
+        if max_v <= 15:
+            self.count_preset_combo.setCurrentText("0-15")
+        elif max_v <= 30:
             self.count_preset_combo.setCurrentText("0-30")
         elif max_v <= 100:
             self.count_preset_combo.setCurrentText("0-100")
@@ -2276,7 +2410,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         self._on_rebuild()
 
     def _on_count_preset_changed(self, text):
-        mapping = {"0-30": 30, "0-100": 100, "0-500": 500, "0-1000+": 1000}
+        mapping = {"0-15": 15, "0-30": 30, "0-100": 100, "0-500": 500, "0-1000+": 1000}
         self._set_count_max(mapping.get(text, 1000))
         self._on_rebuild()
 
@@ -2290,7 +2424,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         row.addWidget(lbl)
 
         self.count_preset_combo = QtWidgets.QComboBox()
-        self.count_preset_combo.addItems(["0-30", "0-100", "0-500", "0-1000+"])
+        self.count_preset_combo.addItems(["0-15", "0-30", "0-100", "0-500", "0-1000+"])
         self.count_preset_combo.setCurrentIndex(0)
         self.count_preset_combo.currentTextChanged.connect(self._on_count_preset_changed)
         row.addWidget(self.count_preset_combo)
@@ -2528,6 +2662,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
             fit_safety = float(self.safety_spin.value())
             max_count = int(self.auto_max_spin.value())
             trim_ends = self.chk_trim_ends.isChecked()
+            even_spacing = self.chk_even_spacing.isChecked()
             auto_fit = self.chk_auto_fit.isChecked()
             lock_no_overlap = self.chk_lock_no_overlap.isChecked()
 
@@ -2619,7 +2754,8 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
                     clear_existing=(idx == 0),
                     name_prefix="c{}__".format(idx + 1),
                     orient_mode=orient_mode,
-                    center_on_bbox=center_on_bbox
+                    center_on_bbox=center_on_bbox,
+                    even_spacing=even_spacing
                 )
                 all_results.extend(result)
                 usable_len += get_curve_length(curve) * max(0.0, (end_u - start_u))

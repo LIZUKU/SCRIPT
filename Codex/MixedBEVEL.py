@@ -417,9 +417,16 @@ def _angle_between_three_p(pA_name, pB_name, pC_name):
     return math.acos(scalar)
 
 def _vtx_loop_order_check(edgelist):
-    selEdges = edgelist
+    selEdges = cmds.ls(edgelist, fl=True) or []
+    if not selEdges:
+        return (0, [])
+
     shapeNode = cmds.listRelatives(selEdges[0], fullPath=True, parent=True)
+    if not shapeNode:
+        return (0, [])
     transformNode = cmds.listRelatives(shapeNode[0], fullPath=True, parent=True)
+    if not transformNode:
+        return (0, [])
     edgeNumberList = []
     for a in selEdges:
         checkNumber = a.split('.')[1].split('\n')[0].split(' ')
@@ -440,6 +447,8 @@ def _vtx_loop_order_check(edgelist):
     dup = set([x for x in getNumber if getNumber.count(x) > 1])
     getHeadTail = list(set(getNumber) - dup)
     checkCircleState = 0
+    if not getNumber:
+        return (0, [])
     if not getHeadTail:
         checkCircleState = 1
         getHeadTail.append(getNumber[0])
@@ -455,38 +464,49 @@ def _vtx_loop_order_check(edgelist):
             findNumber = ''.join([n for n in c.split('|')[-1] if n.isdigit()])
             if findNumber:
                 getNumber.append(findNumber)
-        findNextEdge = []
+        findNextEdge = None
         for g in getNumber:
             if g in edgeNumberList:
                 findNextEdge = g
+        if not findNextEdge:
+            break
         edgeNumberList.remove(findNextEdge)
         checkVtx = transformNode[0] + '.e[' + findNextEdge + ']'
         findVtx = cmds.polyInfo(checkVtx, ev=True)
+        if not findVtx:
+            break
         getNumber = []
         checkNumber = findVtx[0].split(':')[1].split('\n')[0].split(' ')
         for c in checkNumber:
             findNumber = ''.join([n for n in c.split('|')[-1] if n.isdigit()])
             if findNumber:
                 getNumber.append(findNumber)
-        gotNextVtx = []
+        gotNextVtx = None
         for g in getNumber:
             if g in dup:
                 gotNextVtx = g
+        if not gotNextVtx:
+            break
         dup.remove(gotNextVtx)
         vftOrder.append(gotNextVtx)
         count += 1
 
     if checkCircleState == 0:
+        if len(getHeadTail) < 2:
+            return (checkCircleState, [transformNode[0] + '.vtx[' + v + ']' for v in vftOrder if v])
         vftOrder.append(getHeadTail[1])
-    elif vftOrder[0] == vftOrder[1]:
+    elif len(vftOrder) > 1 and vftOrder[0] == vftOrder[1]:
         vftOrder = vftOrder[1:]
-    elif vftOrder[0] == vftOrder[-1]:
+    elif len(vftOrder) > 1 and vftOrder[0] == vftOrder[-1]:
         vftOrder = vftOrder[0:-1]
 
     finalList = [transformNode[0] + '.vtx[' + v + ']' for v in vftOrder]
     return (checkCircleState, finalList)
 
 def _get_edge_ring_group(selEdges):
+    selEdges = cmds.ls(selEdges, fl=True) or []
+    if not selEdges:
+        return []
     tVer = cmds.ls(cmds.polyListComponentConversion(selEdges, tv=True), fl=True)
     tFac = cmds.ls(cmds.polyListComponentConversion(tVer, tf=True, internal=1), fl=True)
     tEdg = cmds.ls(cmds.polyListComponentConversion(tFac, te=True, internal=1), fl=True)
@@ -497,8 +517,12 @@ def _get_edge_ring_group(selEdges):
         oneLoop = selEdges
     oneLoop = cmds.ls(oneLoop, fl=1)
     getCircleState, getVOrder = _vtx_loop_order_check(oneLoop)
+    if not getVOrder:
+        return [selEdges]
     trans = selEdges[0].split(".")[0]
     e2vInfos = cmds.polyInfo(selEdges, ev=True)
+    if not e2vInfos:
+        return [selEdges]
     e2vDict = {}
     for info in e2vInfos:
         evList = [int(i) for i in re.findall(r'\d+', info)]
@@ -547,6 +571,8 @@ def _get_edge_ring_group(selEdges):
 
 def _unbevel_edge_loop(edgelist):
     getCircleState, listVtx = _vtx_loop_order_check(edgelist)
+    if len(listVtx) < 3:
+        return None, None, None
     checkA = _angle_between_three_p(listVtx[1], listVtx[0], listVtx[-1])
     angleA = math.degrees(checkA)
     checkB = _angle_between_three_p(listVtx[-2], listVtx[-1], listVtx[0])
@@ -557,7 +583,9 @@ def _unbevel_edge_loop(edgelist):
         return None, None, None
     distanceB = distanceC / math.sin(math.radians(angleC)) * math.sin(math.radians(angleB))
     oldDistB = _distance_between_vtx(listVtx[0], listVtx[1])
-    scalarB = distanceB / oldDistB if oldDistB > 1e-8 else 1.0
+    if oldDistB <= 1e-8:
+        return None, None, None
+    scalarB = distanceB / oldDistB
     pA = cmds.pointPosition(listVtx[0], w=True)
     pB = cmds.pointPosition(listVtx[1], w=True)
     newP = [
@@ -615,6 +643,9 @@ def _start_unbevel(final_edges):
     cLData = []
 
     sortGrp = _get_edge_ring_group(selEdge)
+    if not sortGrp:
+        cmds.warning("[BevelUnbevel] Groupement d'edges invalide.")
+        return
     for e in sortGrp:
         newP, listVtx, storeDist = _unbevel_edge_loop(e)
         if newP is None:
@@ -638,14 +669,23 @@ def _start_unbevel(final_edges):
         oneLoop = selEdge
     oneLoop = cmds.ls(oneLoop, fl=1)
     _, getVOrder = _vtx_loop_order_check(oneLoop)
+    if not getVOrder or len(getVOrder) < 2:
+        cmds.warning("[BevelUnbevel] Ordre des vertices invalide.")
+        return
     distances = _calculate_edge_distances(getVOrder)
+    if not distances:
+        cmds.warning("[BevelUnbevel] Distances vides, impossible de démarrer l'UnBevel.")
+        return
     distances.insert(0, 0)
     total_distance = sum(distances)
+    if total_distance <= 1e-8:
+        cmds.warning("[BevelUnbevel] Distance totale nulle, impossible de démarrer l'UnBevel.")
+        return
     cumulative_fractions = []
     cumulative_sum = 0
     for d in distances:
         cumulative_sum += d
-        cumulative_fractions.append(round(cumulative_sum / total_distance, 3) if total_distance > 1e-8 else 0.0)
+        cumulative_fractions.append(round(cumulative_sum / total_distance, 3))
 
     # Stocker l'état dans __main__
     __main__._unbevel_state = {
@@ -799,7 +839,7 @@ def _unbevel_drag():
         elif modifiers == 4:
             lcA = state["storeCountA"]
             lcB = lockCount
-            for i in range(len(ppData) - 1):
+            for i in range(len(ppData)):
                 for v in range(len(vLData[i])):
                     blend = lcB + (lcA - lcB) * cumFrac[i] if i < len(cumFrac) else lcB
                     cmds.move(

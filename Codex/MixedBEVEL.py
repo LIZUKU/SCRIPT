@@ -771,9 +771,13 @@ def _unbevel_press():
     ctx = 'unBevelCtx'
     vpX, vpY, _ = cmds.draggerContext(ctx, query=True, anchorPoint=True)
     state["screenX"] = vpX
-    state["lockCount"] = 50
-    state["storeCount"] = 0
-    state["viewPortCount"] = 0
+    # Conserver la continuité entre plusieurs drags :
+    # on repart de la moyenne A/B actuellement stockée plutôt que de reset à 50.
+    start_a = state.get("storeCountA", 100)
+    start_b = state.get("storeCountB", 100)
+    state["lockCount"] = (start_a + start_b) * 0.5
+    state["storeCount"] = int(state["lockCount"] / 10.0) * 10
+    state["viewPortCount"] = state["lockCount"]
     try:
         cmds.headsUpDisplay('HUDunBevelStep', rem=True)
     except Exception:
@@ -785,6 +789,28 @@ def _unbevel_press():
     )
 
 
+def _apply_unbevel_counts(state, count_a, count_b):
+    """Applique la position des vertices à partir des distances A/B."""
+    ppData = state["ppData"]
+    vLData = state["vLData"]
+    cLData = state["cLData"]
+    cumFrac = state["cumulative_fractions"]
+
+    count_a = max(0.1, count_a)
+    count_b = max(0.1, count_b)
+
+    for i in range(len(ppData)):
+        frac = cumFrac[i] if i < len(cumFrac) else 0.0
+        blend = count_b + (count_a - count_b) * frac
+        for v in range(len(vLData[i])):
+            cmds.move(
+                ppData[i][0] - cLData[i][v][0] * blend,
+                ppData[i][1] - cLData[i][v][1] * blend,
+                ppData[i][2] - cLData[i][v][2] * blend,
+                vLData[i][v], absolute=1, ws=1
+            )
+
+
 def _unbevel_drag():
     state = getattr(__main__, "_unbevel_state", None)
     if not state:
@@ -794,40 +820,44 @@ def _unbevel_drag():
     ppData   = state["ppData"]
     vLData   = state["vLData"]
     cLData   = state["cLData"]
-    cumFrac  = state["cumulative_fractions"]
 
     vpX, vpY, _ = cmds.draggerContext(ctx, query=True, dragPoint=True)
     modifiers = cmds.getModifiers()
     screenX = state["screenX"]
     lockCount = state["lockCount"]
+    move_sign = -1 if screenX > vpX else 1
 
-    # Ctrl + Alt → reset à 0
-    if modifiers == 5:
+    # Interprétation robuste des modificateurs (bitmask Maya + fallback legacy).
+    is_shift = bool(modifiers & 1)
+    is_ctrl = bool(modifiers & 4)
+    is_alt = bool(modifiers & 8)
+    legacy_reset = (modifiers == 5)
+    legacy_fine = (modifiers in (8, 13))
+
+    # Alt (ou combo legacy) → reset à 0 explicite
+    if (is_alt and not is_shift and not is_ctrl) or legacy_reset or (is_alt and is_ctrl):
         for i in range(len(ppData)):
             cmds.scale(0, 0, 0, vLData[i], cs=1, r=1,
                        p=(ppData[i][0], ppData[i][1], ppData[i][2]))
+        state["storeCountA"] = 0
+        state["storeCountB"] = 0
+        state["lockCount"] = 0
         state["viewPortCount"] = 0
         state["screenX"] = vpX
         cmds.refresh(f=True)
         return
 
-    # Ctrl+Shift → pas fin
-    if modifiers == 8:
-        if screenX > vpX:
-            lockCount -= 1
-        else:
-            lockCount += 1
+    # Pas fin (legacy + Ctrl+Shift)
+    if legacy_fine or (is_ctrl and is_shift):
+        lockCount += move_sign * 1
         state["screenX"] = vpX
         if lockCount > 0:
             getX = int(lockCount / 10) * 10
             if state["storeCount"] != getX:
                 state["storeCount"] = getX
-                for i in range(len(ppData)):
-                    for v in range(len(vLData[i])):
-                        mx = ppData[i][0] - cLData[i][v][0] * lockCount
-                        my = ppData[i][1] - cLData[i][v][1] * lockCount
-                        mz = ppData[i][2] - cLData[i][v][2] * lockCount
-                        cmds.move(mx, my, mz, vLData[i][v], absolute=1, ws=1)
+                state["storeCountA"] = lockCount
+                state["storeCountB"] = lockCount
+                _apply_unbevel_counts(state, lockCount, lockCount)
             state["viewPortCount"] = state["storeCount"]
         else:
             state["viewPortCount"] = 0.1
@@ -841,57 +871,35 @@ def _unbevel_drag():
     else:
         step = 5
 
-    if screenX > vpX:
-        lockCount -= step
-    else:
-        lockCount += step
+    lockCount += move_sign * step
     state["screenX"] = vpX
 
     if lockCount > 0:
         # Shift → ajuste A uniquement
-        if modifiers == 1:
+        if is_shift and not is_ctrl:
             lcA = lockCount
             lcB = state["storeCountB"]
-            for i in range(len(ppData)):
-                for v in range(len(vLData[i])):
-                    blend = lcB + (lcA - lcB) * cumFrac[i] if i < len(cumFrac) else lcA
-                    cmds.move(
-                        ppData[i][0] - cLData[i][v][0] * blend,
-                        ppData[i][1] - cLData[i][v][1] * blend,
-                        ppData[i][2] - cLData[i][v][2] * blend,
-                        vLData[i][v], absolute=1, ws=1
-                    )
+            _apply_unbevel_counts(state, lcA, lcB)
             state["storeCountA"] = lockCount
 
         # Ctrl → ajuste B uniquement
-        elif modifiers == 4:
+        elif is_ctrl and not is_shift:
             lcA = state["storeCountA"]
             lcB = lockCount
-            for i in range(len(ppData)):
-                for v in range(len(vLData[i])):
-                    blend = lcB + (lcA - lcB) * cumFrac[i] if i < len(cumFrac) else lcB
-                    cmds.move(
-                        ppData[i][0] - cLData[i][v][0] * blend,
-                        ppData[i][1] - cLData[i][v][1] * blend,
-                        ppData[i][2] - cLData[i][v][2] * blend,
-                        vLData[i][v], absolute=1, ws=1
-                    )
+            _apply_unbevel_counts(state, lcA, lcB)
             state["storeCountB"] = lockCount
 
-        # Normal → uniforme
+        # Normal → applique un offset commun sur A/B
+        # (préserve l'écart A-B déjà défini via Shift/Ctrl).
         else:
-            state["storeCountA"] = lockCount
-            state["storeCountB"] = lockCount
-            for i in range(len(ppData)):
-                for v in range(len(vLData[i])):
-                    cmds.move(
-                        ppData[i][0] - cLData[i][v][0] * lockCount,
-                        ppData[i][1] - cLData[i][v][1] * lockCount,
-                        ppData[i][2] - cLData[i][v][2] * lockCount,
-                        vLData[i][v], absolute=1, ws=1
-                    )
+            previous_lock = state.get("lockCount", lockCount)
+            delta = lockCount - previous_lock
+            state["storeCountA"] = state["storeCountA"] + delta
+            state["storeCountB"] = state["storeCountB"] + delta
+            _apply_unbevel_counts(state, state["storeCountA"], state["storeCountB"])
+            lockCount = (state["storeCountA"] + state["storeCountB"]) * 0.5
 
-        state["viewPortCount"] = lockCount
+        state["viewPortCount"] = max(0.1, lockCount)
     else:
         state["viewPortCount"] = 0.1
 

@@ -82,6 +82,36 @@ def _modifier_flags():
         "alt": bool(modifiers & 8),
     }
 
+
+def _modifier_mode(flags):
+    """
+    Normalise les combinaisons clavier pour éviter les ambiguïtés de "magic numbers".
+
+    Notes Maya:
+    - getModifiers() utilise un bitmask: Shift=1, Ctrl=4, Alt=8.
+    - Alt peut être intercepté par la navigation viewport (Alt+LMB/MMB/RMB),
+      donc on garde toujours des fallbacks Ctrl/Shift sans Alt.
+    """
+    shift = flags.get("shift", False)
+    ctrl = flags.get("ctrl", False)
+    alt = flags.get("alt", False)
+
+    if ctrl and shift and alt:
+        return "fine_equalized_legacy"   # Compat avec les habitudes existantes.
+    if ctrl and shift:
+        return "segments"
+    if ctrl and alt:
+        return "reset"
+    if shift and alt:
+        return "fine_a"
+    if ctrl and not shift:
+        return "b"
+    if shift and not ctrl:
+        return "a"
+    if alt:
+        return "fine_equalized"
+    return "uniform"
+
 def _transform_from_edge(edge):
     obj = edge.split(".e[")[0]
     if cmds.objExists(obj) and cmds.nodeType(obj) == "mesh":
@@ -852,7 +882,7 @@ def _start_unbevel(final_edges, bevel_nodes=None, transforms=None, source_groups
     print("[BevelUnbevel] UnBevel démarré. Drag pour ajuster.")
     try:
         cmds.inViewMessage(
-            amg='UnBevel actif — Drag: uniforme | <hl>Shift</hl>: A | <hl>Ctrl</hl>: B | <hl>Ctrl+Shift</hl>: segments | <hl>Ctrl+Alt</hl>: reset',
+            amg='UnBevel actif — Drag: uniforme | <hl>Shift</hl>: A | <hl>Ctrl</hl>: B | <hl>Alt</hl>: fin | <hl>Ctrl+Shift</hl>: segments | <hl>Ctrl+Alt</hl>: reset',
             pos='midCenterTop', fade=True
         )
     except Exception:
@@ -935,17 +965,10 @@ def _unbevel_drag():
     move_sign = -1 if screenX > vpX else 1
 
     # Interprétation robuste des modificateurs (bitmask Maya).
-    is_shift = mods["shift"]
-    is_ctrl = mods["ctrl"]
-    is_alt = mods["alt"]
-
-    # Combinaisons explicites (évite les collisions dues aux anciens "magic numbers").
-    do_segment_drag = is_shift and is_ctrl and not is_alt
-    do_reset = is_alt and is_ctrl and not is_shift
-    do_fine_equalized_drag = is_shift and is_ctrl and is_alt
+    mode = _modifier_mode(mods)
 
     # Ctrl + Shift: ajuste les segments du polyBevel (évite Alt réservé à la navigation Maya).
-    if do_segment_drag:
+    if mode == "segments":
         nodes = state.get("bevel_nodes", [])
         # Fallback robuste : si les nodes ont été reconstruits/renommés par Maya,
         # on les re-résout depuis l'historique.
@@ -970,8 +993,8 @@ def _unbevel_drag():
         cmds.refresh(f=True)
         return
 
-    # Ctrl + Alt → reset à 0 explicite (Alt seul reste réservé à la navigation viewport Maya).
-    if do_reset:
+    # Ctrl + Alt → reset explicite.
+    if mode == "reset":
         for i in range(len(ppData)):
             cmds.scale(0, 0, 0, vLData[i], cs=1, r=1,
                        p=(ppData[i][0], ppData[i][1], ppData[i][2]))
@@ -983,39 +1006,39 @@ def _unbevel_drag():
         cmds.refresh(f=True)
         return
 
-    # Ctrl + Shift + Alt : verrouille A et B à la même valeur + pas fin.
-    if do_fine_equalized_drag:
-        lockCount += move_sign * 1
+    # Alt (ou Ctrl+Shift+Alt historique) : pas fin uniforme (A et B lockés ensemble).
+    if mode in ("fine_equalized", "fine_equalized_legacy"):
+        lockCount += move_sign * 1.0
+        lockCount = max(0.1, lockCount)
         state["screenX"] = vpX
-        if lockCount > 0:
-            getX = int(lockCount / 10) * 10
-            state["storeCount"] = getX
-            state["storeCountA"] = lockCount
-            state["storeCountB"] = lockCount
-            _apply_unbevel_counts(state, lockCount, lockCount)
-            state["viewPortCount"] = state["storeCount"]
-        else:
-            state["viewPortCount"] = 0.1
+        getX = int(lockCount / 10) * 10
+        state["storeCount"] = getX
+        state["storeCountA"] = lockCount
+        state["storeCountB"] = lockCount
+        _apply_unbevel_counts(state, lockCount, lockCount)
+        state["viewPortCount"] = state["storeCount"]
         state["lockCount"] = lockCount
         cmds.refresh(f=True)
         return
 
     # Déplacement standard
     step = 5
+    if mode in ("fine_a",):
+        step = 1
 
     lockCount += move_sign * step
     state["screenX"] = vpX
 
     if lockCount > 0:
         # Shift → ajuste A uniquement
-        if is_shift and not is_ctrl:
+        if mode in ("a", "fine_a"):
             lcA = lockCount
             lcB = state["storeCountB"]
             _apply_unbevel_counts(state, lcA, lcB)
             state["storeCountA"] = lockCount
 
         # Ctrl → ajuste B uniquement
-        elif is_ctrl and not is_shift:
+        elif mode == "b":
             lcA = state["storeCountA"]
             lcB = lockCount
             _apply_unbevel_counts(state, lcA, lcB)

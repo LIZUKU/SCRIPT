@@ -119,6 +119,23 @@ def clamp(v, vmin, vmax):
     return max(vmin, min(vmax, v))
 
 
+def parse_float_flexible(value, default=0.0):
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except:
+        try:
+            text = str(value).strip().replace(",", ".")
+            return float(text)
+        except:
+            return default
+
+
+def parse_int_flexible(value, default=0):
+    return int(round(parse_float_flexible(value, default)))
+
+
 # ============================================================
 # GENERIC VECTOR UTILS
 # ============================================================
@@ -337,7 +354,97 @@ def apply_shared_style(widget):
     """)
 
 
+class FlexibleDoubleSpinBox(QtWidgets.QDoubleSpinBox):
+    def __init__(self, parent=None):
+        super(FlexibleDoubleSpinBox, self).__init__(parent)
+        self.setLocale(QtCore.QLocale.c())
+
+    def _normalize_text(self, text):
+        return str(text).strip().replace(",", ".")
+
+    def valueFromText(self, text):
+        normalized = self._normalize_text(text)
+        return parse_float_flexible(normalized, self.value())
+
+    def validate(self, text, pos):
+        normalized = self._normalize_text(text)
+        if normalized in ("", "-", "+", ".", "-.", "+."):
+            return (QtGui.QValidator.Intermediate, text, pos)
+        try:
+            float(normalized)
+            return (QtGui.QValidator.Acceptable, text, pos)
+        except:
+            return (QtGui.QValidator.Invalid, text, pos)
+
+    def fixup(self, text):
+        return self._normalize_text(text)
+
+
 class SliderMixin(object):
+    _CTRL_DRAG_PIXELS_PER_STEP = 8.0
+
+    def _ensure_slider_mixin_state(self):
+        if not hasattr(self, "_ctrl_drag_state"):
+            self._ctrl_drag_state = {
+                "active": False,
+                "spinbox": None,
+                "start_global_x": 0,
+                "start_value": 0.0,
+            }
+
+    def _step_spinbox_value(self, spinbox, direction):
+        step = spinbox.singleStep() if isinstance(spinbox, QtWidgets.QDoubleSpinBox) else 1
+        new_value = spinbox.value() + (step * direction)
+        spinbox.setValue(clamp(new_value, spinbox.minimum(), spinbox.maximum()))
+
+    def _attach_spinbox_drag(self, spinbox):
+        self._ensure_slider_mixin_state()
+        editor = spinbox.lineEdit()
+        if not editor:
+            return
+        editor.installEventFilter(self)
+        editor.setProperty("ctrl_drag_spinbox", spinbox)
+
+    def eventFilter(self, watched, event):
+        self._ensure_slider_mixin_state()
+        spinbox = watched.property("ctrl_drag_spinbox") if watched else None
+        if spinbox is None:
+            return super(SliderMixin, self).eventFilter(watched, event)
+
+        event_type = event.type()
+        if event_type == QtCore.QEvent.MouseButtonPress:
+            if event.button() == QtCore.Qt.LeftButton and (event.modifiers() & QtCore.Qt.ControlModifier):
+                self._ctrl_drag_state["active"] = True
+                self._ctrl_drag_state["spinbox"] = spinbox
+                self._ctrl_drag_state["start_global_x"] = event.globalPosition().x() if hasattr(event, "globalPosition") else event.globalX()
+                self._ctrl_drag_state["start_value"] = float(spinbox.value())
+                watched.setCursor(QtCore.Qt.SizeHorCursor)
+                return True
+
+        if event_type == QtCore.QEvent.MouseMove and self._ctrl_drag_state["active"]:
+            active_spinbox = self._ctrl_drag_state.get("spinbox")
+            if active_spinbox is not spinbox:
+                return True
+            current_x = event.globalPosition().x() if hasattr(event, "globalPosition") else event.globalX()
+            delta_px = current_x - self._ctrl_drag_state["start_global_x"]
+            drag_ratio = float(delta_px) / self._CTRL_DRAG_PIXELS_PER_STEP
+            step = active_spinbox.singleStep() if isinstance(active_spinbox, QtWidgets.QDoubleSpinBox) else 1.0
+            if event.modifiers() & QtCore.Qt.ShiftModifier:
+                step *= 0.1
+            new_value = self._ctrl_drag_state["start_value"] + (drag_ratio * step)
+            if isinstance(active_spinbox, QtWidgets.QSpinBox):
+                new_value = int(round(new_value))
+            active_spinbox.setValue(clamp(new_value, active_spinbox.minimum(), active_spinbox.maximum()))
+            return True
+
+        if event_type == QtCore.QEvent.MouseButtonRelease and self._ctrl_drag_state["active"]:
+            self._ctrl_drag_state["active"] = False
+            self._ctrl_drag_state["spinbox"] = None
+            watched.unsetCursor()
+            return True
+
+        return super(SliderMixin, self).eventFilter(watched, event)
+
     def _add_slider(self, parent_layout, label, min_val, max_val, default, decimals, label_width=105):
         row = QtWidgets.QHBoxLayout()
         row.setSpacing(6)
@@ -353,7 +460,7 @@ class SliderMixin(object):
         row.addWidget(slider)
 
         if decimals > 0:
-            spinbox = QtWidgets.QDoubleSpinBox()
+            spinbox = FlexibleDoubleSpinBox()
             spinbox.setDecimals(decimals)
             spinbox.setMinimum(min_val)
             spinbox.setMaximum(max_val if max_val < 999999 else 999999)
@@ -369,6 +476,20 @@ class SliderMixin(object):
         spinbox.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
         spinbox.setValue(default if decimals > 0 else int(default))
         row.addWidget(spinbox)
+
+        btn_minus = QtWidgets.QPushButton("-")
+        btn_minus.setToolTip("Decrease value")
+        btn_minus.setFixedSize(18, 18)
+        btn_minus.setStyleSheet("font-size: 9px; padding: 0px;")
+        btn_minus.clicked.connect(lambda: self._step_spinbox_value(spinbox, -1))
+        row.addWidget(btn_minus)
+
+        btn_plus = QtWidgets.QPushButton("+")
+        btn_plus.setToolTip("Increase value")
+        btn_plus.setFixedSize(18, 18)
+        btn_plus.setStyleSheet("font-size: 9px; padding: 0px;")
+        btn_plus.clicked.connect(lambda: self._step_spinbox_value(spinbox, 1))
+        row.addWidget(btn_plus)
 
         reset_btn = QtWidgets.QPushButton("R")
         reset_btn.setToolTip("Reset to default")
@@ -401,6 +522,7 @@ class SliderMixin(object):
 
         ratio = (float(default) - min_val) / (max_val - min_val) if (max_val - min_val) > 0 else 0
         slider.setValue(int(ratio * 1000))
+        self._attach_spinbox_drag(spinbox)
 
         parent_layout.addLayout(row)
         return slider, spinbox
@@ -917,6 +1039,74 @@ def get_curve_length(curve):
         return 0.0
 
 
+def _get_curve_fn_data(curve):
+    dag_path = get_dag_path(curve)
+    if not dag_path:
+        return None
+    try:
+        fn_curve = om.MFnNurbsCurve(dag_path)
+        param_min, param_max = fn_curve.knotDomain
+        return fn_curve, param_min, param_max
+    except:
+        return None
+
+
+def _curve_percent_to_length(curve, percent):
+    curve_data = _get_curve_fn_data(curve)
+    if not curve_data:
+        return None
+    fn_curve, param_min, param_max = curve_data
+    try:
+        percent = clamp(float(percent), 0.0, 1.0)
+        param = param_min + ((param_max - param_min) * percent)
+        return fn_curve.findLengthFromParam(param)
+    except:
+        return None
+
+
+def _curve_length_to_percent(curve, length_value):
+    curve_data = _get_curve_fn_data(curve)
+    if not curve_data:
+        return None
+    fn_curve, param_min, param_max = curve_data
+    domain = max(1e-8, param_max - param_min)
+    try:
+        curve_len = max(0.0, fn_curve.length())
+        length_value = clamp(float(length_value), 0.0, curve_len)
+        param = fn_curve.findParamFromLength(length_value)
+        return clamp((param - param_min) / domain, 0.0, 1.0)
+    except:
+        return None
+
+
+def compute_curve_u_samples(curve, count, start_u, end_u, even_by_length=True):
+    count = max(0, int(count))
+    if count <= 0:
+        return []
+    if count == 1:
+        return [(start_u + end_u) * 0.5]
+
+    if even_by_length:
+        start_len = _curve_percent_to_length(curve, start_u)
+        end_len = _curve_percent_to_length(curve, end_u)
+        if start_len is not None and end_len is not None:
+            result = []
+            for i in range(count):
+                t = float(i) / float(count - 1)
+                sample_len = start_len + ((end_len - start_len) * t)
+                u = _curve_length_to_percent(curve, sample_len)
+                if u is None:
+                    break
+                result.append(u)
+            if len(result) == count:
+                return result
+
+    return [
+        start_u + ((end_u - start_u) * (float(i) / float(count - 1)))
+        for i in range(count)
+    ]
+
+
 def get_mesh_world_bbox_size(obj):
     if not _safe_exists(obj):
         return [0.0, 0.0, 0.0]
@@ -1103,6 +1293,7 @@ def build_curve_distribution(
     name_prefix="",
     orient_mode="world_up",
     center_on_bbox=False,
+    even_by_length=True,
 ):
     if not _safe_exists(mesh) or not _safe_exists(curve):
         return []
@@ -1130,7 +1321,9 @@ def build_curve_distribution(
             max_count=max_count
         )
 
-    count = max(1, int(count))
+    count = max(0, int(count))
+    if count <= 0:
+        return []
     results = []
     local_center_offset = get_mesh_center_offset_local(mesh)
 
@@ -1184,12 +1377,15 @@ def build_curve_distribution(
             trimmed_end_u = end_u
 
     try:
-        for i in range(count):
-            if count == 1:
-                u = (trimmed_start_u + trimmed_end_u) * 0.5 if trim_ends else start_u
-            else:
-                t = float(i) / float(count - 1)
-                u = trimmed_start_u + ((trimmed_end_u - trimmed_start_u) * t)
+        u_samples = compute_curve_u_samples(
+            curve=curve,
+            count=count,
+            start_u=trimmed_start_u,
+            end_u=trimmed_end_u,
+            even_by_length=even_by_length
+        )
+
+        for i, u in enumerate(u_samples):
 
             try:
                 pos = cmds.pointOnCurve(curve, pr=u, p=True, top=True)
@@ -1365,7 +1561,10 @@ class ProArrayTab(QtWidgets.QWidget, SliderMixin):
                 continue
             raw = settings.value(key, default_value)
             if isinstance(widget, (QtWidgets.QSpinBox, QtWidgets.QDoubleSpinBox)):
-                widget.setValue(float(raw) if isinstance(widget, QtWidgets.QDoubleSpinBox) else int(float(raw)))
+                if isinstance(widget, QtWidgets.QDoubleSpinBox):
+                    widget.setValue(parse_float_flexible(raw, default_value))
+                else:
+                    widget.setValue(parse_int_flexible(raw, default_value))
             elif isinstance(widget, (QtWidgets.QCheckBox, QtWidgets.QRadioButton)):
                 if isinstance(raw, bool):
                     widget.setChecked(raw)
@@ -1924,7 +2123,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
 
     def load_settings(self, settings):
         settings.beginGroup("curve")
-        count_max = int(float(settings.value("count_max", 30)))
+        count_max = parse_int_flexible(settings.value("count_max", 15), 15)
         self._set_count_max(count_max)
         for widget, default_value in self._settings_defaults:
             key = widget.property("settings_key")
@@ -1932,7 +2131,10 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
                 continue
             raw = settings.value(key, default_value)
             if isinstance(widget, (QtWidgets.QSpinBox, QtWidgets.QDoubleSpinBox)):
-                widget.setValue(float(raw) if isinstance(widget, QtWidgets.QDoubleSpinBox) else int(float(raw)))
+                if isinstance(widget, QtWidgets.QDoubleSpinBox):
+                    widget.setValue(parse_float_flexible(raw, default_value))
+                else:
+                    widget.setValue(parse_int_flexible(raw, default_value))
             elif isinstance(widget, (QtWidgets.QCheckBox, QtWidgets.QRadioButton)):
                 if isinstance(raw, bool):
                     widget.setChecked(raw)
@@ -1960,7 +2162,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
                 widget.setValue(default_value)
             elif isinstance(widget, (QtWidgets.QCheckBox, QtWidgets.QRadioButton)):
                 widget.setChecked(default_value)
-        self._set_count_max(30)
+        self._set_count_max(15)
 
     def _request_parent_resize(self):
         parent = self.window()
@@ -2047,7 +2249,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         dist_label.setObjectName("sectionLabel")
         layout.addWidget(dist_label)
 
-        self.count_slider, self.count_spin = self._add_slider(layout, "Count", 1, 1000, 10, 0, label_width=110)
+        self.count_slider, self.count_spin = self._add_slider(layout, "Count", 0, 1000, 10, 0, label_width=110)
         self.count_spin.setProperty("settings_key", "count")
         self._register_default(self.count_spin, 10)
         self._add_count_range_controls(layout)
@@ -2078,6 +2280,19 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         self.chk_trim_ends.setProperty("settings_key", "trim_ends")
         self._register_default(self.chk_trim_ends, True)
         layout.addWidget(self.chk_trim_ends)
+
+        self.chk_even_length = QtWidgets.QCheckBox("Even Spacing by Curve Length")
+        self.chk_even_length.setChecked(True)
+        self.chk_even_length.toggled.connect(self._on_rebuild)
+        self.chk_even_length.setProperty("settings_key", "even_length")
+        self._register_default(self.chk_even_length, True)
+        layout.addWidget(self.chk_even_length)
+
+        self.btn_even_distribute = QtWidgets.QPushButton("Distribute Evenly Now")
+        self.btn_even_distribute.setFixedHeight(22)
+        self.btn_even_distribute.setToolTip("Enable equal spacing by length and refresh preview")
+        self.btn_even_distribute.clicked.connect(self._on_force_even_distribution)
+        layout.addWidget(self.btn_even_distribute)
 
         self.padding_slider, self.padding_spin = self._add_slider(layout, "Padding", -10.0, 50.0, 0.0, 3, label_width=110)
         self.safety_slider, self.safety_spin = self._add_slider(layout, "Fit Safety", 0.5, 3.0, 1.05, 3, label_width=110)
@@ -2252,7 +2467,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
             self._register_default(widget, default_value)
 
     def _set_count_max(self, max_value):
-        max_value = int(clamp(max_value, 10, 5000))
+        max_value = int(clamp(max_value, 15, 5000))
         self.count_spin.setMaximum(max_value)
         current = int(self.count_spin.value())
         if current > max_value:
@@ -2260,7 +2475,9 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
 
     def _sync_count_preset_from_range(self):
         max_v = int(self.count_spin.maximum())
-        if max_v <= 30:
+        if max_v <= 15:
+            self.count_preset_combo.setCurrentText("0-15")
+        elif max_v <= 30:
             self.count_preset_combo.setCurrentText("0-30")
         elif max_v <= 100:
             self.count_preset_combo.setCurrentText("0-100")
@@ -2270,13 +2487,13 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
             self.count_preset_combo.setCurrentText("0-1000+")
 
     def _change_count_range(self, delta):
-        step = 10 if self.count_spin.maximum() < 100 else 50
+        step = 15 if self.count_spin.maximum() < 100 else 50
         self._set_count_max(self.count_spin.maximum() + (delta * step))
         self._sync_count_preset_from_range()
         self._on_rebuild()
 
     def _on_count_preset_changed(self, text):
-        mapping = {"0-30": 30, "0-100": 100, "0-500": 500, "0-1000+": 1000}
+        mapping = {"0-15": 15, "0-30": 30, "0-100": 100, "0-500": 500, "0-1000+": 1000}
         self._set_count_max(mapping.get(text, 1000))
         self._on_rebuild()
 
@@ -2290,7 +2507,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         row.addWidget(lbl)
 
         self.count_preset_combo = QtWidgets.QComboBox()
-        self.count_preset_combo.addItems(["0-30", "0-100", "0-500", "0-1000+"])
+        self.count_preset_combo.addItems(["0-15", "0-30", "0-100", "0-500", "0-1000+"])
         self.count_preset_combo.setCurrentIndex(0)
         self.count_preset_combo.currentTextChanged.connect(self._on_count_preset_changed)
         row.addWidget(self.count_preset_combo)
@@ -2459,6 +2676,10 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         self._on_rebuild()
         self._request_parent_resize()
 
+    def _on_force_even_distribution(self):
+        self.chk_even_length.setChecked(True)
+        self._do_rebuild()
+
     def _on_start(self):
         selection = get_transform_from_selection()
 
@@ -2530,6 +2751,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
             trim_ends = self.chk_trim_ends.isChecked()
             auto_fit = self.chk_auto_fit.isChecked()
             lock_no_overlap = self.chk_lock_no_overlap.isChecked()
+            even_by_length = self.chk_even_length.isChecked()
 
             safe_count_limit = compute_auto_fit_count(
                 mesh=mesh,
@@ -2568,6 +2790,12 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
                     self.count_spin.blockSignals(True)
                     self.count_spin.setValue(count)
                     self.count_spin.blockSignals(False)
+
+            if count <= 0:
+                curve_cleanup_preview()
+                self.status_label.setText("0 preview | increase Count")
+                cmds.refresh(force=False)
+                return
 
             offset_pos = (
                 float(self.offx_spin.value()),
@@ -2619,7 +2847,8 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
                     clear_existing=(idx == 0),
                     name_prefix="c{}__".format(idx + 1),
                     orient_mode=orient_mode,
-                    center_on_bbox=center_on_bbox
+                    center_on_bbox=center_on_bbox,
+                    even_by_length=even_by_length
                 )
                 all_results.extend(result)
                 usable_len += get_curve_length(curve) * max(0.0, (end_u - start_u))

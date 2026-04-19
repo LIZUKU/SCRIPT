@@ -25,6 +25,7 @@ import __main__
 
 SOURCE_SET_NAME    = "TMP_bevel_sourceEdges_SET"
 ALL_EDGES_SET_NAME = "TMP_bevel_allEdges_SET"
+SAVE_SEL_SET_NAME  = "TMP_unbevel_saveSel_SET"
 
 PERP_DOT_THRESHOLD      = 0.35
 COLLINEAR_DOT_THRESHOLD = 0.92
@@ -44,7 +45,7 @@ def _flatten(items):
     return cmds.ls(items, fl=True) if items else []
 
 def _cleanup():
-    for s in [SOURCE_SET_NAME, ALL_EDGES_SET_NAME]:
+    for s in [SOURCE_SET_NAME, ALL_EDGES_SET_NAME, SAVE_SEL_SET_NAME]:
         _delete_if_exists(s)
 
 def _kill_existing_job():
@@ -68,6 +69,17 @@ def _kill_existing_unbevel_job():
             cmds.scriptJob(kill=jid, force=True)
         except Exception:
             pass
+
+
+def _modifier_flags():
+    """Retourne les modificateurs clavier sous forme de flags lisibles."""
+    modifiers = cmds.getModifiers()
+    return {
+        "raw": modifiers,
+        "shift": bool(modifiers & 1),
+        "ctrl": bool(modifiers & 4),
+        "alt": bool(modifiers & 8),
+    }
 
 def _transform_from_edge(edge):
     obj = edge.split(".e[")[0]
@@ -744,8 +756,8 @@ def _resolve_unbevel_edges_from_state(state):
             final = _collect_final_edges(kept_by_group, source_groups)
             final = _extend_final_edges_once(final)
 
-    if not final and cmds.objExists('saveSel'):
-        final = _flatten(cmds.sets('saveSel', q=True))
+    if not final and cmds.objExists(SAVE_SEL_SET_NAME):
+        final = _flatten(cmds.sets(SAVE_SEL_SET_NAME, q=True))
         final = [e for e in (final or []) if cmds.objExists(e)]
 
     return final or []
@@ -761,9 +773,9 @@ def _rebuild_unbevel_data_from_state(state):
         return False
 
     state.update(data)
-    if cmds.objExists('saveSel'):
-        cmds.delete('saveSel')
-    cmds.sets(edges, name="saveSel", text="saveSel")
+    if cmds.objExists(SAVE_SEL_SET_NAME):
+        cmds.delete(SAVE_SEL_SET_NAME)
+    cmds.sets(edges, name=SAVE_SEL_SET_NAME, text=SAVE_SEL_SET_NAME)
     return True
 
 # --------------------------------------------------------------------------
@@ -780,9 +792,9 @@ def _start_unbevel(final_edges, bevel_nodes=None, transforms=None, source_groups
         return
 
     # Sauvegarder la sélection
-    if cmds.objExists('saveSel'):
-        cmds.delete('saveSel')
-    cmds.sets(name="saveSel", text="saveSel")
+    if cmds.objExists(SAVE_SEL_SET_NAME):
+        cmds.delete(SAVE_SEL_SET_NAME)
+    cmds.sets(name=SAVE_SEL_SET_NAME, text=SAVE_SEL_SET_NAME)
 
     data = _build_unbevel_runtime_data(selEdge)
     if not data:
@@ -916,21 +928,30 @@ def _unbevel_drag():
     cLData   = state["cLData"]
 
     vpX, vpY, _ = cmds.draggerContext(ctx, query=True, dragPoint=True)
-    modifiers = cmds.getModifiers()
+    mods = _modifier_flags()
     screenX = state["screenX"]
     lockCount = state["lockCount"]
     move_sign = -1 if screenX > vpX else 1
 
-    # Interprétation robuste des modificateurs (bitmask Maya + fallback legacy).
-    is_shift = bool(modifiers & 1)
-    is_ctrl = bool(modifiers & 4)
-    is_alt = bool(modifiers & 8)
-    legacy_reset = (modifiers == 5)
-    legacy_fine = (modifiers in (8, 13))
+    # Interprétation robuste des modificateurs (bitmask Maya).
+    is_shift = mods["shift"]
+    is_ctrl = mods["ctrl"]
+    is_alt = mods["alt"]
+
+    # Combinaisons explicites (évite les collisions dues aux anciens "magic numbers").
+    do_segment_drag = is_shift and is_alt and not is_ctrl
+    do_reset = is_alt and is_ctrl and not is_shift
+    do_fine_equalized_drag = is_shift and is_ctrl and not is_alt
 
     # Shift + Alt: ajuste les segments du polyBevel (rebuild robuste des données de drag)
-    if is_shift and is_alt and not is_ctrl:
+    if do_segment_drag:
         nodes = state.get("bevel_nodes", [])
+        # Fallback robuste : si les nodes ont été reconstruits/renommés par Maya,
+        # on les re-résout depuis l'historique.
+        if not nodes and state.get("transforms"):
+            nodes = list(_bevel_nodes(state["transforms"]))
+            state["bevel_nodes"] = _existing_bevel_nodes(nodes)
+            nodes = state["bevel_nodes"]
         if not nodes:
             cmds.warning("[BevelUnbevel] Aucun node polyBevel valide pour changer les segments.")
             return
@@ -948,8 +969,8 @@ def _unbevel_drag():
         cmds.refresh(f=True)
         return
 
-    # Alt (ou combo legacy) → reset à 0 explicite
-    if (is_alt and not is_shift and not is_ctrl) or legacy_reset or (is_alt and is_ctrl):
+    # Ctrl + Alt → reset à 0 explicite (Alt seul reste réservé à la navigation viewport Maya).
+    if do_reset:
         for i in range(len(ppData)):
             cmds.scale(0, 0, 0, vLData[i], cs=1, r=1,
                        p=(ppData[i][0], ppData[i][1], ppData[i][2]))
@@ -961,17 +982,16 @@ def _unbevel_drag():
         cmds.refresh(f=True)
         return
 
-    # Pas fin (legacy + Ctrl+Shift)
-    if legacy_fine or (is_ctrl and is_shift):
+    # Ctrl + Shift : verrouille A et B à la même valeur + pas fin.
+    if do_fine_equalized_drag:
         lockCount += move_sign * 1
         state["screenX"] = vpX
         if lockCount > 0:
             getX = int(lockCount / 10) * 10
-            if state["storeCount"] != getX:
-                state["storeCount"] = getX
-                state["storeCountA"] = lockCount
-                state["storeCountB"] = lockCount
-                _apply_unbevel_counts(state, lockCount, lockCount)
+            state["storeCount"] = getX
+            state["storeCountA"] = lockCount
+            state["storeCountB"] = lockCount
+            _apply_unbevel_counts(state, lockCount, lockCount)
             state["viewPortCount"] = state["storeCount"]
         else:
             state["viewPortCount"] = 0.1
@@ -980,10 +1000,7 @@ def _unbevel_drag():
         return
 
     # Déplacement standard
-    if modifiers == 13:
-        step = 0.1
-    else:
-        step = 5
+    step = 5
 
     lockCount += move_sign * step
     state["screenX"] = vpX
@@ -1046,11 +1063,11 @@ def _finalize_unbevel_session():
         except Exception:
             cmds.warning("[BevelUnbevel] Échec du merge final des vertices.")
 
-    if cmds.objExists('saveSel'):
-        cmds.select('saveSel')
+    if cmds.objExists(SAVE_SEL_SET_NAME):
+        cmds.select(SAVE_SEL_SET_NAME)
         meshName = ""
         try:
-            members = cmds.sets('saveSel', q=True) or []
+            members = cmds.sets(SAVE_SEL_SET_NAME, q=True) or []
             if members:
                 meshName = members[0].split('.')[0]
         except Exception:
@@ -1060,7 +1077,7 @@ def _finalize_unbevel_session():
                 mel.eval('doMenuNURBComponentSelection("{}", "edge");'.format(meshName))
             except Exception:
                 pass
-        cmds.delete('saveSel')
+        cmds.delete(SAVE_SEL_SET_NAME)
 
     _kill_existing_unbevel_job()
     __main__._unbevel_state = None

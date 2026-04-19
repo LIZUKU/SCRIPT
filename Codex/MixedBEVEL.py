@@ -498,6 +498,8 @@ def _angle_between_three_p(pA_name, pB_name, pC_name):
     bc = [c[i]-b[i] for i in range(3)]
     nba = math.sqrt(sum(x**2 for x in ba))
     nbc = math.sqrt(sum(x**2 for x in bc))
+    if nba <= 1e-8 or nbc <= 1e-8:
+        return None
     ba = [x/nba for x in ba]
     bc = [x/nbc for x in bc]
     scalar = max(-1.0, min(1.0, sum(aa*bb for aa, bb in zip(ba, bc))))
@@ -667,8 +669,12 @@ def _unbevel_edge_loop(edgelist):
     if len(listVtx) < 3:
         return None, None, None
     checkA = _angle_between_three_p(listVtx[1], listVtx[0], listVtx[-1])
+    if checkA is None:
+        return None, None, None
     angleA = math.degrees(checkA)
     checkB = _angle_between_three_p(listVtx[-2], listVtx[-1], listVtx[0])
+    if checkB is None:
+        return None, None, None
     angleB = math.degrees(checkB)
     angleC = 180 - angleA - angleB
     distanceC = _distance_between_vtx(listVtx[0], listVtx[-1])
@@ -712,6 +718,45 @@ def _calculate_edge_distances(vertex_list):
         distances.append((v2-v1).length())
     return distances
 
+
+def _fallback_group_fractions(group_count):
+    """Fallback stable: répartit linéairement les groupes entre 0 et 1."""
+    if group_count <= 0:
+        return []
+    if group_count == 1:
+        return [0.5]
+    return [float(i) / float(group_count - 1) for i in range(group_count)]
+
+
+def _build_group_fractions(vLData, ordered_loop_vertices):
+    """
+    Construit une fraction [0..1] par groupe UnBevel.
+    On mappe la 1ère vertex de chaque groupe sur la loop de référence,
+    puis fallback linéaire si la topo ne permet pas un mapping fiable.
+    """
+    group_count = len(vLData)
+    if group_count <= 0:
+        return []
+    if not ordered_loop_vertices:
+        return _fallback_group_fractions(group_count)
+
+    index_by_vtx = {v: i for i, v in enumerate(ordered_loop_vertices)}
+    max_index = max(1, len(ordered_loop_vertices) - 1)
+    fractions = []
+    for group in vLData:
+        if not group:
+            fractions.append(None)
+            continue
+        first_vtx = group[0]
+        idx = index_by_vtx.get(first_vtx)
+        fractions.append((float(idx) / float(max_index)) if idx is not None else None)
+
+    if any(f is None for f in fractions):
+        fallback = _fallback_group_fractions(group_count)
+        fractions = [fallback[i] if f is None else f for i, f in enumerate(fractions)]
+    return fractions
+
+
 def _build_unbevel_runtime_data(sel_edges):
     """Construit les buffers nécessaires au drag UnBevel à partir d'edges."""
     sel_edges = cmds.ls(sel_edges, fl=True) or []
@@ -749,19 +794,9 @@ def _build_unbevel_runtime_data(sel_edges):
     if not getVOrder or len(getVOrder) < 2:
         return None
 
-    distances = _calculate_edge_distances(getVOrder)
-    if not distances:
-        return None
-    distances.insert(0, 0)
-    total_distance = sum(distances)
-    if total_distance <= 1e-8:
-        return None
-
-    cumulative_fractions = []
-    cumulative_sum = 0
-    for d in distances:
-        cumulative_sum += d
-        cumulative_fractions.append(round(cumulative_sum / total_distance, 3))
+    cumulative_fractions = _build_group_fractions(vLData, getVOrder)
+    if not cumulative_fractions or len(cumulative_fractions) != len(ppData):
+        cumulative_fractions = _fallback_group_fractions(len(ppData))
 
     return {
         "ppData": ppData,
@@ -976,6 +1011,9 @@ def _unbevel_press():
     if not _ensure_unbevel_runtime_data(state, reason="press"):
         return
     ctx = 'unBevelCtx'
+    if not cmds.draggerContext(ctx, exists=True):
+        cmds.warning("[BevelUnbevel] Contexte UnBevel introuvable (press ignoré).")
+        return
     vpX, vpY, _ = _query_dragger_point(
         ctx_name=ctx,
         point_flag="anchorPoint",

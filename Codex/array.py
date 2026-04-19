@@ -115,6 +115,55 @@ def _safe_delete(obj):
         pass
 
 
+def get_dag_path(node):
+    """
+    Return an MDagPath from a Maya node name (transform or shape).
+    Returns None when the node cannot be resolved.
+    """
+    if not _safe_exists(node):
+        return None
+
+    try:
+        sel = om.MSelectionList()
+        sel.add(node)
+        dag_path = sel.getDagPath(0)
+        return dag_path
+    except:
+        return None
+
+
+def _get_isolated_model_panels():
+    """
+    Return modelPanel names where isolate select / viewSelected is enabled.
+    """
+    panels = cmds.getPanel(type="modelPanel") or []
+    isolated_panels = []
+    for panel in panels:
+        try:
+            if cmds.modelEditor(panel, exists=True) and cmds.modelEditor(panel, q=True, viewSelected=True):
+                isolated_panels.append(panel)
+        except:
+            pass
+    return isolated_panels
+
+
+def add_nodes_to_active_isolate_sets(nodes):
+    """
+    Add nodes to isolate-select sets of active model panels.
+    Safe no-op if no model panel is in isolate mode.
+    """
+    valid_nodes = [n for n in (nodes or []) if _safe_exists(n)]
+    if not valid_nodes:
+        return
+
+    for panel in _get_isolated_model_panels():
+        for node in valid_nodes:
+            try:
+                cmds.isolateSelect(panel, addDagObject=node)
+            except:
+                pass
+
+
 def clamp(v, vmin, vmax):
     return max(vmin, min(vmax, v))
 
@@ -837,6 +886,7 @@ def build_radial_array(objects, angle=360, number=3, repeat=1,
                 previews.append(new_obj)
 
     _PROARRAY_STATE["preview_objects"] = previews
+    add_nodes_to_active_isolate_sets(previews)
     return previews
 
 
@@ -928,6 +978,7 @@ def build_rectangular_array(objects, copies_x=3, copies_y=1, copies_z=1,
                         previews.append(new_obj)
 
     _PROARRAY_STATE["preview_objects"] = previews
+    add_nodes_to_active_isolate_sets(previews)
     return previews
 
 
@@ -961,8 +1012,10 @@ def proarray_bake_array(group_result=True):
         mode = _PROARRAY_STATE.get("array_mode", "radial")
         group_name = "ProArray_Radial_grp" if mode == "radial" else "ProArray_Rect_grp"
         result = cmds.group(final_objects, name=group_name)
+        add_nodes_to_active_isolate_sets([result])
         cmds.select(result)
     else:
+        add_nodes_to_active_isolate_sets(final_objects)
         cmds.select(final_objects)
         result = final_objects
 
@@ -1486,6 +1539,7 @@ def build_curve_distribution(
         _CURVE_STATE["preview_objects"] = results
     else:
         _CURVE_STATE["preview_objects"].extend(results)
+    add_nodes_to_active_isolate_sets(results)
     return results
 
 
@@ -1517,9 +1571,11 @@ def curve_bake_distribution(group_result=True):
 
     if group_result and final_objects:
         result = cmds.group(final_objects, name=CURVE_RESULT_GROUP_NAME)
+        add_nodes_to_active_isolate_sets([result])
         cmds.select(result, r=True)
         return result
     else:
+        add_nodes_to_active_isolate_sets(final_objects)
         cmds.select(final_objects, r=True)
         return final_objects
 

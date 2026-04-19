@@ -58,6 +58,17 @@ def _kill_existing_job():
         except Exception:
             pass
 
+def _kill_existing_unbevel_job():
+    state = getattr(__main__, "_unbevel_state", None)
+    if not state:
+        return
+    jid = state.get("toolChangeJob")
+    if jid and cmds.scriptJob(exists=jid):
+        try:
+            cmds.scriptJob(kill=jid, force=True)
+        except Exception:
+            pass
+
 def _transform_from_edge(edge):
     obj = edge.split(".e[")[0]
     if cmds.objExists(obj) and cmds.nodeType(obj) == "mesh":
@@ -438,6 +449,8 @@ def _vtx_loop_order_check(edgelist):
     getNumber = []
     for s in selEdges:
         evlist = cmds.polyInfo(s, ev=True)
+        if not evlist:
+            continue
         checkNumber = evlist[0].split(':')[1].split('\n')[0].split(' ')
         for c in checkNumber:
             findNumber = ''.join([n for n in c.split('|')[-1] if n.isdigit()])
@@ -458,6 +471,8 @@ def _vtx_loop_order_check(edgelist):
     while len(dup) > 0 and count < 1000:
         checkVtx = transformNode[0] + '.vtx[' + vftOrder[-1] + ']'
         velist = cmds.polyInfo(checkVtx, ve=True)
+        if not velist:
+            break
         getNumber = []
         checkNumber = velist[0].split(':')[1].split('\n')[0].split(' ')
         for c in checkNumber:
@@ -516,6 +531,8 @@ def _get_edge_ring_group(selEdges):
     else:
         oneLoop = selEdges
     oneLoop = cmds.ls(oneLoop, fl=1)
+    if not oneLoop:
+        return [selEdges]
     getCircleState, getVOrder = _vtx_loop_order_check(oneLoop)
     if not getVOrder:
         return [selEdges]
@@ -699,6 +716,9 @@ def _start_unbevel(final_edges):
         "viewPortCount": 0,
         "storeCountA": 100,
         "storeCountB": 100,
+        "activeContext": "unBevelCtx",
+        "toolChangeJob": None,
+        "finalized": False,
     }
 
     # Dragger context
@@ -715,6 +735,14 @@ def _start_unbevel(final_edges):
         undoMode='step'
     )
     cmds.setToolTo(ctx)
+
+    _kill_existing_unbevel_job()
+    job = cmds.scriptJob(
+        event=["ToolChanged",
+               "__import__('__main__')._unbevel_tool_changed_callback()"],
+        protected=True
+    )
+    __main__._unbevel_state["toolChangeJob"] = job
 
     print("[BevelUnbevel] UnBevel démarré. Drag pour ajuster.")
     try:
@@ -872,17 +900,29 @@ def _unbevel_drag():
 
 
 def _unbevel_release():
+    # Important: ne pas finaliser sur mouse release.
+    # La finalisation doit arriver uniquement quand l'utilisateur quitte l'outil (ex: touche Q).
+    cmds.refresh(f=True)
+
+
+def _finalize_unbevel_session():
     state = getattr(__main__, "_unbevel_state", None)
+    if not state or state.get("finalized"):
+        return
+    state["finalized"] = True
+
     try:
         cmds.headsUpDisplay('HUDunBevelStep', rem=True)
     except Exception:
         pass
 
-    if state:
-        vLData = state.get("vLData", [])
-        flattenList = [v for group in vLData for v in group]
-        if flattenList:
+    vLData = state.get("vLData", [])
+    flattenList = [v for group in vLData for v in group]
+    if flattenList:
+        try:
             cmds.polyMergeVertex(flattenList, d=0.001, am=0, ch=0)
+        except Exception:
+            cmds.warning("[BevelUnbevel] Échec du merge final des vertices.")
 
     if cmds.objExists('saveSel'):
         cmds.select('saveSel')
@@ -900,7 +940,7 @@ def _unbevel_release():
                 pass
         cmds.delete('saveSel')
 
-    cmds.setToolTo('selectSuperContext')
+    _kill_existing_unbevel_job()
     __main__._unbevel_state = None
 
     print("[BevelUnbevel] UnBevel terminé.")
@@ -908,6 +948,18 @@ def _unbevel_release():
         cmds.inViewMessage(amg='UnBevel terminé.', pos='midCenterTop', fade=True)
     except Exception:
         pass
+
+
+def _unbevel_tool_changed_callback():
+    state = getattr(__main__, "_unbevel_state", None)
+    if not state or state.get("finalized"):
+        return
+    try:
+        ctx = cmds.currentCtx()
+    except Exception:
+        return
+    if ctx != state.get("activeContext", "unBevelCtx"):
+        _finalize_unbevel_session()
 
 # --------------------------------------------------------------------------
 # Callback bevel → enchaîne avec UnBevel
@@ -986,6 +1038,7 @@ def start_bevel_unbevel():
         return
 
     _kill_existing_job()
+    _kill_existing_unbevel_job()
     _delete_if_exists(SOURCE_SET_NAME)
     _delete_if_exists(ALL_EDGES_SET_NAME)
 
@@ -1048,5 +1101,6 @@ __main__._unbevel_press               = _unbevel_press
 __main__._unbevel_drag                = _unbevel_drag
 __main__._unbevel_release             = _unbevel_release
 __main__._unbevel_current_step        = _unbevel_current_step
+__main__._unbevel_tool_changed_callback = _unbevel_tool_changed_callback
 
 start_bevel_unbevel()

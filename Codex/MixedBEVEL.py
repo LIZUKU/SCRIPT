@@ -25,12 +25,9 @@ import __main__
 
 SOURCE_SET_NAME    = "TMP_bevel_sourceEdges_SET"
 ALL_EDGES_SET_NAME = "TMP_bevel_allEdges_SET"
-SEGMENTS_WINDOW_NAME = "MixedBevelSegmentsWindow"
 
 PERP_DOT_THRESHOLD      = 0.35
 COLLINEAR_DOT_THRESHOLD = 0.92
-MIN_BEVEL_SEGMENTS = 1
-MAX_BEVEL_SEGMENTS = 30
 
 # --------------------------------------------------------------------------
 # Utils généraux
@@ -49,7 +46,6 @@ def _flatten(items):
 def _cleanup():
     for s in [SOURCE_SET_NAME, ALL_EDGES_SET_NAME]:
         _delete_if_exists(s)
-    _close_segment_window()
 
 def _kill_existing_job():
     state = getattr(__main__, "_bevel_listener_state", None)
@@ -101,139 +97,6 @@ def _make_set(name, members):
     if not members:
         raise RuntimeError("Cannot create set '{}': no members.".format(name))
     return cmds.sets(members, n=name)
-
-# --------------------------------------------------------------------------
-# Segments bevel (UI + helpers)
-# --------------------------------------------------------------------------
-
-def _close_segment_window():
-    if cmds.window(SEGMENTS_WINDOW_NAME, exists=True):
-        try:
-            cmds.deleteUI(SEGMENTS_WINDOW_NAME)
-        except Exception:
-            pass
-
-def _segment_attr_name(node):
-    for attr in ("segments", "divisions"):
-        if cmds.attributeQuery(attr, node=node, exists=True):
-            return attr
-    return None
-
-def _clamp_segments(value):
-    try:
-        ivalue = int(round(float(value)))
-    except Exception:
-        ivalue = MIN_BEVEL_SEGMENTS
-    return max(MIN_BEVEL_SEGMENTS, min(MAX_BEVEL_SEGMENTS, ivalue))
-
-def _set_segments_on_nodes(nodes, value):
-    if not nodes:
-        return None
-    target = _clamp_segments(value)
-    applied = False
-    for node in nodes:
-        if not cmds.objExists(node):
-            continue
-        attr = _segment_attr_name(node)
-        if not attr:
-            continue
-        plug = "{}.{}".format(node, attr)
-        if not cmds.getAttr(plug, settable=True):
-            continue
-        try:
-            cmds.setAttr(plug, target)
-            applied = True
-        except Exception:
-            pass
-    return target if applied else None
-
-def _get_segments_from_nodes(nodes):
-    for node in nodes or []:
-        if not cmds.objExists(node):
-            continue
-        attr = _segment_attr_name(node)
-        if not attr:
-            continue
-        try:
-            return int(cmds.getAttr("{}.{}".format(node, attr)))
-        except Exception:
-            continue
-    return None
-
-def _bevel_segment_nodes_from_state():
-    state = getattr(__main__, "_bevel_listener_state", None) or {}
-    nodes = [n for n in state.get("bevel_nodes", []) if cmds.objExists(n)]
-    if nodes:
-        return nodes
-    transforms = state.get("transforms", [])
-    if transforms:
-        return sorted(_bevel_nodes(transforms))
-    return []
-
-def _refresh_segments_field():
-    state = getattr(__main__, "_bevel_listener_state", None) or {}
-    field = state.get("segments_field")
-    if not field or not cmds.intField(field, exists=True):
-        return
-    current = _get_segments_from_nodes(_bevel_segment_nodes_from_state())
-    if current is not None:
-        cmds.intField(field, e=True, v=current)
-
-def _adjust_bevel_segments(delta=1):
-    nodes = _bevel_segment_nodes_from_state()
-    if not nodes:
-        cmds.warning("[BevelUnbevel] Aucun node polyBevel actif pour modifier les segments.")
-        return
-    base = _get_segments_from_nodes(nodes)
-    if base is None:
-        cmds.warning("[BevelUnbevel] Impossible de lire l'attribut de segments du bevel.")
-        return
-    target = _clamp_segments(base + delta)
-    applied = _set_segments_on_nodes(nodes, target)
-    if applied is None:
-        cmds.warning("[BevelUnbevel] Impossible de modifier les segments (attribut verrouillé ou absent).")
-        return
-    _refresh_segments_field()
-    print("[BevelUnbevel] Segments bevel = {}".format(applied))
-
-def _set_bevel_segments_from_ui(*_):
-    state = getattr(__main__, "_bevel_listener_state", None) or {}
-    field = state.get("segments_field")
-    if not field or not cmds.intField(field, exists=True):
-        return
-    value = cmds.intField(field, q=True, v=True)
-    nodes = _bevel_segment_nodes_from_state()
-    applied = _set_segments_on_nodes(nodes, value)
-    if applied is None:
-        cmds.warning("[BevelUnbevel] Échec modification segments.")
-        _refresh_segments_field()
-        return
-    cmds.intField(field, e=True, v=applied)
-    print("[BevelUnbevel] Segments bevel = {}".format(applied))
-
-def _open_segment_window():
-    state = getattr(__main__, "_bevel_listener_state", None)
-    if not state:
-        return
-    _close_segment_window()
-    try:
-        win = cmds.window(SEGMENTS_WINDOW_NAME, title="MixedBevel Segments", sizeable=False)
-        cmds.columnLayout(adj=True, rs=4)
-        cmds.text(l="Ajuster les segments du bevel", align="left")
-        cmds.rowLayout(nc=4, adj=2)
-        cmds.button(l="-", w=32, c=lambda *_: _adjust_bevel_segments(-1))
-        current = _get_segments_from_nodes(_bevel_segment_nodes_from_state())
-        current = current if current is not None else MIN_BEVEL_SEGMENTS
-        field = cmds.intField(v=current, minValue=MIN_BEVEL_SEGMENTS, maxValue=MAX_BEVEL_SEGMENTS,
-                              cc=_set_bevel_segments_from_ui)
-        cmds.button(l="+", w=32, c=lambda *_: _adjust_bevel_segments(1))
-        cmds.button(l="Appliquer", w=70, c=_set_bevel_segments_from_ui)
-        cmds.setParent('..')
-        cmds.text(l="(Plage: {}-{})".format(MIN_BEVEL_SEGMENTS, MAX_BEVEL_SEGMENTS), align="left")
-        cmds.showWindow(win)
-        state["segments_field"] = field
-    except Exception:
-        cmds.warning("[BevelUnbevel] UI indisponible: utilisez _adjust_bevel_segments(delta).")
 
 # --------------------------------------------------------------------------
 # Vecteurs
@@ -1215,17 +1078,13 @@ def start_bevel_unbevel():
         "transforms": transforms,
         "all_edges_set": all_set,
         "source_groups": groups,
-        "bevel_nodes": [],
-        "segments_field": None,
     }
 
     mel.eval('dR_DoCmd("bevelPress");')
 
     after_nodes = _bevel_nodes(transforms)
-    new_nodes = sorted(list(after_nodes - before_nodes) or list(after_nodes))
+    new_nodes = list(after_nodes - before_nodes) or list(after_nodes)
     _configure_bevel(new_nodes)
-    __main__._bevel_listener_state["bevel_nodes"] = new_nodes
-    _open_segment_window()
 
     jid = cmds.scriptJob(
         event=["ToolChanged",
@@ -1235,10 +1094,9 @@ def start_bevel_unbevel():
     __main__._bevel_listener_state["scriptJob"] = jid
 
     print("[BevelUnbevel] Bevel démarré. Appuyer sur Q pour passer à l'UnBevel.")
-    print("[BevelUnbevel] Ajuster les segments avec la mini-fenêtre +/-.")
     try:
         cmds.inViewMessage(
-            amg='Bevel démarré — <hl>+/-</hl> segments dans la fenêtre, puis <hl>Q</hl> pour UnBevel.',
+            amg='Bevel démarré — Appuyer sur <hl>Q</hl> pour passer à l\'UnBevel.',
             pos='midCenterTop', fade=True
         )
     except Exception:
@@ -1252,7 +1110,5 @@ __main__._unbevel_drag                = _unbevel_drag
 __main__._unbevel_release             = _unbevel_release
 __main__._unbevel_current_step        = _unbevel_current_step
 __main__._unbevel_tool_changed_callback = _unbevel_tool_changed_callback
-__main__._adjust_bevel_segments      = _adjust_bevel_segments
-__main__._set_bevel_segments_from_ui = _set_bevel_segments_from_ui
 
 start_bevel_unbevel()

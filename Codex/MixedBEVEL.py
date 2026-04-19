@@ -809,6 +809,43 @@ def _rebuild_unbevel_data_from_state(state):
     cmds.sets(edges, name=SAVE_SEL_SET_NAME, text=SAVE_SEL_SET_NAME)
     return True
 
+
+def _is_component_alive(component):
+    if not component:
+        return False
+    try:
+        return bool(cmds.ls(component))
+    except Exception:
+        return False
+
+
+def _runtime_vertices_alive(state):
+    """Vérifie que les vertices stockées dans l'état existent encore."""
+    for group in state.get("vLData", []) or []:
+        for vtx in group:
+            if not _is_component_alive(vtx):
+                return False
+    return True
+
+
+def _ensure_unbevel_runtime_data(state, reason=""):
+    """
+    Garantit que les buffers runtime UnBevel sont cohérents avec la topo courante.
+    Rebuild automatique si des composants ont été invalidés (ex: changement de segments).
+    """
+    if not state:
+        return False
+    if _runtime_vertices_alive(state):
+        return True
+    if _rebuild_unbevel_data_from_state(state):
+        msg = "[BevelUnbevel] Données UnBevel reconstruites"
+        if reason:
+            msg += " ({})".format(reason)
+        print(msg + ".")
+        return True
+    cmds.warning("[BevelUnbevel] Topologie modifiée: impossible de reconstruire les données UnBevel.")
+    return False
+
 # --------------------------------------------------------------------------
 # UnBevel – dragger context
 # --------------------------------------------------------------------------
@@ -822,10 +859,10 @@ def _start_unbevel(final_edges, bevel_nodes=None, transforms=None, source_groups
         cmds.warning("[BevelUnbevel] Aucune edge valide pour l'UnBevel.")
         return
 
-    # Sauvegarder la sélection
+    # Sauvegarder la sélection (utilisée aussi comme fallback si la topo change).
     if cmds.objExists(SAVE_SEL_SET_NAME):
         cmds.delete(SAVE_SEL_SET_NAME)
-    cmds.sets(name=SAVE_SEL_SET_NAME, text=SAVE_SEL_SET_NAME)
+    cmds.sets(selEdge, name=SAVE_SEL_SET_NAME, text=SAVE_SEL_SET_NAME)
 
     data = _build_unbevel_runtime_data(selEdge)
     if not data:
@@ -903,8 +940,14 @@ def _unbevel_press():
     state = getattr(__main__, "_unbevel_state", None)
     if not state:
         return
+    if not _ensure_unbevel_runtime_data(state, reason="press"):
+        return
     ctx = 'unBevelCtx'
-    vpX, vpY, _ = cmds.draggerContext(ctx, query=True, anchorPoint=True)
+    try:
+        vpX, vpY, _ = cmds.draggerContext(ctx, query=True, anchorPoint=True)
+    except Exception:
+        cmds.warning("[BevelUnbevel] Impossible de lire le draggerContext '{}'. Relancer l'outil.".format(ctx))
+        return
     state["screenX"] = vpX
     state["segmentDragAnchorX"] = vpX
     state["segmentDragStart"] = state.get("currentSegments", _query_bevel_segments(state.get("bevel_nodes")) or 1)
@@ -951,6 +994,8 @@ def _apply_unbevel_counts(state, count_a, count_b):
 def _unbevel_drag():
     state = getattr(__main__, "_unbevel_state", None)
     if not state:
+        return
+    if not _ensure_unbevel_runtime_data(state, reason="drag"):
         return
 
     ctx = 'unBevelCtx'

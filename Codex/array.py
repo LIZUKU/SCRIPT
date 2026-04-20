@@ -1577,40 +1577,67 @@ def _curve_length_to_percent(curve, length_value):
 
 
 def compute_curve_u_samples(curve, count, start_u, end_u, even_by_length=True):
-    count = max(0, int(count))
-    if count <= 0:
-        return []
-    closed_curve = _is_closed_curve(curve)
+    count = max(1, int(count))
     if count == 1:
-        return [start_u if closed_curve else (start_u + end_u) * 0.5]
+        return [(start_u + end_u) * 0.5]
+
+    closed_curve = _is_closed_curve(curve)
+    start_u = clamp(float(start_u), 0.0, 1.0)
+    end_u = clamp(float(end_u), 0.0, 1.0)
+    if end_u < start_u:
+        end_u = start_u
+
+    if closed_curve:
+        span = end_u - start_u
+        if abs(span) < 1e-8:
+            span = 1.0
+
+        if even_by_length:
+            total_len = max(1e-8, get_curve_length(curve))
+            start_len = _curve_percent_to_length(curve, start_u)
+            end_len = _curve_percent_to_length(curve, end_u)
+            if start_len is not None and end_len is not None:
+                usable_len = end_len - start_len
+                if usable_len <= 0.0:
+                    usable_len = total_len
+
+                step_len = usable_len / float(count)
+                result = []
+                for i in range(count):
+                    sample_len = (start_len + (step_len * i)) % total_len
+                    u = _curve_length_to_percent(curve, sample_len)
+                    if u is None:
+                        break
+                    result.append(u)
+                if len(result) == count:
+                    return result
+                cmds.warning(
+                    "Even-by-length sampling fallback: '{}' has degenerate segment, using parametric spacing.".format(curve)
+                )
+            else:
+                cmds.warning(
+                    "Even-by-length sampling unavailable for '{}', using parametric spacing.".format(curve)
+                )
+
+        result = []
+        for i in range(count):
+            t = float(i) / float(count)
+            u = start_u + (span * t)
+            result.append(clamp(u, 0.0, 1.0))
+        return result
 
     if even_by_length:
         start_len = _curve_percent_to_length(curve, start_u)
         end_len = _curve_percent_to_length(curve, end_u)
         if start_len is not None and end_len is not None:
             result = []
-            if closed_curve:
-                total_len = max(0.0, get_curve_length(curve))
-                span_len = end_len - start_len
-                if abs(span_len) < 1e-8:
-                    span_len = total_len
-                step_len = span_len / float(count)
-                for i in range(count):
-                    sample_len = start_len + (step_len * i)
-                    if total_len > 1e-8:
-                        sample_len = sample_len % total_len
-                    u = _curve_length_to_percent(curve, sample_len)
-                    if u is None:
-                        break
-                    result.append(u)
-            else:
-                for i in range(count):
-                    t = float(i) / float(count - 1)
-                    sample_len = start_len + ((end_len - start_len) * t)
-                    u = _curve_length_to_percent(curve, sample_len)
-                    if u is None:
-                        break
-                    result.append(u)
+            for i in range(count):
+                t = float(i) / float(max(1, count - 1))
+                sample_len = start_len + ((end_len - start_len) * t)
+                u = _curve_length_to_percent(curve, sample_len)
+                if u is None:
+                    break
+                result.append(u)
             if len(result) == count:
                 return result
             cmds.warning(
@@ -1621,13 +1648,7 @@ def compute_curve_u_samples(curve, count, start_u, end_u, even_by_length=True):
                 "Even-by-length sampling unavailable for '{}', using parametric spacing.".format(curve)
             )
 
-    if closed_curve:
-        span = end_u - start_u
-        if abs(span) < 1e-8:
-            span = 1.0
-        return [start_u + (span * (float(i) / float(count))) for i in range(count)]
-
-    return [start_u + ((end_u - start_u) * (float(i) / float(count - 1))) for i in range(count)]
+    return [start_u + ((end_u - start_u) * (float(i) / float(max(1, count - 1)))) for i in range(count)]
 
 
 def _is_closed_curve(curve):
@@ -1928,6 +1949,7 @@ def build_curve_distribution(
         end_u = start_u
 
     if auto_fit:
+        auto_fit_trim_ends = trim_ends and (not _is_closed_curve(curve))
         count = compute_auto_fit_count(
             mesh=primary_mesh,
             curve=curve,
@@ -1937,7 +1959,7 @@ def build_curve_distribution(
             padding=padding,
             base_scale=base_scale,
             random_scale=rand_scale,
-            trim_ends=trim_ends,
+            trim_ends=auto_fit_trim_ends,
             safety_multiplier=safety_multiplier,
             max_count=max_count
         )
@@ -2012,7 +2034,7 @@ def build_curve_distribution(
 
             if is_closed and first_u is not None and i > 0:
                 u_delta = abs(float(u) - float(first_u))
-                if (u_delta <= 1e-8) or (abs(1.0 - u_delta) <= 1e-8):
+                if (u_delta <= 1e-6) or (abs(1.0 - u_delta) <= 1e-6):
                     continue
 
             if use_instance:

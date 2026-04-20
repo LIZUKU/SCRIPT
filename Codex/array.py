@@ -72,6 +72,8 @@ _PROARRAY_STATE = {
 
 _CURVE_STATE = {
     "mesh": None,
+    "meshes": [],
+    "temp_curves": [],
     "curves": [],
     "preview_objects": [],
     "script_jobs": [],
@@ -1053,7 +1055,11 @@ def curve_full_cleanup():
             pass
     _CURVE_STATE["script_jobs"] = []
     _CURVE_STATE["mesh"] = None
+    _CURVE_STATE["meshes"] = []
     _CURVE_STATE["curves"] = []
+    for c in _CURVE_STATE.get("temp_curves", []):
+        _safe_delete(c)
+    _CURVE_STATE["temp_curves"] = []
     _CURVE_STATE["started"] = False
     _CURVE_STATE["baked"] = False
     _CURVE_STATE["is_processing"] = False
@@ -1081,6 +1087,145 @@ def is_curve_transform(obj):
         if cmds.nodeType(s) == "nurbsCurve":
             return True
     return False
+
+
+def _extract_edge_components(selection_items):
+    edge_components = []
+    for item in selection_items or []:
+        if ".e[" in item and _safe_exists(item.split(".e[")[0]):
+            edge_components.extend(cmds.ls(item, fl=True) or [])
+    return edge_components
+
+
+def _component_to_mesh_and_index(edge_component):
+    try:
+        mesh = edge_component.split(".e[", 1)[0]
+        index = int(edge_component.split(".e[", 1)[1].rstrip("]"))
+        return mesh, index
+    except:
+        return None, None
+
+
+def _edge_loops_to_curves_from_selection():
+    selection_items = cmds.ls(sl=True, long=True, fl=True) or []
+    edge_components = _extract_edge_components(selection_items)
+    if not edge_components:
+        return [], []
+
+    curves = []
+    warnings = []
+    processed = set()
+    original_selection = cmds.ls(sl=True, long=True) or []
+
+    try:
+        for edge in edge_components:
+            mesh, edge_idx = _component_to_mesh_and_index(edge)
+            if not mesh or edge_idx is None:
+                continue
+            edge_key = "{}.e[{}]".format(mesh, edge_idx)
+            if edge_key in processed:
+                continue
+
+            loop_indices = []
+            try:
+                loop_indices = cmds.polySelect(mesh, edgeLoop=edge_idx) or []
+            except:
+                loop_indices = []
+
+            if isinstance(loop_indices, int):
+                loop_indices = [loop_indices]
+            if not loop_indices:
+                loop_indices = [edge_idx]
+
+            loop_edges = ["{}.e[{}]".format(mesh, i) for i in loop_indices]
+            for le in loop_edges:
+                processed.add(le)
+
+            try:
+                cmds.select(loop_edges, r=True)
+                curve_res = cmds.polyToCurve(form=2, degree=1, conformToSmoothMeshPreview=1, ch=False)
+                curve_transform = curve_res[0] if isinstance(curve_res, (list, tuple)) else curve_res
+                if curve_transform and _safe_exists(curve_transform) and is_curve_transform(curve_transform):
+                    curves.append(curve_transform)
+                else:
+                    warnings.append("Failed to create curve from edge loop on {}".format(mesh.split("|")[-1]))
+            except Exception as e:
+                warnings.append("polyToCurve failed on {}: {}".format(mesh.split("|")[-1], str(e)))
+    finally:
+        if original_selection:
+            cmds.select(original_selection, r=True)
+        else:
+            cmds.select(clear=True)
+
+    unique_curves = []
+    seen = set()
+    for c in curves:
+        if c not in seen:
+            seen.add(c)
+            unique_curves.append(c)
+    return unique_curves, warnings
+
+
+def _pick_mesh_for_sample(meshes, mode, step, seed, sample_index):
+    if not meshes:
+        return None
+    if len(meshes) == 1:
+        return meshes[0]
+
+    safe_step = max(1, int(step))
+    if mode == "random":
+        rnd = random.Random((int(seed) * 1000033) + (sample_index * 15731))
+        return meshes[rnd.randrange(len(meshes))]
+    if mode == "every_n":
+        block_index = (sample_index // safe_step) % len(meshes)
+        return meshes[block_index]
+    return meshes[sample_index % len(meshes)]
+
+
+def estimate_mesh_spacing_multi(meshes, axis_mode="longest", extra_padding=0.0, base_scale=1.0, random_scale=0.0):
+    valid_meshes = [m for m in (meshes or []) if _safe_exists(m)]
+    if not valid_meshes:
+        return 0.0001
+    return max(
+        estimate_mesh_spacing(m, axis_mode=axis_mode, extra_padding=extra_padding, base_scale=base_scale, random_scale=random_scale)
+        for m in valid_meshes
+    )
+
+
+def compute_auto_fit_count_multi(meshes, curve, start_u, end_u,
+                                 axis_mode="longest",
+                                 padding=0.0,
+                                 base_scale=1.0,
+                                 random_scale=0.0,
+                                 trim_ends=True,
+                                 safety_multiplier=1.0,
+                                 max_count=None):
+    valid_meshes = [m for m in (meshes or []) if _safe_exists(m)]
+    if not valid_meshes or not _safe_exists(curve):
+        return 1
+    worst_mesh = max(
+        valid_meshes,
+        key=lambda m: estimate_mesh_spacing(
+            m,
+            axis_mode=axis_mode,
+            extra_padding=padding,
+            base_scale=base_scale,
+            random_scale=random_scale
+        )
+    )
+    return compute_auto_fit_count(
+        mesh=worst_mesh,
+        curve=curve,
+        start_u=start_u,
+        end_u=end_u,
+        axis_mode=axis_mode,
+        padding=padding,
+        base_scale=base_scale,
+        random_scale=random_scale,
+        trim_ends=trim_ends,
+        safety_multiplier=safety_multiplier,
+        max_count=max_count
+    )
 
 
 def get_curve_length(curve):
@@ -1347,9 +1492,14 @@ def build_curve_distribution(
     orient_mode="world_up",
     center_on_bbox=False,
     even_by_length=True,
+    meshes=None,
+    mesh_pick_mode="cycle",
+    mesh_pick_step=2,
 ):
-    if not _safe_exists(mesh) or not _safe_exists(curve):
+    valid_meshes = [m for m in (meshes or [mesh]) if _safe_exists(m)]
+    if not valid_meshes or not _safe_exists(curve):
         return []
+    primary_mesh = valid_meshes[0]
 
     if clear_existing:
         curve_cleanup_preview()
@@ -1361,7 +1511,7 @@ def build_curve_distribution(
 
     if auto_fit:
         count = compute_auto_fit_count(
-            mesh=mesh,
+            mesh=primary_mesh,
             curve=curve,
             start_u=start_u,
             end_u=end_u,
@@ -1378,33 +1528,35 @@ def build_curve_distribution(
     if count <= 0:
         return []
     results = []
-    local_center_offset = get_mesh_center_offset_local(mesh)
+    local_center_offsets = {m: get_mesh_center_offset_local(m) for m in valid_meshes}
 
     proxy_mesh = None
-    source_mesh = mesh
+    source_mesh = primary_mesh
     use_proxy = False
+    use_proxy_mode = len(valid_meshes) == 1
 
-    try:
-        bbox = cmds.exactWorldBoundingBox(mesh)
-        bbox_center = [
-            (bbox[0] + bbox[3]) * 0.5,
-            (bbox[1] + bbox[4]) * 0.5,
-            (bbox[2] + bbox[5]) * 0.5,
-        ]
-        offset = [-bbox_center[0], -bbox_center[1], -bbox_center[2]]
+    if use_proxy_mode:
+        try:
+            bbox = cmds.exactWorldBoundingBox(primary_mesh)
+            bbox_center = [
+                (bbox[0] + bbox[3]) * 0.5,
+                (bbox[1] + bbox[4]) * 0.5,
+                (bbox[2] + bbox[5]) * 0.5,
+            ]
+            offset = [-bbox_center[0], -bbox_center[1], -bbox_center[2]]
 
-        if vec_len(offset) > 0.001:
-            proxy_mesh = cmds.duplicate(mesh, rr=True, name="__curveScatter_proxy__")[0]
-            cmds.move(offset[0], offset[1], offset[2], proxy_mesh + ".vtx[*]", r=True, ws=True)
-            cmds.delete(proxy_mesh, constructionHistory=True)
-            cmds.makeIdentity(proxy_mesh, apply=True, t=True, r=True, s=True, n=False, pn=True)
-            cmds.xform(proxy_mesh, ws=True, pivots=[0, 0, 0])
-            source_mesh = proxy_mesh
-            use_proxy = True
-    except Exception as e:
-        cmds.warning("Proxy mesh creation failed: {}".format(str(e)))
-        source_mesh = mesh
-        use_proxy = False
+            if vec_len(offset) > 0.001:
+                proxy_mesh = cmds.duplicate(primary_mesh, rr=True, name="__curveScatter_proxy__")[0]
+                cmds.move(offset[0], offset[1], offset[2], proxy_mesh + ".vtx[*]", r=True, ws=True)
+                cmds.delete(proxy_mesh, constructionHistory=True)
+                cmds.makeIdentity(proxy_mesh, apply=True, t=True, r=True, s=True, n=False, pn=True)
+                cmds.xform(proxy_mesh, ws=True, pivots=[0, 0, 0])
+                source_mesh = proxy_mesh
+                use_proxy = True
+        except Exception as e:
+            cmds.warning("Proxy mesh creation failed: {}".format(str(e)))
+            source_mesh = primary_mesh
+            use_proxy = False
 
     trimmed_start_u = start_u
     trimmed_end_u = end_u
@@ -1412,7 +1564,7 @@ def build_curve_distribution(
     if trim_ends and count > 1:
         curve_len = max(0.0001, get_curve_length(curve))
         step_est = estimate_mesh_spacing(
-            mesh,
+            primary_mesh,
             axis_mode=fit_axis_mode,
             extra_padding=padding,
             base_scale=base_scale,
@@ -1447,9 +1599,15 @@ def build_curve_distribution(
                 continue
 
             if use_instance:
-                new_obj = cmds.instance(source_mesh, name="{}{}{:03d}".format(CURVE_PREVIEW_PREFIX, name_prefix, i + 1))[0]
+                sample_mesh = source_mesh if use_proxy_mode else _pick_mesh_for_sample(
+                    valid_meshes, mesh_pick_mode, mesh_pick_step, random_seed, i
+                )
+                new_obj = cmds.instance(sample_mesh, name="{}{}{:03d}".format(CURVE_PREVIEW_PREFIX, name_prefix, i + 1))[0]
             else:
-                new_obj = cmds.duplicate(source_mesh, rr=True, name="{}{}{:03d}".format(CURVE_PREVIEW_PREFIX, name_prefix, i + 1))[0]
+                sample_mesh = source_mesh if use_proxy_mode else _pick_mesh_for_sample(
+                    valid_meshes, mesh_pick_mode, mesh_pick_step, random_seed, i
+                )
+                new_obj = cmds.duplicate(sample_mesh, rr=True, name="{}{}{:03d}".format(CURVE_PREVIEW_PREFIX, name_prefix, i + 1))[0]
 
             rx_rand = rand_rot[0] * get_random_for_index(random_seed, i, 0)
             ry_rand = rand_rot[1] * get_random_for_index(random_seed, i, 1)
@@ -1491,6 +1649,7 @@ def build_curve_distribution(
                     os=True
                 )
                 if center_on_bbox and not use_proxy:
+                    local_center_offset = local_center_offsets.get(sample_mesh, (0.0, 0.0, 0.0))
                     cmds.move(
                         -local_center_offset[0],
                         -local_center_offset[1],
@@ -1512,6 +1671,7 @@ def build_curve_distribution(
 
                 cmds.xform(new_obj, ws=True, ro=final_rot)
                 if center_on_bbox and not use_proxy:
+                    local_center_offset = local_center_offsets.get(sample_mesh, (0.0, 0.0, 0.0))
                     cmds.move(
                         -local_center_offset[0],
                         -local_center_offset[1],
@@ -1545,6 +1705,7 @@ def build_curve_distribution(
 
 def curve_bake_distribution(group_result=True):
     previews = [obj for obj in _CURVE_STATE.get("preview_objects", []) if _safe_exists(obj)]
+    meshes = [m for m in _CURVE_STATE.get("meshes", []) if _safe_exists(m)]
     mesh = _CURVE_STATE.get("mesh")
 
     if not previews:
@@ -1566,7 +1727,9 @@ def curve_bake_distribution(group_result=True):
 
     _CURVE_STATE["preview_objects"] = []
 
-    if mesh and _safe_exists(mesh):
+    if meshes:
+        cmds.select(meshes, r=True)
+    elif mesh and _safe_exists(mesh):
         cmds.select(mesh, r=True)
 
     if group_result and final_objects:
@@ -1626,6 +1789,10 @@ class ProArrayTab(QtWidgets.QWidget, SliderMixin):
                     widget.setChecked(raw)
                 else:
                     widget.setChecked(str(raw).lower() in ("1", "true", "yes"))
+            elif isinstance(widget, QtWidgets.QComboBox):
+                idx = widget.findText(str(raw))
+                if idx >= 0:
+                    widget.setCurrentIndex(idx)
         settings.endGroup()
 
     def save_settings(self, settings):
@@ -1638,6 +1805,8 @@ class ProArrayTab(QtWidgets.QWidget, SliderMixin):
                 settings.setValue(key, widget.value())
             elif isinstance(widget, (QtWidgets.QCheckBox, QtWidgets.QRadioButton)):
                 settings.setValue(key, widget.isChecked())
+            elif isinstance(widget, QtWidgets.QComboBox):
+                settings.setValue(key, widget.currentText())
         settings.endGroup()
 
     def reset_settings(self):
@@ -1646,6 +1815,10 @@ class ProArrayTab(QtWidgets.QWidget, SliderMixin):
                 widget.setValue(default_value)
             elif isinstance(widget, (QtWidgets.QCheckBox, QtWidgets.QRadioButton)):
                 widget.setChecked(default_value)
+            elif isinstance(widget, QtWidgets.QComboBox):
+                idx = widget.findText(str(default_value))
+                if idx >= 0:
+                    widget.setCurrentIndex(idx)
 
     def _request_parent_resize(self):
         parent = self.window()
@@ -2196,6 +2369,10 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
                     widget.setChecked(raw)
                 else:
                     widget.setChecked(str(raw).lower() in ("1", "true", "yes"))
+            elif isinstance(widget, QtWidgets.QComboBox):
+                idx = widget.findText(str(raw))
+                if idx >= 0:
+                    widget.setCurrentIndex(idx)
         settings.endGroup()
         self._sync_count_preset_from_range()
 
@@ -2210,6 +2387,8 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
                 settings.setValue(key, widget.value())
             elif isinstance(widget, (QtWidgets.QCheckBox, QtWidgets.QRadioButton)):
                 settings.setValue(key, widget.isChecked())
+            elif isinstance(widget, QtWidgets.QComboBox):
+                settings.setValue(key, widget.currentText())
         settings.endGroup()
 
     def reset_settings(self):
@@ -2218,6 +2397,10 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
                 widget.setValue(default_value)
             elif isinstance(widget, (QtWidgets.QCheckBox, QtWidgets.QRadioButton)):
                 widget.setChecked(default_value)
+            elif isinstance(widget, QtWidgets.QComboBox):
+                idx = widget.findText(str(default_value))
+                if idx >= 0:
+                    widget.setCurrentIndex(idx)
         self._set_count_max(15)
 
     def _request_parent_resize(self):
@@ -2290,7 +2473,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         input_label.setObjectName("sectionLabel")
         layout.addWidget(input_label)
 
-        self.mesh_label = QtWidgets.QLabel("Mesh : -")
+        self.mesh_label = QtWidgets.QLabel("Mesh(es) : -")
         layout.addWidget(self.mesh_label)
 
         self.curve_label = QtWidgets.QLabel("Curve : -")
@@ -2353,6 +2536,23 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         self.padding_slider, self.padding_spin = self._add_slider(layout, "Padding", -10.0, 50.0, 0.0, 3, label_width=110)
         self.safety_slider, self.safety_spin = self._add_slider(layout, "Fit Safety", 0.5, 3.0, 1.05, 3, label_width=110)
         self.auto_max_slider, self.auto_max_spin = self._add_slider(layout, "Max Count", 1, 5000, 1000, 0, label_width=110)
+
+        self.mesh_order_combo = QtWidgets.QComboBox()
+        self.mesh_order_combo.addItems(["Cycle", "Every N", "Random"])
+        self.mesh_order_combo.currentTextChanged.connect(self._on_rebuild)
+        self.mesh_order_combo.setProperty("settings_key", "mesh_order_mode")
+        self._register_default(self.mesh_order_combo, "Cycle")
+
+        mesh_order_row = QtWidgets.QHBoxLayout()
+        mesh_order_row.setSpacing(4)
+        mesh_order_lbl = QtWidgets.QLabel("Mesh Order")
+        mesh_order_lbl.setFixedWidth(110)
+        mesh_order_row.addWidget(mesh_order_lbl)
+        mesh_order_row.addWidget(self.mesh_order_combo)
+        mesh_order_row.addStretch()
+        layout.addLayout(mesh_order_row)
+
+        self.mesh_every_n_slider, self.mesh_every_n_spin = self._add_slider(layout, "Every N", 1, 10, 2, 0, label_width=110)
 
         axis_row = QtWidgets.QHBoxLayout()
         axis_row.setSpacing(8)
@@ -2495,6 +2695,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
             (self.padding_spin, "padding", 0.0),
             (self.safety_spin, "fit_safety", 1.05),
             (self.auto_max_spin, "auto_max", 1000),
+            (self.mesh_every_n_spin, "mesh_every_n", 2),
             (self.offx_spin, "off_x", 0.0),
             (self.offy_spin, "off_y", 0.0),
             (self.offz_spin, "off_z", 0.0),
@@ -2517,6 +2718,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
             (self.fit_axis_y, "fit_axis_y", False),
             (self.fit_axis_z, "fit_axis_z", False),
             (self.fit_axis_longest, "fit_axis_longest", True),
+            (self.mesh_order_combo, "mesh_order_mode", "Cycle"),
         ]
         for widget, key, default_value in controls:
             widget.setProperty("settings_key", key)
@@ -2658,10 +2860,16 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
             self.btn_start.setStyleSheet("")
 
     def _update_info_labels(self):
+        meshes = [m for m in _CURVE_STATE.get("meshes", []) if _safe_exists(m)]
         mesh = _CURVE_STATE.get("mesh")
         curves = _CURVE_STATE.get("curves", [])
-
-        self.mesh_label.setText("Mesh : {}".format(mesh.split("|")[-1] if mesh else "-"))
+        if meshes:
+            if len(meshes) == 1:
+                self.mesh_label.setText("Mesh : {}".format(meshes[0].split("|")[-1]))
+            else:
+                self.mesh_label.setText("Meshes : {} selected".format(len(meshes)))
+        else:
+            self.mesh_label.setText("Mesh : {}".format(mesh.split("|")[-1] if mesh else "-"))
         if curves:
             if len(curves) == 1:
                 self.curve_label.setText("Curve : {}".format(curves[0].split("|")[-1]))
@@ -2685,13 +2893,13 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
                 pass
         _CURVE_STATE["script_jobs"] = []
 
-        mesh = _CURVE_STATE.get("mesh")
+        meshes = [m for m in _CURVE_STATE.get("meshes", []) if _safe_exists(m)]
         curves = _CURVE_STATE.get("curves", [])
         ui = _CURVE_STATE.get("ui_instance")
         if not ui:
             return
 
-        if mesh and _safe_exists(mesh):
+        for mesh in meshes:
             for shape in cmds.listRelatives(mesh, shapes=True, type="mesh") or []:
                 for attr in (".outMesh", ".worldMesh"):
                     try:
@@ -2737,28 +2945,35 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         self._do_rebuild()
 
     def _on_start(self):
-        selection = get_transform_from_selection()
+        selection = cmds.ls(sl=True, long=True, fl=True) or []
+        transforms = cmds.ls(sl=True, long=True, transforms=True) or []
+        meshes = [obj for obj in transforms if is_mesh_transform(obj)]
+        curves = [obj for obj in transforms if is_curve_transform(obj)]
+        temp_curves = []
 
-        if len(selection) < 2:
-            cmds.warning("Sélectionne d'abord ton mesh puis une ou plusieurs curves.")
-            self.status_label.setText("Select mesh then curve(s)")
-            return
-
-        mesh = selection[0]
-        curves = [obj for obj in selection[1:] if is_curve_transform(obj)]
-
-        if not is_mesh_transform(mesh):
-            cmds.warning("Le premier objet sélectionné doit être un mesh transform.")
-            self.status_label.setText("First selection must be a mesh")
+        if not meshes:
+            cmds.warning("Sélectionne au moins un mesh transform.")
+            self.status_label.setText("Need at least one mesh")
             return
 
         if not curves:
-            cmds.warning("Après le mesh, sélectionne au moins une NURBS curve transform.")
-            self.status_label.setText("Need at least one curve")
+            generated_curves, warnings = _edge_loops_to_curves_from_selection()
+            for msg in warnings[:3]:
+                cmds.warning(msg)
+            if len(warnings) > 3:
+                cmds.warning("{} additional conversion warnings.".format(len(warnings) - 3))
+            curves = [c for c in generated_curves if is_curve_transform(c)]
+            temp_curves = curves[:]
+
+        if not curves:
+            cmds.warning("Sélectionne une ou plusieurs curves, ou des edge loops convertibles.")
+            self.status_label.setText("Need curve(s) or edge loops")
             return
 
-        _CURVE_STATE["mesh"] = mesh
+        _CURVE_STATE["mesh"] = meshes[0]
+        _CURVE_STATE["meshes"] = meshes
         _CURVE_STATE["curves"] = curves
+        _CURVE_STATE["temp_curves"] = temp_curves
         _CURVE_STATE["started"] = True
         _CURVE_STATE["baked"] = False
         self._setup_live_callbacks()
@@ -2766,7 +2981,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         self._update_start_button()
         self._update_info_labels()
         self.select_frame.setVisible(True)
-        self.status_label.setText("Started - {} curve(s)".format(len(curves)))
+        self.status_label.setText("Started - {} mesh(es), {} curve(s)".format(len(meshes), len(curves)))
 
         self._do_rebuild()
         self._request_parent_resize()
@@ -2775,13 +2990,16 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         if not _CURVE_STATE.get("started"):
             return
 
+        meshes = [m for m in _CURVE_STATE.get("meshes", []) if _safe_exists(m)]
         mesh = _CURVE_STATE.get("mesh")
         curves = _CURVE_STATE.get("curves", [])
 
         valid_curves = [c for c in curves if _safe_exists(c)]
-        if not _safe_exists(mesh) or not valid_curves:
+        if (not meshes and not _safe_exists(mesh)) or not valid_curves:
             self.status_label.setText("Mesh or curve(s) missing")
             return
+        if not meshes and _safe_exists(mesh):
+            meshes = [mesh]
 
         if _CURVE_STATE.get("is_processing"):
             return
@@ -2804,13 +3022,20 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
             padding = float(self.padding_spin.value())
             fit_safety = float(self.safety_spin.value())
             max_count = int(self.auto_max_spin.value())
+            mesh_every_n = int(self.mesh_every_n_spin.value())
+            mesh_order_mode_text = self.mesh_order_combo.currentText().strip().lower()
+            mesh_order_mode = "cycle"
+            if mesh_order_mode_text == "every n":
+                mesh_order_mode = "every_n"
+            elif mesh_order_mode_text == "random":
+                mesh_order_mode = "random"
             trim_ends = self.chk_trim_ends.isChecked()
             auto_fit = self.chk_auto_fit.isChecked()
             lock_no_overlap = self.chk_lock_no_overlap.isChecked()
             even_by_length = self.chk_even_length.isChecked()
 
-            safe_count_limit = compute_auto_fit_count(
-                mesh=mesh,
+            safe_count_limit = compute_auto_fit_count_multi(
+                meshes=meshes,
                 curve=valid_curves[0],
                 start_u=start_u,
                 end_u=end_u,
@@ -2823,8 +3048,8 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
             )
 
             if auto_fit:
-                count = compute_auto_fit_count(
-                    mesh=mesh,
+                count = compute_auto_fit_count_multi(
+                    meshes=meshes,
                     curve=valid_curves[0],
                     start_u=start_u,
                     end_u=end_u,
@@ -2904,13 +3129,16 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
                     name_prefix="c{}__".format(idx + 1),
                     orient_mode=orient_mode,
                     center_on_bbox=center_on_bbox,
-                    even_by_length=even_by_length
+                    even_by_length=even_by_length,
+                    meshes=meshes,
+                    mesh_pick_mode=mesh_order_mode,
+                    mesh_pick_step=mesh_every_n
                 )
                 all_results.extend(result)
                 usable_len += get_curve_length(curve) * max(0.0, (end_u - start_u))
 
-            step_est = estimate_mesh_spacing(
-                mesh,
+            step_est = estimate_mesh_spacing_multi(
+                meshes,
                 axis_mode=fit_axis,
                 extra_padding=padding,
                 base_scale=base_scale,
@@ -2943,9 +3171,9 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
             _CURVE_STATE["is_processing"] = False
 
     def _on_select_mesh(self):
-        mesh = _CURVE_STATE.get("mesh")
-        if mesh and _safe_exists(mesh):
-            cmds.select(mesh, r=True)
+        meshes = [m for m in _CURVE_STATE.get("meshes", []) if _safe_exists(m)]
+        if meshes:
+            cmds.select(meshes, r=True)
 
     def _on_select_curve(self):
         curves = [c for c in _CURVE_STATE.get("curves", []) if _safe_exists(c)]
@@ -2962,7 +3190,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         curve_full_cleanup()
         self._update_start_button()
         self.select_frame.setVisible(False)
-        self.mesh_label.setText("Mesh : -")
+        self.mesh_label.setText("Mesh(es) : -")
         self.curve_label.setText("Curve : -")
         self.curve_length_label.setText("Length Total : -")
         self.status_label.setText("")
@@ -3011,6 +3239,7 @@ class ProToolsCombinedUI(QtWidgets.QDialog):
         self._min_width_proarray = 360
         self._min_width_curve = 390
         self._max_auto_height = 900
+        self._ui_scale_percent = 100
         self._settings = QtCore.QSettings(SETTINGS_ORG, SETTINGS_APP)
 
         self._build_ui()
@@ -3027,6 +3256,25 @@ class ProToolsCombinedUI(QtWidgets.QDialog):
         layout.setSpacing(6)
 
         top_row = QtWidgets.QHBoxLayout()
+        top_row.setSpacing(6)
+        self.ui_scale_label = QtWidgets.QLabel("UI Scale")
+        top_row.addWidget(self.ui_scale_label)
+        self.ui_scale_spin = QtWidgets.QSpinBox()
+        self.ui_scale_spin.setRange(70, 130)
+        self.ui_scale_spin.setSingleStep(5)
+        self.ui_scale_spin.setSuffix("%")
+        self.ui_scale_spin.setFixedWidth(74)
+        self.ui_scale_spin.valueChanged.connect(self._on_ui_scale_changed)
+        top_row.addWidget(self.ui_scale_spin)
+
+        self.ui_scale_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.ui_scale_slider.setRange(70, 130)
+        self.ui_scale_slider.setSingleStep(1)
+        self.ui_scale_slider.setPageStep(5)
+        self.ui_scale_slider.setFixedWidth(120)
+        self.ui_scale_slider.valueChanged.connect(self._on_ui_scale_changed)
+        top_row.addWidget(self.ui_scale_slider)
+
         top_row.addStretch()
         self.btn_reset_settings = QtWidgets.QPushButton("Reset All Settings")
         self.btn_reset_settings.setToolTip("Reset ProArray + Curve settings and clear saved preferences")
@@ -3060,11 +3308,21 @@ class ProToolsCombinedUI(QtWidgets.QDialog):
     def _load_settings(self):
         self.tab_proarray.load_settings(self._settings)
         self.tab_curve.load_settings(self._settings)
+        self._ui_scale_percent = parse_int_flexible(self._settings.value("ui/scale_percent", 100), 100)
+        self._ui_scale_percent = int(clamp(self._ui_scale_percent, 70, 130))
+        self.ui_scale_spin.blockSignals(True)
+        self.ui_scale_slider.blockSignals(True)
+        self.ui_scale_spin.setValue(self._ui_scale_percent)
+        self.ui_scale_slider.setValue(self._ui_scale_percent)
+        self.ui_scale_spin.blockSignals(False)
+        self.ui_scale_slider.blockSignals(False)
+        self._apply_ui_scale(self._ui_scale_percent)
         tab_index = int(float(self._settings.value("ui/current_tab", 0)))
         self.tabs.setCurrentIndex(clamp(tab_index, 0, self.tabs.count() - 1))
 
     def _save_settings(self):
         self._settings.setValue("ui/current_tab", self.tabs.currentIndex())
+        self._settings.setValue("ui/scale_percent", int(self._ui_scale_percent))
         self.tab_proarray.save_settings(self._settings)
         self.tab_curve.save_settings(self._settings)
         self._settings.sync()
@@ -3073,7 +3331,38 @@ class ProToolsCombinedUI(QtWidgets.QDialog):
         self._settings.clear()
         self.tab_proarray.reset_settings()
         self.tab_curve.reset_settings()
+        self._ui_scale_percent = 100
+        self.ui_scale_spin.blockSignals(True)
+        self.ui_scale_slider.blockSignals(True)
+        self.ui_scale_spin.setValue(100)
+        self.ui_scale_slider.setValue(100)
+        self.ui_scale_spin.blockSignals(False)
+        self.ui_scale_slider.blockSignals(False)
+        self._apply_ui_scale(100)
         self.request_resize()
+
+    def _on_ui_scale_changed(self, value):
+        value = int(clamp(value, 70, 130))
+        self._ui_scale_percent = value
+        sender = self.sender()
+        if sender is self.ui_scale_spin:
+            self.ui_scale_slider.blockSignals(True)
+            self.ui_scale_slider.setValue(value)
+            self.ui_scale_slider.blockSignals(False)
+        elif sender is self.ui_scale_slider:
+            self.ui_scale_spin.blockSignals(True)
+            self.ui_scale_spin.setValue(value)
+            self.ui_scale_spin.blockSignals(False)
+        self._apply_ui_scale(value)
+        self.request_resize()
+
+    def _apply_ui_scale(self, percent):
+        scale = max(0.7, min(1.3, float(percent) / 100.0))
+        base_font = self.font()
+        base_point_size = 9.0
+        scaled_font = QtGui.QFont(base_font)
+        scaled_font.setPointSizeF(max(7.0, base_point_size * scale))
+        self.setFont(scaled_font)
 
     def request_resize(self):
         QtCore.QTimer.singleShot(0, lambda: self._apply_tab_size(self.tabs.currentIndex(), force=True))

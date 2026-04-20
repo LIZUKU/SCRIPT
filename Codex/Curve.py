@@ -1260,7 +1260,7 @@ def mirror_curve(axis='auto', mode='world', merge_threshold=0.001, advanced=None
         if not quiet:
             print("[PR] {} curve(s) mirror-clipped along {}.".format(len(result_curves), axis.upper()))
             cmds.inViewMessage(
-                amg="<hl>Mirror</hl> done along <hl>{}</hl>".format(axis.upper().replace("-", "−")),
+                amg="<hl>Mirror</hl> done along <hl>{}</hl>".format(axis.upper().replace("-", "-")),
                 pos="topCenter",
                 fade=True
             )
@@ -3989,7 +3989,7 @@ class MirrorAdvancedDialog(QtWidgets.QDialog):
 
     def _on_advanced_toggled(self, checked):
         self.advanced_widget.setVisible(checked)
-        self.adjustSize()
+        QtCore.QTimer.singleShot(0, self.adjustSize)   # <-- ajoute ça
 
     def _delete_preview_curves(self):
         if not self._preview_curves:
@@ -4854,11 +4854,14 @@ class PRCurveToolsUI(QtWidgets.QDialog):
 
     def _on_mirror_advanced_toggled(self, checked):
         self.mirror_adv_widget.setVisible(checked)
+        
+        # Force le recalcul du layout + resize (le plus efficace sous Maya)
+        QtCore.QTimer.singleShot(0, self.adjustSize)   # ou self._fit_to_content_height()
+        
         if checked and self.mirror_live_preview_btn.isChecked():
             self._refresh_mirror_live_preview()
         if not checked:
             self._delete_mirror_preview_curves()
-        self.adjustSize()
 
     # ------------------------------------------------------------------
     # CONTEXT MENUS

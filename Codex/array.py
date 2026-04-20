@@ -436,6 +436,152 @@ class FlexibleDoubleSpinBox(QtWidgets.QDoubleSpinBox):
         return self._normalize_text(text)
 
 
+class XYZSliderWidget(QtWidgets.QWidget):
+    def __init__(self, parent, title, min_val, max_val, default, decimals=3, axis_colors=None):
+        super(XYZSliderWidget, self).__init__(parent)
+        self._title = title
+        self._axis_order = ("x", "y", "z")
+        self._active_axes = set()
+        self._axis_buttons = {}
+        self._axis_values = {"x": float(default), "y": float(default), "z": float(default)}
+        self._on_change_callback = None
+
+        if axis_colors is None:
+            axis_colors = {"x": AXIS_X_COLOR, "y": AXIS_Y_COLOR, "z": AXIS_Z_COLOR}
+
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(2)
+
+        top_row = QtWidgets.QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(4)
+
+        self.label = QtWidgets.QLabel(title)
+        self.label.setFixedWidth(110)
+        top_row.addWidget(self.label)
+
+        for axis in self._axis_order:
+            btn = QtWidgets.QPushButton(axis.upper())
+            btn.setCheckable(True)
+            btn.setFixedSize(22, 20)
+            btn.setStyleSheet("QPushButton { background-color: %s; }" % axis_colors.get(axis, "#4a4a4a"))
+            btn.toggled.connect(lambda state, a=axis: self._on_axis_toggled(a, state))
+            top_row.addWidget(btn)
+            self._axis_buttons[axis] = btn
+
+        top_row.addStretch()
+        root.addLayout(top_row)
+
+        bottom_row = QtWidgets.QHBoxLayout()
+        bottom_row.setContentsMargins(0, 0, 0, 0)
+        bottom_row.setSpacing(6)
+        bottom_row.addSpacing(110)
+
+        self.slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.slider.setMinimum(0)
+        self.slider.setMaximum(1000)
+        bottom_row.addWidget(self.slider)
+
+        if decimals > 0:
+            spin = FlexibleDoubleSpinBox()
+            spin.setDecimals(decimals)
+            spin.setSingleStep((max_val - min_val) / 1000.0 if max_val > min_val else 0.01)
+        else:
+            spin = QtWidgets.QSpinBox()
+        self.spinbox = spin
+        self.spinbox.setMinimum(min_val if decimals > 0 else int(min_val))
+        self.spinbox.setMaximum(max_val if decimals > 0 else int(max_val))
+        self.spinbox.setValue(default if decimals > 0 else int(default))
+        self.spinbox.setFixedWidth(82)
+        self.spinbox.setFixedHeight(20)
+        self.spinbox.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+        bottom_row.addWidget(self.spinbox)
+        root.addLayout(bottom_row)
+
+        self._min_val = float(min_val)
+        self._max_val = float(max_val)
+        self._default = float(default)
+        self._decimals = int(decimals)
+
+        self.slider.valueChanged.connect(self._on_slider_changed)
+        self.spinbox.valueChanged.connect(self._on_spinbox_changed)
+        self._set_slider_from_value(default)
+
+    def set_on_change_callback(self, fn):
+        self._on_change_callback = fn
+
+    def active_axes(self):
+        return set(self._active_axes)
+
+    def get_vector_values(self):
+        return (
+            float(self._axis_values["x"]),
+            float(self._axis_values["y"]),
+            float(self._axis_values["z"]),
+        )
+
+    def set_axis_value(self, axis, value):
+        axis = str(axis).lower()
+        if axis not in self._axis_values:
+            return
+        clamped = clamp(float(value), self._min_val, self._max_val)
+        self._axis_values[axis] = clamped
+        active = self._active_axes or set(self._axis_order)
+        if axis in active:
+            self.spinbox.blockSignals(True)
+            self.spinbox.setValue(clamped if self._decimals > 0 else int(round(clamped)))
+            self.spinbox.blockSignals(False)
+            self._set_slider_from_value(clamped)
+        self._emit_change()
+
+    def reset(self):
+        for axis in self._axis_order:
+            self._axis_values[axis] = self._default
+        self.spinbox.setValue(self._default if self._decimals > 0 else int(self._default))
+
+    def _emit_change(self):
+        if callable(self._on_change_callback):
+            self._on_change_callback()
+
+    def _set_slider_from_value(self, value):
+        ratio = (float(value) - self._min_val) / (self._max_val - self._min_val) if (self._max_val - self._min_val) > 0 else 0.0
+        self.slider.blockSignals(True)
+        self.slider.setValue(int(clamp(ratio, 0.0, 1.0) * 1000.0))
+        self.slider.blockSignals(False)
+
+    def _on_axis_toggled(self, axis, checked):
+        if checked:
+            self._active_axes.add(axis)
+            ref_value = self._axis_values.get(axis, self._default)
+            self.spinbox.blockSignals(True)
+            self.spinbox.setValue(ref_value if self._decimals > 0 else int(round(ref_value)))
+            self.spinbox.blockSignals(False)
+            self._set_slider_from_value(ref_value)
+        else:
+            self._active_axes.discard(axis)
+        self._emit_change()
+
+    def _on_slider_changed(self, slider_value):
+        ratio = float(slider_value) / 1000.0
+        real_val = self._min_val + ((self._max_val - self._min_val) * ratio)
+        self.spinbox.blockSignals(True)
+        self.spinbox.setValue(real_val if self._decimals > 0 else int(round(real_val)))
+        self.spinbox.blockSignals(False)
+        self._apply_value_to_axes(real_val)
+
+    def _on_spinbox_changed(self, spin_val):
+        real_val = clamp(float(spin_val), self._min_val, self._max_val)
+        self._set_slider_from_value(real_val)
+        self._apply_value_to_axes(real_val)
+
+    def _apply_value_to_axes(self, value):
+        targets = self._active_axes or set(self._axis_order)
+        for axis in targets:
+            self._axis_values[axis] = float(value)
+        self._emit_change()
+
+
 class SliderMixin(object):
     _CTRL_DRAG_PIXELS_PER_STEP = 8.0
 
@@ -1423,18 +1569,34 @@ def compute_curve_u_samples(curve, count, start_u, end_u, even_by_length=True):
     if count == 1:
         return [(start_u + end_u) * 0.5]
 
+    closed_curve = _is_closed_curve(curve)
     if even_by_length:
         start_len = _curve_percent_to_length(curve, start_u)
         end_len = _curve_percent_to_length(curve, end_u)
         if start_len is not None and end_len is not None:
             result = []
-            for i in range(count):
-                t = float(i) / float(count - 1)
-                sample_len = start_len + ((end_len - start_len) * t)
-                u = _curve_length_to_percent(curve, sample_len)
-                if u is None:
-                    break
-                result.append(u)
+            if closed_curve:
+                total_len = max(0.0, get_curve_length(curve))
+                span_len = end_len - start_len
+                if abs(span_len) < 1e-8:
+                    span_len = total_len
+                step_len = span_len / float(count)
+                for i in range(count):
+                    sample_len = start_len + (step_len * i)
+                    if total_len > 1e-8:
+                        sample_len = sample_len % total_len
+                    u = _curve_length_to_percent(curve, sample_len)
+                    if u is None:
+                        break
+                    result.append(u)
+            else:
+                for i in range(count):
+                    t = float(i) / float(count - 1)
+                    sample_len = start_len + ((end_len - start_len) * t)
+                    u = _curve_length_to_percent(curve, sample_len)
+                    if u is None:
+                        break
+                    result.append(u)
             if len(result) == count:
                 return result
             cmds.warning(
@@ -1445,10 +1607,31 @@ def compute_curve_u_samples(curve, count, start_u, end_u, even_by_length=True):
                 "Even-by-length sampling unavailable for '{}', using parametric spacing.".format(curve)
             )
 
-    return [
-        start_u + ((end_u - start_u) * (float(i) / float(count - 1)))
-        for i in range(count)
-    ]
+    if closed_curve:
+        span = end_u - start_u
+        if abs(span) < 1e-8:
+            span = 1.0
+        return [start_u + (span * (float(i) / float(count))) for i in range(count)]
+
+    return [start_u + ((end_u - start_u) * (float(i) / float(count - 1))) for i in range(count)]
+
+
+def _is_closed_curve(curve):
+    data = _get_curve_fn_data(curve)
+    if not data:
+        return False
+    fn_curve, _, _ = data
+    try:
+        if fn_curve.form in (om.MFnNurbsCurve.kClosed, om.MFnNurbsCurve.kPeriodic):
+            return True
+    except:
+        pass
+    try:
+        p0 = fn_curve.cvPosition(0, om.MSpace.kWorld)
+        p1 = fn_curve.cvPosition(fn_curve.numCVs - 1, om.MSpace.kWorld)
+        return (p0 - p1).length() <= 1e-5
+    except:
+        return False
 
 
 def compute_curve_count_allocation(curves, total_count, start_u, end_u):
@@ -2708,13 +2891,13 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         input_label.setObjectName("sectionLabel")
         layout.addWidget(input_label)
 
-        self.mesh_label = QtWidgets.QLabel("Mesh(es) : -")
+        self.mesh_label = QtWidgets.QLabel("Mesh(es)  : -")
         layout.addWidget(self.mesh_label)
 
-        self.curve_label = QtWidgets.QLabel("Curve : -")
+        self.curve_label = QtWidgets.QLabel("Curve(s)  : -")
         layout.addWidget(self.curve_label)
 
-        self.curve_length_label = QtWidgets.QLabel("Length Total : -")
+        self.curve_length_label = QtWidgets.QLabel("Length     : -")
         layout.addWidget(self.curve_length_label)
 
         layout.addSpacing(2)
@@ -2742,10 +2925,10 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         layout.addWidget(self.chk_auto_fit)
 
         self.chk_lock_no_overlap = QtWidgets.QCheckBox("Lock to Non-Overlap Count")
-        self.chk_lock_no_overlap.setChecked(True)
+        self.chk_lock_no_overlap.setChecked(False)
         self.chk_lock_no_overlap.toggled.connect(self._on_rebuild)
         self.chk_lock_no_overlap.setProperty("settings_key", "lock_no_overlap")
-        self._register_default(self.chk_lock_no_overlap, True)
+        self._register_default(self.chk_lock_no_overlap, False)
         layout.addWidget(self.chk_lock_no_overlap)
 
         self.chk_trim_ends = QtWidgets.QCheckBox("Trim Ends")
@@ -2761,12 +2944,6 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         self.chk_even_length.setProperty("settings_key", "even_length")
         self._register_default(self.chk_even_length, True)
         layout.addWidget(self.chk_even_length)
-
-        self.btn_even_distribute = QtWidgets.QPushButton("Distribute Evenly Now")
-        self.btn_even_distribute.setFixedHeight(22)
-        self.btn_even_distribute.setToolTip("Enable equal spacing by length and refresh preview")
-        self.btn_even_distribute.clicked.connect(self._on_force_even_distribution)
-        layout.addWidget(self.btn_even_distribute)
 
         self.padding_slider, self.padding_spin = self._add_slider(layout, "Padding", -10.0, 50.0, 0.0, 3, label_width=110)
         self.safety_slider, self.safety_spin = self._add_slider(layout, "Fit Safety", 0.5, 3.0, 1.0, 3, label_width=110)
@@ -2817,9 +2994,9 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         offset_pos_label.setObjectName("sectionLabel")
         layout.addWidget(offset_pos_label)
 
-        self.offx_slider, self.offx_spin = self._add_slider(layout, "Offset X", -100.0, 100.0, 0.0, 3, label_width=110)
-        self.offy_slider, self.offy_spin = self._add_slider(layout, "Offset Y", -100.0, 100.0, 0.0, 3, label_width=110)
-        self.offz_slider, self.offz_spin = self._add_slider(layout, "Offset Z", -100.0, 100.0, 0.0, 3, label_width=110)
+        self.offset_xyz_widget = XYZSliderWidget(self, "Offset XYZ", -100.0, 100.0, 0.0, decimals=3)
+        self.offset_xyz_widget.set_on_change_callback(self._on_rebuild)
+        layout.addWidget(self.offset_xyz_widget)
 
         layout.addSpacing(2)
 
@@ -2827,9 +3004,9 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         rot_label.setObjectName("sectionLabel")
         layout.addWidget(rot_label)
 
-        self.rotx_slider, self.rotx_spin = self._add_slider(layout, "Rotate X", -360.0, 360.0, 0.0, 2, label_width=110)
-        self.roty_slider, self.roty_spin = self._add_slider(layout, "Rotate Y", -360.0, 360.0, 0.0, 2, label_width=110)
-        self.rotz_slider, self.rotz_spin = self._add_slider(layout, "Rotate Z", -360.0, 360.0, 0.0, 2, label_width=110)
+        self.base_rot_xyz_widget = XYZSliderWidget(self, "Rotate XYZ", -360.0, 360.0, 0.0, decimals=2)
+        self.base_rot_xyz_widget.set_on_change_callback(self._on_rebuild)
+        layout.addWidget(self.base_rot_xyz_widget)
         self._add_quick_rotation_buttons(layout)
 
         layout.addSpacing(2)
@@ -2838,9 +3015,9 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         rand_rot_label.setObjectName("sectionLabel")
         layout.addWidget(rand_rot_label)
 
-        self.rand_rotx_slider, self.rand_rotx_spin = self._add_slider(layout, "Random Rot X", 0.0, 360.0, 0.0, 2, label_width=110)
-        self.rand_roty_slider, self.rand_roty_spin = self._add_slider(layout, "Random Rot Y", 0.0, 360.0, 0.0, 2, label_width=110)
-        self.rand_rotz_slider, self.rand_rotz_spin = self._add_slider(layout, "Random Rot Z", 0.0, 360.0, 0.0, 2, label_width=110)
+        self.rand_rot_xyz_widget = XYZSliderWidget(self, "Random XYZ", 0.0, 360.0, 0.0, decimals=2)
+        self.rand_rot_xyz_widget.set_on_change_callback(self._on_rebuild)
+        layout.addWidget(self.rand_rot_xyz_widget)
 
         layout.addSpacing(2)
 
@@ -2870,13 +3047,12 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         self.chk_orient.toggled.connect(self._on_rebuild)
         layout.addWidget(self.chk_orient)
 
-        orient_mode_row = QtWidgets.QHBoxLayout()
-        orient_mode_row.setSpacing(8)
-
+        orient_mode_row = QtWidgets.QGridLayout()
+        orient_mode_row.setHorizontalSpacing(8)
+        orient_mode_row.setVerticalSpacing(2)
         orient_mode_lbl = QtWidgets.QLabel("Orient Mode")
-        orient_mode_lbl.setFixedWidth(110)
-        orient_mode_row.addWidget(orient_mode_lbl)
-
+        orient_mode_lbl.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        orient_mode_row.addWidget(orient_mode_lbl, 0, 0)
         self.orient_mode_world_up = QtWidgets.QRadioButton("Tangent + WorldUp")
         self.orient_mode_world_up.setChecked(True)
         self.orient_mode_curve_normal = QtWidgets.QRadioButton("Tangent + Curve Normal")
@@ -2884,9 +3060,9 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         self.orient_mode_world_up.toggled.connect(self._on_rebuild)
         self.orient_mode_curve_normal.toggled.connect(self._on_rebuild)
 
-        orient_mode_row.addWidget(self.orient_mode_world_up)
-        orient_mode_row.addWidget(self.orient_mode_curve_normal)
-        orient_mode_row.addStretch()
+        orient_mode_row.addWidget(self.orient_mode_world_up, 0, 1)
+        orient_mode_row.addWidget(self.orient_mode_curve_normal, 1, 1)
+        orient_mode_row.setColumnStretch(2, 1)
         layout.addLayout(orient_mode_row)
 
         self.chk_center_bbox = QtWidgets.QCheckBox("Center on Mesh Bounding Box (can offset if pivot is far)")
@@ -2933,15 +3109,9 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
             (self.safety_spin, "fit_safety", 1.0),
             (self.auto_max_spin, "auto_max", 1000),
             (self.mesh_every_n_spin, "mesh_every_n", 1),
-            (self.offx_spin, "off_x", 0.0),
-            (self.offy_spin, "off_y", 0.0),
-            (self.offz_spin, "off_z", 0.0),
-            (self.rotx_spin, "rot_x", 0.0),
-            (self.roty_spin, "rot_y", 0.0),
-            (self.rotz_spin, "rot_z", 0.0),
-            (self.rand_rotx_spin, "rand_rot_x", 0.0),
-            (self.rand_roty_spin, "rand_rot_y", 0.0),
-            (self.rand_rotz_spin, "rand_rot_z", 0.0),
+            (self.offset_xyz_widget.spinbox, "off_xyz", 0.0),
+            (self.base_rot_xyz_widget.spinbox, "rot_xyz", 0.0),
+            (self.rand_rot_xyz_widget.spinbox, "rand_rot_xyz", 0.0),
             (self.scale_spin, "scale", 1.0),
             (self.rand_scale_spin, "rand_scale", 0.0),
             (self.seed_spin, "seed", 1),
@@ -3045,16 +3215,16 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         grid.setVerticalSpacing(4)
 
         buttons = [
-            ("X+45", self.rotx_spin, 45.0, 0, 0),
-            ("X+90", self.rotx_spin, 90.0, 0, 1),
-            ("Y+45", self.roty_spin, 45.0, 0, 2),
-            ("Y+90", self.roty_spin, 90.0, 0, 3),
-            ("Z+45", self.rotz_spin, 45.0, 1, 0),
-            ("Z+90", self.rotz_spin, 90.0, 1, 1),
+            ("X+45", "x", 45.0, 0, 0),
+            ("X+90", "x", 90.0, 0, 1),
+            ("Y+45", "y", 45.0, 0, 2),
+            ("Y+90", "y", 90.0, 0, 3),
+            ("Z+45", "z", 45.0, 1, 0),
+            ("Z+90", "z", 90.0, 1, 1),
             ("Reset", None, 0.0, 1, 2),
         ]
 
-        for text, spin, delta, r, c in buttons:
+        for text, axis, delta, r, c in buttons:
             btn = QtWidgets.QPushButton(text)
             btn.setFixedHeight(20)
             btn.setMinimumWidth(44)
@@ -3064,24 +3234,26 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
                 btn.setStyleSheet("background-color: %s;" % AXIS_Y_COLOR)
             elif text.startswith("Z"):
                 btn.setStyleSheet("background-color: %s;" % AXIS_Z_COLOR)
-            if spin is None:
+            if axis is None:
                 btn.clicked.connect(self._reset_rotation_offsets)
             else:
-                btn.clicked.connect(lambda _, s=spin, d=delta: self._increment_rotation(s, d))
+                btn.clicked.connect(lambda _, a=axis, d=delta: self._increment_rotation_axis(a, d))
             grid.addWidget(btn, r, c)
 
         container.addLayout(grid)
         container.addStretch()
         parent_layout.addLayout(container)
 
-    def _increment_rotation(self, spinbox, delta):
-        new_value = clamp(spinbox.value() + delta, spinbox.minimum(), spinbox.maximum())
-        spinbox.setValue(new_value)
+    def _increment_rotation_axis(self, axis, delta):
+        axis = str(axis).lower()
+        vec = self.base_rot_xyz_widget.get_vector_values()
+        axis_index = {"x": 0, "y": 1, "z": 2}.get(axis, 0)
+        current = vec[axis_index]
+        target = clamp(current + float(delta), self.base_rot_xyz_widget.spinbox.minimum(), self.base_rot_xyz_widget.spinbox.maximum())
+        self.base_rot_xyz_widget.set_axis_value(axis, target)
 
     def _reset_rotation_offsets(self):
-        self.rotx_spin.setValue(0.0)
-        self.roty_spin.setValue(0.0)
-        self.rotz_spin.setValue(0.0)
+        self.base_rot_xyz_widget.reset()
 
     def _setup_icons(self):
         self.btn_select_mesh.setText("Mesh")
@@ -3114,24 +3286,24 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         curves = _CURVE_STATE.get("curves", [])
         if meshes:
             if len(meshes) == 1:
-                self.mesh_label.setText("Mesh : {}".format(meshes[0].split("|")[-1]))
+                self.mesh_label.setText("Mesh(es)  : {}".format(meshes[0].split("|")[-1]))
             else:
-                self.mesh_label.setText("Meshes : {} selected".format(len(meshes)))
+                self.mesh_label.setText("Mesh(es)  : {} selected".format(len(meshes)))
         else:
-            self.mesh_label.setText("Mesh : {}".format(mesh.split("|")[-1] if mesh else "-"))
+            self.mesh_label.setText("Mesh(es)  : {}".format(mesh.split("|")[-1] if mesh else "-"))
         if curves:
             if len(curves) == 1:
-                self.curve_label.setText("Curve : {}".format(curves[0].split("|")[-1]))
+                self.curve_label.setText("Curve(s)  : {}".format(curves[0].split("|")[-1]))
             else:
-                self.curve_label.setText("Curves : {} selected".format(len(curves)))
+                self.curve_label.setText("Curve(s)  : {} selected".format(len(curves)))
         else:
-            self.curve_label.setText("Curve : -")
+            self.curve_label.setText("Curve(s)  : -")
 
         if curves:
             total_length = sum(get_curve_length(c) for c in curves if _safe_exists(c))
-            self.curve_length_label.setText("Length Total : {:.3f}".format(total_length))
+            self.curve_length_label.setText("Length     : {:.3f}".format(total_length))
         else:
-            self.curve_length_label.setText("Length Total : -")
+            self.curve_length_label.setText("Length     : -")
 
     def _update_curve_outliner_toggle_ui(self):
         if self._curves_hidden_in_viewport:
@@ -3226,10 +3398,6 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         self.auto_max_slider.setEnabled(is_auto)
         self._on_rebuild()
         self._request_parent_resize()
-
-    def _on_force_even_distribution(self):
-        self.chk_even_length.setChecked(True)
-        self._do_rebuild()
 
     def _on_start(self):
         meshes = [m for m in _CURVE_STATE.get("meshes", []) if _safe_exists(m)]
@@ -3406,23 +3574,9 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
                 cmds.refresh(force=False)
                 return
 
-            offset_pos = (
-                float(self.offx_spin.value()),
-                float(self.offy_spin.value()),
-                float(self.offz_spin.value()),
-            )
-
-            offset_rot = (
-                float(self.rotx_spin.value()),
-                float(self.roty_spin.value()),
-                float(self.rotz_spin.value()),
-            )
-
-            rand_rot = (
-                float(self.rand_rotx_spin.value()),
-                float(self.rand_roty_spin.value()),
-                float(self.rand_rotz_spin.value()),
-            )
+            offset_pos = self.offset_xyz_widget.get_vector_values()
+            offset_rot = self.base_rot_xyz_widget.get_vector_values()
+            rand_rot = self.rand_rot_xyz_widget.get_vector_values()
 
             orient = self.chk_orient.isChecked()
             orient_mode = "curve_normal" if self.orient_mode_curve_normal.isChecked() else "world_up"
@@ -3625,6 +3779,7 @@ class ProToolsCombinedUI(QtWidgets.QDialog):
         self._min_width_curve = 390
         self._max_auto_height = 900
         self._ui_scale_percent = 100
+        self._ui_scale_factor = 1.0
         self._settings = QtCore.QSettings(SETTINGS_ORG, SETTINGS_APP)
 
         self._build_ui()
@@ -3645,7 +3800,7 @@ class ProToolsCombinedUI(QtWidgets.QDialog):
         self.ui_scale_label = QtWidgets.QLabel("UI Scale")
         top_row.addWidget(self.ui_scale_label)
         self.ui_scale_spin = QtWidgets.QSpinBox()
-        self.ui_scale_spin.setRange(70, 130)
+        self.ui_scale_spin.setRange(30, 150)
         self.ui_scale_spin.setSingleStep(5)
         self.ui_scale_spin.setSuffix("%")
         self.ui_scale_spin.setFixedWidth(74)
@@ -3653,7 +3808,7 @@ class ProToolsCombinedUI(QtWidgets.QDialog):
         top_row.addWidget(self.ui_scale_spin)
 
         self.ui_scale_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.ui_scale_slider.setRange(70, 130)
+        self.ui_scale_slider.setRange(30, 150)
         self.ui_scale_slider.setSingleStep(1)
         self.ui_scale_slider.setPageStep(5)
         self.ui_scale_slider.setFixedWidth(120)
@@ -3713,7 +3868,7 @@ class ProToolsCombinedUI(QtWidgets.QDialog):
         self.tab_proarray.reset_settings()
         self.tab_curve.reset_settings()
         # Requested behavior: preserve current UI scale when resetting tool settings.
-        current_scale = int(clamp(self._ui_scale_percent, 70, 130))
+        current_scale = int(clamp(self._ui_scale_percent, 30, 150))
         self.ui_scale_spin.blockSignals(True)
         self.ui_scale_slider.blockSignals(True)
         self.ui_scale_spin.setValue(current_scale)
@@ -3724,7 +3879,7 @@ class ProToolsCombinedUI(QtWidgets.QDialog):
         self.request_resize()
 
     def _on_ui_scale_changed(self, value):
-        value = int(clamp(value, 70, 130))
+        value = int(clamp(value, 30, 150))
         self._ui_scale_percent = value
         sender = self.sender()
         if sender is self.ui_scale_spin:
@@ -3739,18 +3894,31 @@ class ProToolsCombinedUI(QtWidgets.QDialog):
         self.request_resize()
 
     def _apply_ui_scale(self, percent):
-        scale = max(0.7, min(1.3, float(percent) / 100.0))
+        scale = max(0.3, min(1.5, float(percent) / 100.0))
+        self._ui_scale_factor = scale
         base_font = self.font()
         base_point_size = 9.0
         scaled_font = QtGui.QFont(base_font)
         scaled_font.setPointSizeF(max(7.0, base_point_size * scale))
         self.setFont(scaled_font)
         apply_shared_style(self)
-        compact_h = int(round(22 * scale))
+        button_h = int(round(24 * scale))
+        spin_h = int(round(22 * scale))
+        slider_h = int(round(16 * scale))
+        handle_w = int(round(10 * scale))
+        tab_pad_v = int(round(6 * scale))
+        tab_pad_h = int(round(12 * scale))
+        font_px = int(round(11 * scale))
         self.setStyleSheet(
             self.styleSheet() +
-            "\nQPushButton { min-height: %dpx; }\nQAbstractSpinBox { min-height: %dpx; }\nQComboBox { min-height: %dpx; }"
-            % (compact_h, compact_h, compact_h)
+            (
+                "\nQWidget { font-size: %dpx; }"
+                "\nQPushButton { min-height: %dpx; }"
+                "\nQAbstractSpinBox, QComboBox { min-height: %dpx; }"
+                "\nQSlider:horizontal { min-height: %dpx; }"
+                "\nQSlider::handle:horizontal { width: %dpx; }"
+                "\nQTabBar::tab { padding: %dpx %dpx; }"
+            ) % (font_px, button_h, spin_h, slider_h, handle_w, tab_pad_v, tab_pad_h)
         )
         self.adjustSize()
 
@@ -3772,23 +3940,26 @@ class ProToolsCombinedUI(QtWidgets.QDialog):
 
         content_hint = self._get_tab_content_hint(index)
 
+        scale = max(0.3, min(1.5, float(getattr(self, "_ui_scale_factor", 1.0))))
         if index == 0:
-            target_w = max(self._min_width_proarray, content_hint.width() + 40)
-            target_h = content_hint.height() + 90
-            target_h = min(target_h, self._max_auto_height)
+            min_w = int(round(self._min_width_proarray * scale))
+            target_w = max(min_w, int(round(content_hint.width() + (40 * scale))))
+            target_h = int(round(content_hint.height() + (90 * scale)))
+            target_h = min(target_h, int(round(self._max_auto_height * scale)))
 
-            self.setMinimumWidth(self._min_width_proarray)
-            self.setMinimumHeight(250)
+            self.setMinimumWidth(min_w)
+            self.setMinimumHeight(int(round(250 * scale)))
             self.setMaximumWidth(16777215)
             self.setMaximumHeight(16777215)
 
         else:
-            target_w = max(self._min_width_curve, content_hint.width() + 40)
-            target_h = content_hint.height() + 90
-            target_h = max(620, min(target_h, self._max_auto_height))
+            min_w = int(round(self._min_width_curve * scale))
+            target_w = max(min_w, int(round(content_hint.width() + (40 * scale))))
+            target_h = int(round(content_hint.height() + (90 * scale)))
+            target_h = max(int(round(620 * scale)), min(target_h, int(round(self._max_auto_height * scale))))
 
-            self.setMinimumWidth(self._min_width_curve)
-            self.setMinimumHeight(620)
+            self.setMinimumWidth(min_w)
+            self.setMinimumHeight(int(round(620 * scale)))
             self.setMaximumWidth(16777215)
             self.setMaximumHeight(16777215)
 

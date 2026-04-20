@@ -305,47 +305,52 @@ def apply_shared_style(widget):
         }}
 
         QPushButton#bakeBtn {{
-            background-color: #4a6a8a;
+            background-color: #4f5f4f;
             color: #ffffff;
+            border: 1px solid #607260;
+            font-weight: 600;
         }}
 
         QPushButton#bakeBtn:hover {{
-            background-color: #5a7a9a;
+            background-color: #5b705b;
         }}
 
         QPushButton#selectMeshBtn {{
-            background-color: #3a4a5a;
-            border: 1px solid #4a5a6a;
+            background-color: #3b3b3b;
+            border: 1px solid #545454;
             border-radius: 4px;
-            font-size: 16px;
-            font-weight: bold;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.2px;
         }}
 
         QPushButton#selectMeshBtn:hover {{
-            background-color: #4a5a6a;
+            background-color: #464646;
         }}
 
         QPushButton#selectLocatorBtn, QPushButton#selectCurveBtn {{
-            background-color: #5a4a3a;
-            border: 1px solid #6a5a4a;
+            background-color: #3b3b3b;
+            border: 1px solid #545454;
             border-radius: 4px;
-            font-size: 16px;
-            font-weight: bold;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.2px;
         }}
 
         QPushButton#selectLocatorBtn:hover, QPushButton#selectCurveBtn:hover {{
-            background-color: #6a5a4a;
+            background-color: #464646;
         }}
 
         QPushButton#refreshBtn {{
-            background-color: #3a5a3a;
-            border: 1px solid #4a6a4a;
+            background-color: #3b3b3b;
+            border: 1px solid #545454;
             border-radius: 4px;
-            font-size: 14px;
+            font-size: 13px;
+            font-weight: 600;
         }}
 
         QPushButton#refreshBtn:hover {{
-            background-color: #4a6a4a;
+            background-color: #464646;
         }}
 
         QSlider::groove:horizontal {{
@@ -550,7 +555,9 @@ class SliderMixin(object):
 
         def update_spinbox(val):
             ratio = val / 1000.0
-            real_val = min_val + ratio * (max_val - min_val)
+            current_min = float(spinbox.minimum())
+            current_max = float(spinbox.maximum())
+            real_val = current_min + ratio * (current_max - current_min)
             spinbox.blockSignals(True)
             if decimals > 0:
                 spinbox.setValue(real_val)
@@ -560,8 +567,10 @@ class SliderMixin(object):
             self._on_rebuild()
 
         def update_slider(val):
-            clamped = max(min_val, min(max_val, float(val)))
-            ratio = (clamped - min_val) / (max_val - min_val) if (max_val - min_val) > 0 else 0
+            current_min = float(spinbox.minimum())
+            current_max = float(spinbox.maximum())
+            clamped = max(current_min, min(current_max, float(val)))
+            ratio = (clamped - current_min) / (current_max - current_min) if (current_max - current_min) > 0 else 0
             slider.blockSignals(True)
             slider.setValue(int(ratio * 1000))
             slider.blockSignals(False)
@@ -1666,7 +1675,7 @@ def build_curve_distribution(
     mesh_pick_mode="cycle",
     mesh_pick_step=2,
 ):
-    valid_meshes = [m for m in (meshes or [mesh]) if _safe_exists(m)]
+    valid_meshes = _unique_in_order([m for m in (meshes or [mesh]) if _safe_exists(m)])
     if not valid_meshes or not _safe_exists(curve):
         return []
     primary_mesh = valid_meshes[0]
@@ -1773,11 +1782,15 @@ def build_curve_distribution(
                 sample_mesh = source_mesh if use_proxy_mode else _pick_mesh_for_sample(
                     valid_meshes, mesh_pick_mode, mesh_pick_step, random_seed, i
                 )
+                if not _safe_exists(sample_mesh):
+                    sample_mesh = primary_mesh
                 new_obj = cmds.instance(sample_mesh, name="{}{}{:03d}".format(CURVE_PREVIEW_PREFIX, name_prefix, i + 1))[0]
             else:
                 sample_mesh = source_mesh if use_proxy_mode else _pick_mesh_for_sample(
                     valid_meshes, mesh_pick_mode, mesh_pick_step, random_seed, i
                 )
+                if not _safe_exists(sample_mesh):
+                    sample_mesh = primary_mesh
                 new_obj = cmds.duplicate(sample_mesh, rr=True, name="{}{}{:03d}".format(CURVE_PREVIEW_PREFIX, name_prefix, i + 1))[0]
 
             blocked_attrs = unlock_transform_channels(new_obj)
@@ -3044,7 +3057,8 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
             self.btn_start.setStyleSheet("")
 
     def _update_info_labels(self):
-        meshes = [m for m in _CURVE_STATE.get("meshes", []) if _safe_exists(m)]
+        requested_meshes = _CURVE_STATE.get("meshes", []) or []
+        meshes = _unique_in_order([m for m in requested_meshes if _safe_exists(m)])
         mesh = _CURVE_STATE.get("mesh")
         curves = _CURVE_STATE.get("curves", [])
         if meshes:
@@ -3210,7 +3224,8 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         if not _CURVE_STATE.get("started"):
             return
 
-        meshes = [m for m in _CURVE_STATE.get("meshes", []) if _safe_exists(m)]
+        requested_meshes = _CURVE_STATE.get("meshes", []) or []
+        meshes = _unique_in_order([m for m in requested_meshes if _safe_exists(m)])
         mesh = _CURVE_STATE.get("mesh")
         curves = _CURVE_STATE.get("curves", [])
 
@@ -3220,6 +3235,12 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
             return
         if not meshes and _safe_exists(mesh):
             meshes = [mesh]
+        elif len(requested_meshes) > 1 and len(meshes) <= 1:
+            cmds.warning(
+                "Only {} valid mesh input remains. Verify deleted/renamed nodes and recapture mesh selection.".format(
+                    len(meshes)
+                )
+            )
 
         if _CURVE_STATE.get("is_processing"):
             return

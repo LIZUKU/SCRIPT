@@ -50,8 +50,10 @@ AXIS_TOGGLE_ON_COLOR = "#d1a91f"
 
 PROARRAY_LOCATOR_NAME = "ProArray_Pivot_LOC"
 PROARRAY_PREVIEW_PREFIX = "ProArray_Preview_"
+PROARRAY_PREVIEW_TAG = "isProArrayPreview"
 
 CURVE_PREVIEW_PREFIX = "CurveDistPreview_"
+CURVE_PREVIEW_TAG = "isCurveDistPreview"
 CURVE_RESULT_GROUP_NAME = "CurveDistribute_Result_GRP"
 
 
@@ -87,6 +89,25 @@ _CURVE_STATE = {
 }
 
 
+def reset_proarray_state():
+    _PROARRAY_STATE["original_objects"] = []
+    _PROARRAY_STATE["original_positions"] = {}
+    _PROARRAY_STATE["original_bbox_centers"] = {}
+    _PROARRAY_STATE["preview_objects"] = []
+    _PROARRAY_STATE["locator"] = None
+    _PROARRAY_STATE["locator_script_jobs"] = []
+    _PROARRAY_STATE["mesh_script_jobs"] = []
+    _PROARRAY_STATE["selection_callback_id"] = None
+    _PROARRAY_STATE["is_processing"] = False
+
+
+def reset_curve_runtime_state():
+    _CURVE_STATE["preview_objects"] = []
+    _CURVE_STATE["script_jobs"] = []
+    _CURVE_STATE["bbox_cache"] = {}
+    _CURVE_STATE["is_processing"] = False
+
+
 # ============================================================
 # MAYA MAIN WINDOW
 # ============================================================
@@ -94,7 +115,8 @@ def get_maya_main_window():
     try:
         main_window_ptr = omui.MQtUtil.mainWindow()
         return wrapInstance(int(main_window_ptr), QtWidgets.QWidget)
-    except:
+    except Exception as e:
+        cmds.warning("ProTools: failed to access Maya main window: {}".format(e))
         return None
 
 
@@ -106,8 +128,12 @@ def _safe_exists(obj):
         return False
     try:
         return cmds.objExists(obj)
-    except:
+    except Exception:
         return False
+
+
+def _warn(message):
+    cmds.warning("ProTools: {}".format(message))
 
 
 def _safe_delete(obj):
@@ -116,8 +142,63 @@ def _safe_delete(obj):
     try:
         if cmds.objExists(obj):
             cmds.delete(obj)
-    except:
-        pass
+    except Exception as e:
+        _warn("failed to delete '{}': {}".format(obj, e))
+
+
+def _safe_full_path(obj):
+    if not _safe_exists(obj):
+        return None
+    try:
+        return (cmds.ls(obj, long=True) or [obj])[0]
+    except Exception:
+        return obj
+
+
+def _tag_preview_node(node, tag_attr):
+    if not _safe_exists(node):
+        return
+    try:
+        if not cmds.attributeQuery(tag_attr, node=node, exists=True):
+            cmds.addAttr(node, longName=tag_attr, attributeType="bool", defaultValue=True)
+        cmds.setAttr("{}.{}".format(node, tag_attr), True)
+    except Exception as e:
+        _warn("failed to tag preview '{}': {}".format(node, e))
+
+
+def _is_tagged_preview(node, tag_attr):
+    if not _safe_exists(node):
+        return False
+    try:
+        return bool(cmds.attributeQuery(tag_attr, node=node, exists=True) and cmds.getAttr("{}.{}".format(node, tag_attr)))
+    except Exception:
+        return False
+
+
+def _duplicate_or_instance_safe(obj, use_instance, name):
+    try:
+        if use_instance:
+            return cmds.instance(obj, name=name)[0]
+        return cmds.duplicate(obj, rr=True, name=name)[0]
+    except Exception as e:
+        _warn("failed to spawn preview from '{}': {}".format(obj, e))
+        return None
+
+
+def _safe_rename(obj, new_name):
+    try:
+        return cmds.rename(obj, new_name)
+    except Exception as e:
+        _warn("failed to rename '{}' to '{}': {}".format(obj, new_name, e))
+        return obj
+
+
+def _safe_group(objects, name):
+    try:
+        return cmds.group(objects, name=name)
+    except Exception as e:
+        _warn("failed to group result '{}': {}".format(name, e))
+        return None
 
 
 def get_dag_path(node):
@@ -762,7 +843,7 @@ def get_bbox_center(obj):
             (bbox[1] + bbox[4]) / 2.0,
             (bbox[2] + bbox[5]) / 2.0
         ]
-    except:
+    except Exception:
         return cmds.xform(obj, query=True, worldSpace=True, translation=True)
 
 
@@ -773,10 +854,10 @@ def proarray_cleanup_preview():
 
     try:
         for obj in cmds.ls(type="transform") or []:
-            if obj.startswith(PROARRAY_PREVIEW_PREFIX):
+            if obj.startswith(PROARRAY_PREVIEW_PREFIX) and _is_tagged_preview(obj, PROARRAY_PREVIEW_TAG):
                 _safe_delete(obj)
-    except:
-        pass
+    except Exception as e:
+        _warn("failed during ProArray preview cleanup scan: {}".format(e))
 
 
 def proarray_cleanup_locator():
@@ -784,7 +865,7 @@ def proarray_cleanup_locator():
         try:
             if cmds.scriptJob(exists=job_id):
                 cmds.scriptJob(kill=job_id, force=True)
-        except:
+        except Exception:
             pass
     _PROARRAY_STATE["locator_script_jobs"] = []
 
@@ -792,7 +873,7 @@ def proarray_cleanup_locator():
         try:
             if cmds.scriptJob(exists=job_id):
                 cmds.scriptJob(kill=job_id, force=True)
-        except:
+        except Exception:
             pass
     _PROARRAY_STATE["mesh_script_jobs"] = []
 
@@ -800,7 +881,7 @@ def proarray_cleanup_locator():
     if cb_id is not None:
         try:
             om.MMessage.removeCallback(cb_id)
-        except:
+        except Exception:
             pass
         _PROARRAY_STATE["selection_callback_id"] = None
 
@@ -821,10 +902,7 @@ def proarray_full_cleanup():
     else:
         cmds.select(clear=True)
 
-    _PROARRAY_STATE["original_objects"] = []
-    _PROARRAY_STATE["original_positions"] = {}
-    _PROARRAY_STATE["original_bbox_centers"] = {}
-    _PROARRAY_STATE["is_processing"] = False
+    reset_proarray_state()
 
 
 def proarray_create_pivot_locator(position, mode="radial"):
@@ -833,7 +911,12 @@ def proarray_create_pivot_locator(position, mode="radial"):
     loc = cmds.spaceLocator(name=PROARRAY_LOCATOR_NAME)[0]
     cmds.xform(loc, worldSpace=True, translation=position)
 
-    shape = cmds.listRelatives(loc, shapes=True)[0]
+    shapes = cmds.listRelatives(loc, shapes=True) or []
+    if not shapes:
+        _warn("locator '{}' has no shape".format(loc))
+        _PROARRAY_STATE["locator"] = loc
+        return loc
+    shape = shapes[0]
     cmds.setAttr(shape + ".localScaleX", 0.5)
     cmds.setAttr(shape + ".localScaleY", 0.5)
     cmds.setAttr(shape + ".localScaleZ", 0.5)
@@ -862,7 +945,7 @@ def proarray_get_combined_bbox_center():
     for obj in objects:
         try:
             bbox = cmds.exactWorldBoundingBox(obj)
-        except:
+        except Exception:
             continue
 
         mins[0] = min(mins[0], bbox[0])
@@ -873,6 +956,7 @@ def proarray_get_combined_bbox_center():
         maxs[2] = max(maxs[2], bbox[5])
 
     if mins[0] == float("inf"):
+        _warn("combined bbox center fallback used; some objects could not be evaluated")
         return [0.0, 0.0, 0.0]
 
     return [
@@ -928,21 +1012,20 @@ def proarray_setup_mesh_callbacks(ui_instance):
         for shape in shapes:
             if not _safe_exists(shape):
                 continue
+            try:
+                if cmds.getAttr("{}.intermediateObject".format(shape)):
+                    continue
+            except Exception:
+                pass
 
             try:
                 job_id = cmds.scriptJob(
-                    attributeChange=[shape + ".outMesh", ui_instance._on_mesh_modified],
-                    killWithScene=True
-                )
-                _PROARRAY_STATE["mesh_script_jobs"].append(job_id)
-
-                job_id2 = cmds.scriptJob(
                     attributeChange=[shape + ".worldMesh", ui_instance._on_mesh_modified],
                     killWithScene=True
                 )
-                _PROARRAY_STATE["mesh_script_jobs"].append(job_id2)
-            except:
-                pass
+                _PROARRAY_STATE["mesh_script_jobs"].append(job_id)
+            except Exception as e:
+                _warn("failed to attach mesh callback on '{}': {}".format(shape, e))
 
     try:
         job_id = cmds.scriptJob(
@@ -953,14 +1036,6 @@ def proarray_setup_mesh_callbacks(ui_instance):
     except:
         pass
 
-    try:
-        job_id = cmds.scriptJob(
-            event=["DagObjectCreated", ui_instance._on_mesh_modified],
-            killWithScene=True
-        )
-        _PROARRAY_STATE["mesh_script_jobs"].append(job_id)
-    except:
-        pass
 
 
 def proarray_select_locator():
@@ -1032,18 +1107,22 @@ def build_radial_array(objects, angle=360, number=3, repeat=1,
             for i in range(start_i, number):
                 current_angle = angle_step * i
 
-                if use_instance:
-                    new_obj = cmds.instance(obj, name="%s%s_r%d_%d" % (PROARRAY_PREVIEW_PREFIX, obj.split("|")[-1], r, i))[0]
-                else:
-                    new_obj = cmds.duplicate(obj, name="%s%s_r%d_%d" % (PROARRAY_PREVIEW_PREFIX, obj.split("|")[-1], r, i))[0]
+                new_obj = _duplicate_or_instance_safe(
+                    obj,
+                    use_instance,
+                    "%s%s_r%d_%d" % (PROARRAY_PREVIEW_PREFIX, obj.split("|")[-1], r, i)
+                )
+                if not new_obj:
+                    continue
+                _tag_preview_node(new_obj, PROARRAY_PREVIEW_TAG)
 
                 # Important: force a stable pivot on mesh bbox center to avoid large offsets
                 # when source transforms have pivots far from the geometry.
                 try:
                     bbox_center = _PROARRAY_STATE["original_bbox_centers"].get(obj) or get_bbox_center(obj)
                     cmds.xform(new_obj, ws=True, pivots=bbox_center)
-                except:
-                    pass
+                except Exception as e:
+                    _warn("failed to set stable pivot on '{}': {}".format(new_obj, e))
 
                 if axis == 'x':
                     cmds.rotate(current_angle, 0, 0, new_obj, pivot=center, relative=True, worldSpace=True)
@@ -1137,14 +1216,14 @@ def build_rectangular_array(objects, copies_x=3, copies_y=1, copies_z=1,
 
                         new_pos = vec_add(base_pos, block_off)
 
-                        if use_instance:
-                            new_obj = cmds.instance(
-                                obj, name="%s%s_r%d_%d_%d_%d" % (PROARRAY_PREVIEW_PREFIX, obj.split("|")[-1], r, ix, iy, iz)
-                            )[0]
-                        else:
-                            new_obj = cmds.duplicate(
-                                obj, name="%s%s_r%d_%d_%d_%d" % (PROARRAY_PREVIEW_PREFIX, obj.split("|")[-1], r, ix, iy, iz)
-                            )[0]
+                        new_obj = _duplicate_or_instance_safe(
+                            obj,
+                            use_instance,
+                            "%s%s_r%d_%d_%d_%d" % (PROARRAY_PREVIEW_PREFIX, obj.split("|")[-1], r, ix, iy, iz)
+                        )
+                        if not new_obj:
+                            continue
+                        _tag_preview_node(new_obj, PROARRAY_PREVIEW_TAG)
 
                         cmds.xform(new_obj, ws=True, t=new_pos)
                         previews.append(new_obj)
@@ -1172,9 +1251,9 @@ def proarray_bake_array(group_result=True):
         if _safe_exists(obj):
             base_name = obj.replace(PROARRAY_PREVIEW_PREFIX, "").split("|")[-1]
             try:
-                new_name = cmds.rename(obj, "proarray_%s" % base_name)
+                new_name = _safe_rename(obj, "proarray_%s" % base_name)
                 final_objects.append(new_name)
-            except:
+            except Exception:
                 final_objects.append(obj)
 
     _PROARRAY_STATE["preview_objects"] = []
@@ -1183,18 +1262,22 @@ def proarray_bake_array(group_result=True):
     if group_result and final_objects:
         mode = _PROARRAY_STATE.get("array_mode", "radial")
         group_name = "ProArray_Radial_grp" if mode == "radial" else "ProArray_Rect_grp"
-        result = cmds.group(final_objects, name=group_name)
-        add_nodes_to_active_isolate_sets([result])
-        cmds.select(result)
+        grouped = _safe_group(final_objects, group_name)
+        if grouped and _safe_exists(grouped):
+            result = grouped
+            add_nodes_to_active_isolate_sets([result])
+            cmds.select(result)
+        else:
+            result = final_objects
+            add_nodes_to_active_isolate_sets(final_objects)
+            cmds.select(final_objects)
     else:
         add_nodes_to_active_isolate_sets(final_objects)
         cmds.select(final_objects)
         result = final_objects
 
     proarray_cleanup_locator()
-    _PROARRAY_STATE["original_objects"] = []
-    _PROARRAY_STATE["original_positions"] = {}
-    _PROARRAY_STATE["original_bbox_centers"] = {}
+    reset_proarray_state()
 
     return result
 
@@ -1210,10 +1293,10 @@ def curve_cleanup_preview():
 
     try:
         for obj in cmds.ls(type="transform") or []:
-            if obj.startswith(CURVE_PREVIEW_PREFIX):
+            if obj.startswith(CURVE_PREVIEW_PREFIX) and _is_tagged_preview(obj, CURVE_PREVIEW_TAG):
                 _safe_delete(obj)
-    except:
-        pass
+    except Exception as e:
+        _warn("failed during Curve preview cleanup scan: {}".format(e))
 
 
 def curve_full_cleanup():
@@ -1233,8 +1316,7 @@ def curve_full_cleanup():
     _CURVE_STATE["temp_curves"] = []
     _CURVE_STATE["started"] = False
     _CURVE_STATE["baked"] = False
-    _CURVE_STATE["is_processing"] = False
-    _CURVE_STATE["bbox_cache"] = {}
+    reset_curve_runtime_state()
 
 
 def get_transform_from_selection():
@@ -1279,7 +1361,7 @@ def extract_mesh_and_curve_transforms_from_selection(selection_items):
                 transform = parents[0]
 
         if transform and _safe_exists(transform):
-            ordered_transforms.append(transform)
+            ordered_transforms.append(_safe_full_path(transform) or transform)
 
     ordered_transforms = _unique_in_order(ordered_transforms)
     meshes = [obj for obj in ordered_transforms if is_mesh_transform(obj)]
@@ -1293,6 +1375,11 @@ def is_mesh_transform(obj):
     shapes = cmds.listRelatives(obj, s=True, f=True) or []
     for s in shapes:
         if cmds.nodeType(s) == "mesh":
+            try:
+                if cmds.getAttr("{}.intermediateObject".format(s)):
+                    continue
+            except Exception:
+                pass
             return True
     return False
 
@@ -1303,6 +1390,11 @@ def is_curve_transform(obj):
     shapes = cmds.listRelatives(obj, s=True, f=True) or []
     for s in shapes:
         if cmds.nodeType(s) == "nurbsCurve":
+            try:
+                if cmds.getAttr("{}.intermediateObject".format(s)):
+                    continue
+            except Exception:
+                pass
             return True
     return False
 
@@ -1380,14 +1472,19 @@ def apply_uniform_scale_safe(transform, value):
 
     try:
         cmds.xform(transform, objectSpace=True, scale=(scale_val, scale_val, scale_val))
-        return True
-    except:
-        pass
+    except Exception:
+        try:
+            cmds.scale(scale_val, scale_val, scale_val, transform, r=False, os=True)
+        except Exception:
+            return False
 
     try:
-        cmds.scale(scale_val, scale_val, scale_val, transform, r=False, os=True)
-        return True
-    except:
+        current = cmds.getAttr("{}.scale".format(transform))[0]
+        if all(abs(float(v) - scale_val) <= 1e-3 for v in current):
+            return True
+        _warn("scale mismatch on '{}': requested {}, got {}".format(transform, scale_val, current))
+        return False
+    except Exception:
         return False
 
 
@@ -2157,26 +2254,22 @@ def build_curve_distribution(
                 if (u_delta <= 1e-6) or (abs(1.0 - u_delta) <= 1e-6):
                     continue
 
-            if use_instance:
-                sample_mesh = _pick_mesh_for_sample(
-                    valid_meshes, mesh_pick_mode, mesh_pick_step, random_seed, int(sample_index_start) + i
-                ) if len(valid_meshes) > 1 else primary_mesh
-                if not _safe_exists(sample_mesh):
-                    sample_mesh = primary_mesh
-                source_for_spawn = proxy_by_source.get(sample_mesh, sample_mesh) if use_proxy_mode else sample_mesh
-                if not _safe_exists(source_for_spawn):
-                    source_for_spawn = sample_mesh
-                new_obj = cmds.instance(source_for_spawn, name="{}{}{:03d}".format(CURVE_PREVIEW_PREFIX, name_prefix, i + 1))[0]
-            else:
-                sample_mesh = _pick_mesh_for_sample(
-                    valid_meshes, mesh_pick_mode, mesh_pick_step, random_seed, int(sample_index_start) + i
-                ) if len(valid_meshes) > 1 else primary_mesh
-                if not _safe_exists(sample_mesh):
-                    sample_mesh = primary_mesh
-                source_for_spawn = proxy_by_source.get(sample_mesh, sample_mesh) if use_proxy_mode else sample_mesh
-                if not _safe_exists(source_for_spawn):
-                    source_for_spawn = sample_mesh
-                new_obj = cmds.duplicate(source_for_spawn, rr=True, name="{}{}{:03d}".format(CURVE_PREVIEW_PREFIX, name_prefix, i + 1))[0]
+            sample_mesh = _pick_mesh_for_sample(
+                valid_meshes, mesh_pick_mode, mesh_pick_step, random_seed, int(sample_index_start) + i
+            ) if len(valid_meshes) > 1 else primary_mesh
+            if not _safe_exists(sample_mesh):
+                sample_mesh = primary_mesh
+            source_for_spawn = proxy_by_source.get(sample_mesh, sample_mesh) if use_proxy_mode else sample_mesh
+            if not _safe_exists(source_for_spawn):
+                source_for_spawn = sample_mesh
+            new_obj = _duplicate_or_instance_safe(
+                source_for_spawn,
+                use_instance,
+                "{}{}{:03d}".format(CURVE_PREVIEW_PREFIX, name_prefix, i + 1)
+            )
+            if not new_obj:
+                continue
+            _tag_preview_node(new_obj, CURVE_PREVIEW_TAG)
 
             blocked_attrs = unlock_transform_channels(new_obj)
             if blocked_attrs and not warned_locked_channels:
@@ -2292,9 +2385,9 @@ def curve_bake_distribution(group_result=True):
         try:
             clean_name = obj.replace(CURVE_PREVIEW_PREFIX, "curveDist_")
             clean_name = clean_name.replace("|", "_")
-            renamed = cmds.rename(obj, clean_name)
+            renamed = _safe_rename(obj, clean_name)
             final_objects.append(renamed)
-        except:
+        except Exception:
             final_objects.append(obj)
 
     _CURVE_STATE["preview_objects"] = []
@@ -2305,14 +2398,30 @@ def curve_bake_distribution(group_result=True):
         cmds.select(mesh, r=True)
 
     if group_result and final_objects:
-        result = cmds.group(final_objects, name=CURVE_RESULT_GROUP_NAME)
-        add_nodes_to_active_isolate_sets([result])
-        cmds.select(result, r=True)
-        return result
+        grouped = _safe_group(final_objects, CURVE_RESULT_GROUP_NAME)
+        if grouped and _safe_exists(grouped):
+            add_nodes_to_active_isolate_sets([grouped])
+            cmds.select(grouped, r=True)
+            result = grouped
+        else:
+            add_nodes_to_active_isolate_sets(final_objects)
+            cmds.select(final_objects, r=True)
+            result = final_objects
     else:
         add_nodes_to_active_isolate_sets(final_objects)
         cmds.select(final_objects, r=True)
-        return final_objects
+        result = final_objects
+
+    for job_id in _CURVE_STATE.get("script_jobs", []):
+        try:
+            if cmds.scriptJob(exists=job_id):
+                cmds.scriptJob(kill=job_id, force=True)
+        except Exception:
+            pass
+    reset_curve_runtime_state()
+    _CURVE_STATE["started"] = False
+    _CURVE_STATE["baked"] = True
+    return result
 
 
 # ============================================================
@@ -3548,28 +3657,37 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
 
         for mesh in meshes:
             for shape in cmds.listRelatives(mesh, shapes=True, type="mesh") or []:
-                for attr in (".outMesh", ".worldMesh"):
-                    try:
-                        job_id = cmds.scriptJob(
-                            attributeChange=[shape + attr, ui._on_rebuild],
-                            killWithScene=True
-                        )
-                        _CURVE_STATE["script_jobs"].append(job_id)
-                    except:
-                        pass
+                try:
+                    if cmds.getAttr("{}.intermediateObject".format(shape)):
+                        continue
+                except Exception:
+                    pass
+                try:
+                    job_id = cmds.scriptJob(
+                        attributeChange=[shape + ".worldMesh", ui._on_rebuild],
+                        killWithScene=True
+                    )
+                    _CURVE_STATE["script_jobs"].append(job_id)
+                except Exception as e:
+                    _warn("failed to attach Curve mesh callback on '{}': {}".format(shape, e))
 
         for curve in curves:
             if not _safe_exists(curve):
                 continue
             for shape in cmds.listRelatives(curve, shapes=True, type="nurbsCurve") or []:
                 try:
+                    if cmds.getAttr("{}.intermediateObject".format(shape)):
+                        continue
+                except Exception:
+                    pass
+                try:
                     job_id = cmds.scriptJob(
                         attributeChange=[shape + ".worldSpace", ui._on_rebuild],
                         killWithScene=True
                     )
                     _CURVE_STATE["script_jobs"].append(job_id)
-                except:
-                    pass
+                except Exception as e:
+                    _warn("failed to attach Curve callback on '{}': {}".format(shape, e))
 
     def _on_rebuild(self):
         if not _CURVE_STATE.get("started"):

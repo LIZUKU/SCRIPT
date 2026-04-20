@@ -1970,8 +1970,11 @@ def build_curve_distribution(
 
         if trim_ends and count > 1:
             curve_len = max(0.0001, get_curve_length(curve))
-            step_est = estimate_mesh_spacing(
-                primary_mesh,
+            # Important for multi-mesh mode:
+            # use the largest effective spacing across all mesh inputs so the
+            # trimmed range keeps enough room for mesh 1/2/3... combinations.
+            step_est = estimate_mesh_spacing_multi(
+                valid_meshes,
                 axis_mode=fit_axis_mode,
                 extra_padding=padding,
                 base_scale=base_scale,
@@ -2881,6 +2884,9 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         self.status_label.setObjectName("statusLabel")
         self.status_label.setAlignment(QtCore.Qt.AlignCenter)
         self.status_label.setFixedHeight(18)
+        self.status_label.setStyleSheet(
+            "QLabel#statusLabel { background-color: #292929; border: 1px solid #3f3f3f; border-radius: 3px; color: #b6b6b6; }"
+        )
         layout.addWidget(self.status_label)
 
         self.select_frame = QtWidgets.QFrame()

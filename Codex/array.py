@@ -466,10 +466,11 @@ class XYZSliderWidget(QtWidgets.QWidget):
         for axis in self._axis_order:
             btn = QtWidgets.QPushButton(axis.upper())
             btn.setCheckable(True)
-            btn.setFixedSize(20, 18)
+            btn.setFixedSize(22, 16)
             off_color = axis_colors.get(axis, AXIS_TOGGLE_OFF_COLOR)
             btn.setStyleSheet(
-                "QPushButton { background-color: %s; } QPushButton:checked { background-color: %s; color: #101010; font-weight: bold; }"
+                "QPushButton { background-color: %s; font-size: 10px; font-weight: bold; } "
+                "QPushButton:checked { background-color: %s; color: #101010; font-weight: bold; }"
                 % (off_color, AXIS_TOGGLE_ON_COLOR)
             )
             btn.toggled.connect(lambda state, a=axis: self._on_axis_toggled(a, state))
@@ -1572,10 +1573,10 @@ def compute_curve_u_samples(curve, count, start_u, end_u, even_by_length=True):
     count = max(0, int(count))
     if count <= 0:
         return []
-    if count == 1:
-        return [(start_u + end_u) * 0.5]
-
     closed_curve = _is_closed_curve(curve)
+    if count == 1:
+        return [start_u if closed_curve else (start_u + end_u) * 0.5]
+
     if even_by_length:
         start_len = _curve_percent_to_length(curve, start_u)
         end_len = _curve_percent_to_length(curve, end_u)
@@ -1726,6 +1727,7 @@ def compute_auto_fit_count(mesh, curve, start_u, end_u,
     curve_length = get_curve_length(curve)
     usable_ratio = max(0.0, min(1.0, float(end_u)) - max(0.0, min(1.0, float(start_u))))
     available_length = curve_length * usable_ratio
+    is_closed_curve = _is_closed_curve(curve)
 
     step = estimate_mesh_spacing(
         mesh,
@@ -1743,6 +1745,8 @@ def compute_auto_fit_count(mesh, curve, start_u, end_u,
         if usable_for_centers <= 0.0:
             return 1
         count = int(math.floor(usable_for_centers / step)) + 1
+    elif is_closed_curve:
+        count = int(math.floor(available_length / step))
     else:
         count = int(math.floor(available_length / step)) + 1
 
@@ -2952,10 +2956,10 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         layout.addWidget(self.chk_lock_no_overlap)
 
         self.chk_trim_ends = QtWidgets.QCheckBox("Trim Ends")
-        self.chk_trim_ends.setChecked(True)
+        self.chk_trim_ends.setChecked(False)
         self.chk_trim_ends.toggled.connect(self._on_rebuild)
         self.chk_trim_ends.setProperty("settings_key", "trim_ends")
-        self._register_default(self.chk_trim_ends, True)
+        self._register_default(self.chk_trim_ends, False)
         layout.addWidget(self.chk_trim_ends)
 
         self.chk_even_length = QtWidgets.QCheckBox("Even Spacing by Curve Length")
@@ -3071,12 +3075,12 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         self.chk_orient.toggled.connect(self._on_rebuild)
         layout.addWidget(self.chk_orient)
 
-        orient_mode_row = QtWidgets.QGridLayout()
-        orient_mode_row.setHorizontalSpacing(8)
-        orient_mode_row.setVerticalSpacing(2)
+        orient_mode_row = QtWidgets.QVBoxLayout()
+        orient_mode_row.setSpacing(2)
+        orient_mode_row.setContentsMargins(16, 0, 0, 0)
         orient_mode_lbl = QtWidgets.QLabel("Orient Mode")
-        orient_mode_lbl.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-        orient_mode_row.addWidget(orient_mode_lbl, 0, 0)
+        orient_mode_lbl.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+        orient_mode_row.addWidget(orient_mode_lbl)
         self.orient_mode_world_up = QtWidgets.QRadioButton("Tangent + WorldUp")
         self.orient_mode_world_up.setChecked(True)
         self.orient_mode_curve_normal = QtWidgets.QRadioButton("Tangent + Curve Normal")
@@ -3084,9 +3088,8 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         self.orient_mode_world_up.toggled.connect(self._on_rebuild)
         self.orient_mode_curve_normal.toggled.connect(self._on_rebuild)
 
-        orient_mode_row.addWidget(self.orient_mode_world_up, 0, 1)
-        orient_mode_row.addWidget(self.orient_mode_curve_normal, 1, 1)
-        orient_mode_row.setColumnStretch(2, 1)
+        orient_mode_row.addWidget(self.orient_mode_world_up)
+        orient_mode_row.addWidget(self.orient_mode_curve_normal)
         layout.addLayout(orient_mode_row)
 
         self.chk_center_bbox = QtWidgets.QCheckBox("Center on Mesh Bounding Box (can offset if pivot is far)")

@@ -1150,6 +1150,20 @@ def set_nodes_hidden_in_outliner(nodes, hidden=True):
             pass
 
 
+def set_nodes_viewport_visibility(nodes, visible=True):
+    """
+    Toggle transform visibility in viewport while keeping nodes in the outliner.
+    """
+    for node in (nodes or []):
+        if not _safe_exists(node):
+            continue
+        try:
+            if cmds.attributeQuery("visibility", node=node, exists=True):
+                cmds.setAttr("{}.visibility".format(node), bool(visible))
+        except:
+            pass
+
+
 def unlock_transform_channels(transform, attrs=("tx", "ty", "tz", "rx", "ry", "rz", "sx", "sy", "sz")):
     """
     Best-effort unlock of transform channels on preview objects.
@@ -1171,6 +1185,38 @@ def unlock_transform_channels(transform, attrs=("tx", "ty", "tz", "rx", "ry", "r
         except:
             locked_or_blocked.append(attr_name)
     return locked_or_blocked
+
+
+def apply_uniform_scale_safe(transform, value):
+    """
+    Best-effort absolute uniform scale set.
+    """
+    if not _safe_exists(transform):
+        return False
+    scale_val = max(0.001, float(value))
+    for axis in ("sx", "sy", "sz"):
+        try:
+            cmds.setAttr("{}.{}".format(transform, axis), scale_val)
+        except:
+            pass
+    try:
+        current = cmds.getAttr("{}.scale".format(transform))[0]
+        if all(abs(float(v) - scale_val) <= 1e-5 for v in current):
+            return True
+    except:
+        pass
+
+    try:
+        cmds.xform(transform, objectSpace=True, scale=(scale_val, scale_val, scale_val))
+        return True
+    except:
+        pass
+
+    try:
+        cmds.scale(scale_val, scale_val, scale_val, transform, r=False, os=True)
+        return True
+    except:
+        return False
 
 
 def _extract_edge_components(selection_items):
@@ -1774,14 +1820,8 @@ def build_curve_distribution(
                         os=True
                     )
 
-            cmds.scale(
-                final_uniform_scale,
-                final_uniform_scale,
-                final_uniform_scale,
-                new_obj,
-                r=False,
-                os=True
-            )
+            if not apply_uniform_scale_safe(new_obj, final_uniform_scale):
+                cmds.warning("Failed to apply scale on {}".format(new_obj))
 
             results.append(new_obj)
     finally:
@@ -2429,7 +2469,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
     def __init__(self, parent=None):
         super(CurveDistributeTab, self).__init__(parent)
         self._settings_defaults = []
-        self._curves_hidden_in_outliner = True
+        self._curves_hidden_in_viewport = True
 
         self._rebuild_timer = QtCore.QTimer()
         self._rebuild_timer.setSingleShot(True)
@@ -2542,22 +2582,22 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         self.btn_select_mesh = QtWidgets.QPushButton()
         self.btn_select_mesh.setFixedSize(28, 28)
         self.btn_select_mesh.setObjectName("selectMeshBtn")
-        self.btn_select_mesh.setToolTip("Select Mesh")
+        self.btn_select_mesh.setToolTip("Capture selected mesh(es) as input. If none selected, reselect current input.")
         self.btn_select_mesh.clicked.connect(self._on_select_mesh)
         select_layout.addWidget(self.btn_select_mesh)
 
         self.btn_select_curve = QtWidgets.QPushButton()
         self.btn_select_curve.setFixedSize(28, 28)
         self.btn_select_curve.setObjectName("selectCurveBtn")
-        self.btn_select_curve.setToolTip("Select Curve")
+        self.btn_select_curve.setToolTip("Capture selected curve(s)/edge loop(s). If none selected, reselect current curves.")
         self.btn_select_curve.clicked.connect(self._on_select_curve)
         select_layout.addWidget(self.btn_select_curve)
 
         self.btn_toggle_curve_outliner = QtWidgets.QPushButton()
         self.btn_toggle_curve_outliner.setFixedSize(28, 28)
         self.btn_toggle_curve_outliner.setObjectName("selectCurveBtn")
-        self.btn_toggle_curve_outliner.setToolTip("Toggle Curve Hidden in Outliner")
-        self.btn_toggle_curve_outliner.clicked.connect(self._on_toggle_curve_outliner)
+        self.btn_toggle_curve_outliner.setToolTip("Toggle curve visibility in viewport (outliner stays visible)")
+        self.btn_toggle_curve_outliner.clicked.connect(self._on_toggle_curve_visibility)
         select_layout.addWidget(self.btn_toggle_curve_outliner)
 
         self.btn_refresh = QtWidgets.QPushButton()
@@ -2987,18 +3027,42 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
             self.curve_length_label.setText("Length Total : -")
 
     def _update_curve_outliner_toggle_ui(self):
-        if self._curves_hidden_in_outliner:
+        if self._curves_hidden_in_viewport:
             self.btn_toggle_curve_outliner.setText("H")
-            self.btn_toggle_curve_outliner.setToolTip("Curves are hidden in Outliner (click to show)")
+            self.btn_toggle_curve_outliner.setToolTip("Curves hidden in viewport (click to show)")
         else:
             self.btn_toggle_curve_outliner.setText("S")
-            self.btn_toggle_curve_outliner.setToolTip("Curves are visible in Outliner (click to hide)")
+            self.btn_toggle_curve_outliner.setToolTip("Curves visible in viewport (click to hide)")
 
-    def _set_curves_hidden_in_outliner(self, hidden):
+    def _set_curves_hidden_in_viewport(self, hidden):
         curves = [c for c in _CURVE_STATE.get("curves", []) if _safe_exists(c)]
-        set_nodes_hidden_in_outliner(curves, hidden=hidden)
-        self._curves_hidden_in_outliner = bool(hidden)
+        set_nodes_hidden_in_outliner(curves, hidden=False)
+        set_nodes_viewport_visibility(curves, visible=(not bool(hidden)))
+        self._curves_hidden_in_viewport = bool(hidden)
         self._update_curve_outliner_toggle_ui()
+
+    def _capture_meshes_from_selection(self):
+        selection = cmds.ls(sl=True, long=True, fl=True) or []
+        meshes, _ = extract_mesh_and_curve_transforms_from_selection(selection)
+        return [m for m in meshes if _safe_exists(m)]
+
+    def _capture_curves_from_selection(self):
+        selection = cmds.ls(sl=True, long=True, fl=True) or []
+        _, curves = extract_mesh_and_curve_transforms_from_selection(selection)
+        curves = [c for c in curves if _safe_exists(c)]
+
+        generated_curves, warnings = _edge_loops_to_curves_from_selection()
+        for msg in warnings[:3]:
+            cmds.warning(msg)
+        if len(warnings) > 3:
+            cmds.warning("{} additional conversion warnings.".format(len(warnings) - 3))
+
+        temp_curves = []
+        for c in generated_curves:
+            if c and _safe_exists(c) and is_curve_transform(c):
+                curves.append(c)
+                temp_curves.append(c)
+        return _unique_in_order(curves), temp_curves
 
     def _setup_live_callbacks(self):
         for job_id in _CURVE_STATE.get("script_jobs", []):
@@ -3062,22 +3126,13 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
 
     def _on_start(self):
         selection = cmds.ls(sl=True, long=True, fl=True) or []
-        meshes, curves = extract_mesh_and_curve_transforms_from_selection(selection)
-        temp_curves = []
+        meshes, _ = extract_mesh_and_curve_transforms_from_selection(selection)
+        curves, temp_curves = self._capture_curves_from_selection()
 
         if not meshes:
             cmds.warning("Sélectionne au moins un mesh transform.")
             self.status_label.setText("Need at least one mesh")
             return
-
-        if not curves:
-            generated_curves, warnings = _edge_loops_to_curves_from_selection()
-            for msg in warnings[:3]:
-                cmds.warning(msg)
-            if len(warnings) > 3:
-                cmds.warning("{} additional conversion warnings.".format(len(warnings) - 3))
-            curves = [c for c in generated_curves if is_curve_transform(c)]
-            temp_curves = curves[:]
 
         if not curves:
             cmds.warning("Sélectionne une ou plusieurs curves, ou des edge loops convertibles.")
@@ -3090,7 +3145,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         _CURVE_STATE["temp_curves"] = temp_curves
         _CURVE_STATE["started"] = True
         _CURVE_STATE["baked"] = False
-        self._set_curves_hidden_in_outliner(True)
+        self._set_curves_hidden_in_viewport(True)
         self._setup_live_callbacks()
 
         self._update_start_button()
@@ -3149,33 +3204,43 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
             lock_no_overlap = self.chk_lock_no_overlap.isChecked()
             even_by_length = self.chk_even_length.isChecked()
 
-            safe_count_limit = compute_auto_fit_count_multi(
-                meshes=meshes,
-                curve=valid_curves[0],
-                start_u=start_u,
-                end_u=end_u,
-                axis_mode=fit_axis,
-                padding=padding,
-                base_scale=base_scale,
-                random_scale=rand_scale,
-                trim_ends=trim_ends,
-                safety_multiplier=fit_safety
-            )
+            safe_limits = []
+            for crv in valid_curves:
+                safe_limits.append(
+                    compute_auto_fit_count_multi(
+                        meshes=meshes,
+                        curve=crv,
+                        start_u=start_u,
+                        end_u=end_u,
+                        axis_mode=fit_axis,
+                        padding=padding,
+                        base_scale=base_scale,
+                        random_scale=rand_scale,
+                        trim_ends=trim_ends,
+                        safety_multiplier=fit_safety
+                    )
+                )
+            safe_count_limit = min(safe_limits) if safe_limits else 1
 
             if auto_fit:
-                count = compute_auto_fit_count_multi(
-                    meshes=meshes,
-                    curve=valid_curves[0],
-                    start_u=start_u,
-                    end_u=end_u,
-                    axis_mode=fit_axis,
-                    padding=padding,
-                    base_scale=base_scale,
-                    random_scale=rand_scale,
-                    trim_ends=trim_ends,
-                    safety_multiplier=fit_safety,
-                    max_count=max_count
-                )
+                auto_counts = []
+                for crv in valid_curves:
+                    auto_counts.append(
+                        compute_auto_fit_count_multi(
+                            meshes=meshes,
+                            curve=crv,
+                            start_u=start_u,
+                            end_u=end_u,
+                            axis_mode=fit_axis,
+                            padding=padding,
+                            base_scale=base_scale,
+                            random_scale=rand_scale,
+                            trim_ends=trim_ends,
+                            safety_multiplier=fit_safety,
+                            max_count=max_count
+                        )
+                    )
+                count = min(auto_counts) if auto_counts else 1
                 self.count_spin.blockSignals(True)
                 self.count_spin.setValue(count)
                 self.count_spin.blockSignals(False)
@@ -3220,10 +3285,25 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
             all_results = []
             usable_len = 0.0
             for idx, curve in enumerate(valid_curves):
+                curve_count = count
+                if auto_fit:
+                    curve_count = compute_auto_fit_count_multi(
+                        meshes=meshes,
+                        curve=curve,
+                        start_u=start_u,
+                        end_u=end_u,
+                        axis_mode=fit_axis,
+                        padding=padding,
+                        base_scale=base_scale,
+                        random_scale=rand_scale,
+                        trim_ends=trim_ends,
+                        safety_multiplier=fit_safety,
+                        max_count=max_count
+                    )
                 result = build_curve_distribution(
                     mesh=mesh,
                     curve=curve,
-                    count=count,
+                    count=curve_count,
                     start_u=start_u,
                     end_u=end_u,
                     orient=orient,
@@ -3286,24 +3366,48 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
             _CURVE_STATE["is_processing"] = False
 
     def _on_select_mesh(self):
+        selected_meshes = self._capture_meshes_from_selection()
+        if selected_meshes and _CURVE_STATE.get("started"):
+            _CURVE_STATE["meshes"] = selected_meshes
+            _CURVE_STATE["mesh"] = selected_meshes[0]
+            self._update_info_labels()
+            self._setup_live_callbacks()
+            self._on_rebuild()
+            self.status_label.setText("Updated mesh input ({} mesh(es))".format(len(selected_meshes)))
+            return
         meshes = [m for m in _CURVE_STATE.get("meshes", []) if _safe_exists(m)]
         if meshes:
             cmds.select(meshes, r=True)
+        elif selected_meshes and not _CURVE_STATE.get("started"):
+            cmds.select(selected_meshes, r=True)
 
     def _on_select_curve(self):
+        selected_curves, temp_curves = self._capture_curves_from_selection()
+        if selected_curves and _CURVE_STATE.get("started"):
+            _CURVE_STATE["curves"] = selected_curves
+            current_temp = [c for c in _CURVE_STATE.get("temp_curves", []) if _safe_exists(c)]
+            _CURVE_STATE["temp_curves"] = _unique_in_order(current_temp + temp_curves)
+            self._set_curves_hidden_in_viewport(self._curves_hidden_in_viewport)
+            self._update_info_labels()
+            self._setup_live_callbacks()
+            self._on_rebuild()
+            self.status_label.setText("Updated curve input ({} curve(s))".format(len(selected_curves)))
+            return
         curves = [c for c in _CURVE_STATE.get("curves", []) if _safe_exists(c)]
         if curves:
             cmds.select(curves, r=True)
+        elif selected_curves and not _CURVE_STATE.get("started"):
+            cmds.select(selected_curves, r=True)
 
-    def _on_toggle_curve_outliner(self):
+    def _on_toggle_curve_visibility(self):
         if not _CURVE_STATE.get("started"):
             cmds.warning("Start d'abord pour gérer les curves.")
             return
-        self._set_curves_hidden_in_outliner(not self._curves_hidden_in_outliner)
-        if self._curves_hidden_in_outliner:
-            self.status_label.setText("Curves hidden in Outliner")
+        self._set_curves_hidden_in_viewport(not self._curves_hidden_in_viewport)
+        if self._curves_hidden_in_viewport:
+            self.status_label.setText("Curves hidden in viewport")
         else:
-            self.status_label.setText("Curves visible in Outliner")
+            self.status_label.setText("Curves visible in viewport")
 
     def _on_refresh(self):
         if _CURVE_STATE.get("started"):
@@ -3431,10 +3535,10 @@ class ProToolsCombinedUI(QtWidgets.QDialog):
         layout.addWidget(self.tabs)
 
     def _load_settings(self):
-        self.tab_proarray.load_settings(self._settings)
-        self.tab_curve.load_settings(self._settings)
-        self._ui_scale_percent = parse_int_flexible(self._settings.value("ui/scale_percent", 100), 100)
-        self._ui_scale_percent = int(clamp(self._ui_scale_percent, 70, 130))
+        # Requested behavior: every new UI opening starts from clean defaults.
+        self.tab_proarray.reset_settings()
+        self.tab_curve.reset_settings()
+        self._ui_scale_percent = 100
         self.ui_scale_spin.blockSignals(True)
         self.ui_scale_slider.blockSignals(True)
         self.ui_scale_spin.setValue(self._ui_scale_percent)
@@ -3442,15 +3546,11 @@ class ProToolsCombinedUI(QtWidgets.QDialog):
         self.ui_scale_spin.blockSignals(False)
         self.ui_scale_slider.blockSignals(False)
         self._apply_ui_scale(self._ui_scale_percent)
-        tab_index = int(float(self._settings.value("ui/current_tab", 0)))
-        self.tabs.setCurrentIndex(clamp(tab_index, 0, self.tabs.count() - 1))
+        self.tabs.setCurrentIndex(0)
 
     def _save_settings(self):
-        self._settings.setValue("ui/current_tab", self.tabs.currentIndex())
-        self._settings.setValue("ui/scale_percent", int(self._ui_scale_percent))
-        self.tab_proarray.save_settings(self._settings)
-        self.tab_curve.save_settings(self._settings)
-        self._settings.sync()
+        # Keep method for compatibility, but don't persist runtime values.
+        return
 
     def _on_reset_all_settings(self):
         self._settings.clear()

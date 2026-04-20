@@ -2016,7 +2016,7 @@ class ProArrayTab(QtWidgets.QWidget, SliderMixin):
         layout.addWidget(self.status_label)
 
         self.select_frame = QtWidgets.QFrame()
-        self.select_frame.setVisible(False)
+        self.select_frame.setVisible(True)
         self.select_frame.setMinimumHeight(36)
         self.select_frame.setMaximumHeight(36)
         select_layout = QtWidgets.QHBoxLayout(self.select_frame)
@@ -2609,7 +2609,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         layout.addWidget(self.status_label)
 
         self.select_frame = QtWidgets.QFrame()
-        self.select_frame.setVisible(False)
+        self.select_frame.setVisible(True)
         self.select_frame.setMinimumHeight(36)
         self.select_frame.setMaximumHeight(36)
 
@@ -2620,14 +2620,16 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         select_layout.addStretch()
 
         self.btn_select_mesh = QtWidgets.QPushButton()
-        self.btn_select_mesh.setFixedSize(28, 28)
+        self.btn_select_mesh.setFixedHeight(28)
+        self.btn_select_mesh.setMinimumWidth(74)
         self.btn_select_mesh.setObjectName("selectMeshBtn")
         self.btn_select_mesh.setToolTip("Capture selected mesh(es) as input. If none selected, reselect current input.")
         self.btn_select_mesh.clicked.connect(self._on_select_mesh)
         select_layout.addWidget(self.btn_select_mesh)
 
         self.btn_select_curve = QtWidgets.QPushButton()
-        self.btn_select_curve.setFixedSize(28, 28)
+        self.btn_select_curve.setFixedHeight(28)
+        self.btn_select_curve.setMinimumWidth(74)
         self.btn_select_curve.setObjectName("selectCurveBtn")
         self.btn_select_curve.setToolTip("Capture selected curve(s)/edge loop(s). If none selected, reselect current curves.")
         self.btn_select_curve.clicked.connect(self._on_select_curve)
@@ -3018,8 +3020,8 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         self.rotz_spin.setValue(0.0)
 
     def _setup_icons(self):
-        self.btn_select_mesh.setText("\u25a3")
-        self.btn_select_curve.setText("\u223f")
+        self.btn_select_mesh.setText("Mesh")
+        self.btn_select_curve.setText("Curve")
         self.btn_refresh.setText("\u27f3")
         self._update_curve_outliner_toggle_ui()
 
@@ -3165,14 +3167,18 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         self._do_rebuild()
 
     def _on_start(self):
-        selection = cmds.ls(sl=True, long=True, fl=True) or []
-        meshes, _ = extract_mesh_and_curve_transforms_from_selection(selection)
-        curves, temp_curves = self._capture_curves_from_selection()
+        meshes = [m for m in _CURVE_STATE.get("meshes", []) if _safe_exists(m)]
+        curves = [c for c in _CURVE_STATE.get("curves", []) if _safe_exists(c)]
+        temp_curves = [c for c in _CURVE_STATE.get("temp_curves", []) if _safe_exists(c)]
 
+        selection = cmds.ls(sl=True, long=True, fl=True) or []
         if not meshes:
-            meshes = [m for m in _CURVE_STATE.get("meshes", []) if _safe_exists(m)]
+            meshes, _ = extract_mesh_and_curve_transforms_from_selection(selection)
+            meshes = [m for m in meshes if _safe_exists(m)]
         if not curves:
-            curves = [c for c in _CURVE_STATE.get("curves", []) if _safe_exists(c)]
+            captured_curves, generated_temp_curves = self._capture_curves_from_selection()
+            curves = [c for c in captured_curves if _safe_exists(c)]
+            temp_curves = [c for c in generated_temp_curves if _safe_exists(c)]
 
         if not meshes:
             cmds.warning("Sélectionne au moins un mesh transform.")
@@ -3195,7 +3201,6 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
 
         self._update_start_button()
         self._update_info_labels()
-        self.select_frame.setVisible(True)
         self.status_label.setText("Started - {} mesh(es), {} curve(s)".format(len(meshes), len(curves)))
 
         self._do_rebuild()
@@ -3478,7 +3483,6 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         self._rebuild_timer.stop()
         curve_full_cleanup()
         self._update_start_button()
-        self.select_frame.setVisible(False)
         self.mesh_label.setText("Mesh(es) : -")
         self.curve_label.setText("Curve : -")
         self.curve_length_label.setText("Length Total : -")
@@ -3503,7 +3507,6 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
             _CURVE_STATE["baked"] = True
             _CURVE_STATE["started"] = False
             self._update_start_button()
-            self.select_frame.setVisible(False)
             self._request_parent_resize()
 
     def shutdown(self):
@@ -3616,14 +3619,15 @@ class ProToolsCombinedUI(QtWidgets.QDialog):
         self._settings.clear()
         self.tab_proarray.reset_settings()
         self.tab_curve.reset_settings()
-        self._ui_scale_percent = 100
+        # Requested behavior: preserve current UI scale when resetting tool settings.
+        current_scale = int(clamp(self._ui_scale_percent, 70, 130))
         self.ui_scale_spin.blockSignals(True)
         self.ui_scale_slider.blockSignals(True)
-        self.ui_scale_spin.setValue(100)
-        self.ui_scale_slider.setValue(100)
+        self.ui_scale_spin.setValue(current_scale)
+        self.ui_scale_slider.setValue(current_scale)
         self.ui_scale_spin.blockSignals(False)
         self.ui_scale_slider.blockSignals(False)
-        self._apply_ui_scale(100)
+        self._apply_ui_scale(current_scale)
         self.request_resize()
 
     def _on_ui_scale_changed(self, value):

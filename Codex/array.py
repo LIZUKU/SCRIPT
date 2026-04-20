@@ -45,6 +45,8 @@ ACCENT_RED_TEXT = "#e84d4d"
 AXIS_X_COLOR = "#8f4a4a"
 AXIS_Y_COLOR = "#4a8f4a"
 AXIS_Z_COLOR = "#4a6f8f"
+AXIS_TOGGLE_OFF_COLOR = "#4a4a4a"
+AXIS_TOGGLE_ON_COLOR = "#d1a91f"
 
 PROARRAY_LOCATOR_NAME = "ProArray_Pivot_LOC"
 PROARRAY_PREVIEW_PREFIX = "ProArray_Preview_"
@@ -447,7 +449,7 @@ class XYZSliderWidget(QtWidgets.QWidget):
         self._on_change_callback = None
 
         if axis_colors is None:
-            axis_colors = {"x": AXIS_X_COLOR, "y": AXIS_Y_COLOR, "z": AXIS_Z_COLOR}
+            axis_colors = {"x": AXIS_TOGGLE_OFF_COLOR, "y": AXIS_TOGGLE_OFF_COLOR, "z": AXIS_TOGGLE_OFF_COLOR}
 
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -465,7 +467,11 @@ class XYZSliderWidget(QtWidgets.QWidget):
             btn = QtWidgets.QPushButton(axis.upper())
             btn.setCheckable(True)
             btn.setFixedSize(22, 20)
-            btn.setStyleSheet("QPushButton { background-color: %s; }" % axis_colors.get(axis, "#4a4a4a"))
+            off_color = axis_colors.get(axis, AXIS_TOGGLE_OFF_COLOR)
+            btn.setStyleSheet(
+                "QPushButton { background-color: %s; } QPushButton:checked { background-color: %s; color: #101010; font-weight: bold; }"
+                % (off_color, AXIS_TOGGLE_ON_COLOR)
+            )
             btn.toggled.connect(lambda state, a=axis: self._on_axis_toggled(a, state))
             top_row.addWidget(btn)
             self._axis_buttons[axis] = btn
@@ -1946,13 +1952,6 @@ def build_curve_distribution(
                     proxy_by_source[src_mesh] = proxy
                 else:
                     proxy_by_source[src_mesh] = src_mesh
-        else:
-            proxy = _create_centered_proxy_mesh(primary_mesh)
-            if proxy and _safe_exists(proxy):
-                proxy_meshes_to_delete.append(proxy)
-                proxy_by_source[primary_mesh] = proxy
-                use_proxy_mode = True
-
         trimmed_start_u = start_u
         trimmed_end_u = end_u
 
@@ -2826,6 +2825,14 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
             return "z"
         return "longest"
 
+    def _add_separator(self, layout):
+        sep = QtWidgets.QFrame()
+        sep.setFrameShape(QtWidgets.QFrame.HLine)
+        sep.setFrameShadow(QtWidgets.QFrame.Sunken)
+        sep.setStyleSheet("QFrame { color: #3f3f3f; }")
+        sep.setFixedHeight(6)
+        layout.addWidget(sep)
+
     def _build_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(10, 8, 10, 8)
@@ -2901,6 +2908,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         layout.addWidget(self.curve_length_label)
 
         layout.addSpacing(2)
+        self._add_separator(layout)
 
         dist_label = QtWidgets.QLabel("DISTRIBUTION")
         dist_label.setObjectName("sectionLabel")
@@ -2989,6 +2997,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         layout.addLayout(axis_row)
 
         layout.addSpacing(2)
+        self._add_separator(layout)
 
         offset_pos_label = QtWidgets.QLabel("OFFSET POSITION")
         offset_pos_label.setObjectName("sectionLabel")
@@ -3010,6 +3019,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         self._add_quick_rotation_buttons(layout)
 
         layout.addSpacing(2)
+        self._add_separator(layout)
 
         rand_rot_label = QtWidgets.QLabel("RANDOM ROTATION")
         rand_rot_label.setObjectName("sectionLabel")
@@ -3029,6 +3039,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         self.rand_scale_slider, self.rand_scale_spin = self._add_slider(layout, "Random Scale", 0.0, 5.0, 0.0, 3, label_width=110)
 
         layout.addSpacing(2)
+        self._add_separator(layout)
 
         seed_label = QtWidgets.QLabel("RANDOM")
         seed_label.setObjectName("sectionLabel")
@@ -3037,6 +3048,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         self.seed_slider, self.seed_spin = self._add_slider(layout, "Seed", 1, 9999, 1, 0, label_width=110)
 
         layout.addSpacing(4)
+        self._add_separator(layout)
 
         opt_label = QtWidgets.QLabel("OPTIONS")
         opt_label.setObjectName("sectionLabel")

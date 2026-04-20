@@ -83,6 +83,7 @@ _CURVE_STATE = {
     "baked": False,
     "is_processing": False,
     "ui_instance": None,
+    "bbox_cache": {},
 }
 
 
@@ -1205,6 +1206,7 @@ def curve_cleanup_preview():
     for obj in _CURVE_STATE.get("preview_objects", []):
         _safe_delete(obj)
     _CURVE_STATE["preview_objects"] = []
+    _CURVE_STATE["bbox_cache"] = {}
 
     try:
         for obj in cmds.ls(type="transform") or []:
@@ -1232,6 +1234,7 @@ def curve_full_cleanup():
     _CURVE_STATE["started"] = False
     _CURVE_STATE["baked"] = False
     _CURVE_STATE["is_processing"] = False
+    _CURVE_STATE["bbox_cache"] = {}
 
 
 def get_transform_from_selection():
@@ -1725,20 +1728,85 @@ def get_mesh_world_bbox_size(obj):
 
 
 def estimate_mesh_spacing(obj, axis_mode="longest", extra_padding=0.0, base_scale=1.0, random_scale=0.0):
-    size = get_mesh_world_bbox_size(obj)
-    sx, sy, sz = size
+    cache = _CURVE_STATE.setdefault("bbox_cache", {})
+    cache_key = "{}::{}".format(str(obj), str(axis_mode))
+    cached_base = cache.get(cache_key)
+    if cached_base is None:
+        size = get_mesh_world_bbox_size(obj)
+        sx, sy, sz = size
 
-    if axis_mode == "x":
-        base = sx
-    elif axis_mode == "y":
-        base = sy
-    elif axis_mode == "z":
-        base = sz
-    else:
-        base = max(size)
+        if axis_mode == "x":
+            cached_base = sx
+        elif axis_mode == "y":
+            cached_base = sy
+        elif axis_mode == "z":
+            cached_base = sz
+        else:
+            cached_base = max(size)
+        cache[cache_key] = cached_base
+
+    base = float(cached_base)
 
     worst_scale = max(0.0001, float(base_scale) + abs(float(random_scale)))
     return max(0.0001, (base * worst_scale) + float(extra_padding))
+
+
+def compute_dynamic_pack_count_multi(meshes, curve, start_u, end_u,
+                                     axis_mode="longest",
+                                     padding=0.0,
+                                     base_scale=1.0,
+                                     random_scale=0.0,
+                                     trim_ends=True,
+                                     safety_multiplier=1.0,
+                                     max_count=None,
+                                     mesh_pick_mode="cycle",
+                                     mesh_pick_step=2,
+                                     random_seed=1,
+                                     sample_index_start=0):
+    valid_meshes = _unique_in_order([m for m in (meshes or []) if _safe_exists(m)])
+    if not valid_meshes or not _safe_exists(curve):
+        return 1
+
+    curve_len = max(1e-8, get_curve_length(curve))
+    start_u = clamp(float(start_u), 0.0, 1.0)
+    end_u = clamp(float(end_u), 0.0, 1.0)
+    if end_u < start_u:
+        end_u = start_u
+
+    start_len = curve_len * start_u
+    end_len = curve_len * end_u
+    safety = max(0.01, float(safety_multiplier))
+
+    cap = int(max_count) if max_count is not None else 10000
+    cap = max(1, cap)
+    current_len = start_len
+    placed = 0
+    attempts = 0
+    max_attempts = cap * 3
+
+    while placed < cap and attempts < max_attempts:
+        attempts += 1
+        sample_mesh = _pick_mesh_for_sample(
+            valid_meshes, mesh_pick_mode, mesh_pick_step, random_seed, int(sample_index_start) + placed
+        )
+        if not sample_mesh or not _safe_exists(sample_mesh):
+            break
+        spacing_this = estimate_mesh_spacing(
+            sample_mesh,
+            axis_mode=axis_mode,
+            extra_padding=padding,
+            base_scale=base_scale,
+            random_scale=random_scale
+        ) * safety
+        half_step = (spacing_this * 0.5) if trim_ends else 0.0
+
+        if (current_len + half_step) > (end_len + 1e-8):
+            break
+
+        placed += 1
+        current_len += spacing_this
+
+    return max(1, placed)
 
 
 def compute_auto_fit_count(mesh, curve, start_u, end_u,
@@ -1934,6 +2002,7 @@ def build_curve_distribution(
     mesh_pick_mode="cycle",
     mesh_pick_step=2,
     sample_index_start=0,
+    dynamic_packing=False,
 ):
     valid_meshes = _unique_in_order([m for m in (meshes or [mesh]) if _safe_exists(m)])
     if not valid_meshes or not _safe_exists(curve):
@@ -1950,19 +2019,38 @@ def build_curve_distribution(
 
     if auto_fit:
         auto_fit_trim_ends = trim_ends and (not _is_closed_curve(curve))
-        count = compute_auto_fit_count(
-            mesh=primary_mesh,
-            curve=curve,
-            start_u=start_u,
-            end_u=end_u,
-            axis_mode=fit_axis_mode,
-            padding=padding,
-            base_scale=base_scale,
-            random_scale=rand_scale,
-            trim_ends=auto_fit_trim_ends,
-            safety_multiplier=safety_multiplier,
-            max_count=max_count
-        )
+        if dynamic_packing:
+            count = compute_dynamic_pack_count_multi(
+                meshes=valid_meshes,
+                curve=curve,
+                start_u=start_u,
+                end_u=end_u,
+                axis_mode=fit_axis_mode,
+                padding=padding,
+                base_scale=base_scale,
+                random_scale=rand_scale,
+                trim_ends=auto_fit_trim_ends,
+                safety_multiplier=safety_multiplier,
+                max_count=max_count,
+                mesh_pick_mode=mesh_pick_mode,
+                mesh_pick_step=mesh_pick_step,
+                random_seed=random_seed,
+                sample_index_start=sample_index_start
+            )
+        else:
+            count = compute_auto_fit_count(
+                mesh=primary_mesh,
+                curve=curve,
+                start_u=start_u,
+                end_u=end_u,
+                axis_mode=fit_axis_mode,
+                padding=padding,
+                base_scale=base_scale,
+                random_scale=rand_scale,
+                trim_ends=auto_fit_trim_ends,
+                safety_multiplier=safety_multiplier,
+                max_count=max_count
+            )
 
     count = max(0, int(count))
     if count <= 0:
@@ -2013,13 +2101,45 @@ def build_curve_distribution(
                 trimmed_start_u = start_u
                 trimmed_end_u = end_u
 
-        u_samples = compute_curve_u_samples(
-            curve=curve,
-            count=count,
-            start_u=trimmed_start_u,
-            end_u=trimmed_end_u,
-            even_by_length=even_by_length
-        )
+        u_samples = []
+        if dynamic_packing:
+            curve_len = max(1e-8, get_curve_length(curve))
+            current_len = curve_len * trimmed_start_u
+            end_len = curve_len * trimmed_end_u
+            placed = 0
+            attempts = 0
+            max_attempts = max(int(count) * 3, 50)
+            while placed < int(count) and attempts < max_attempts:
+                attempts += 1
+                sample_mesh = _pick_mesh_for_sample(
+                    valid_meshes, mesh_pick_mode, mesh_pick_step, random_seed, int(sample_index_start) + placed
+                ) if len(valid_meshes) > 1 else primary_mesh
+                if not sample_mesh or not _safe_exists(sample_mesh):
+                    break
+                spacing_this = estimate_mesh_spacing(
+                    sample_mesh,
+                    axis_mode=fit_axis_mode,
+                    extra_padding=padding,
+                    base_scale=base_scale,
+                    random_scale=rand_scale
+                ) * max(0.01, float(safety_multiplier))
+                half_step = (spacing_this * 0.5) if trim_ends else 0.0
+                if (current_len + half_step) > (end_len + 1e-8):
+                    break
+                u = _curve_length_to_percent(curve, current_len)
+                if u is None:
+                    break
+                u_samples.append(u)
+                placed += 1
+                current_len += spacing_this
+        else:
+            u_samples = compute_curve_u_samples(
+                curve=curve,
+                count=count,
+                start_u=trimmed_start_u,
+                end_u=trimmed_end_u,
+                even_by_length=even_by_length
+            )
         warned_locked_channels = False
         is_closed = _is_closed_curve(curve)
         first_u = u_samples[0] if u_samples else None
@@ -3001,6 +3121,14 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         self._register_default(self.chk_even_length, True)
         layout.addWidget(self.chk_even_length)
 
+        self.chk_dynamic_packing = QtWidgets.QCheckBox("Dynamic Packing (No Overlap)")
+        self.chk_dynamic_packing.setChecked(True)
+        self.chk_dynamic_packing.toggled.connect(self._on_auto_fit_toggled)
+        self.chk_dynamic_packing.setProperty("settings_key", "dynamic_packing")
+        self._register_default(self.chk_dynamic_packing, True)
+        self.chk_dynamic_packing.setToolTip("Houdini-style placement: each mesh advances by its own spacing.")
+        layout.addWidget(self.chk_dynamic_packing)
+
         self.padding_slider, self.padding_spin = self._add_slider(layout, "Padding", -10.0, 50.0, 0.0, 3, label_width=110)
         self.safety_slider, self.safety_spin = self._add_slider(layout, "Fit Safety", 0.5, 3.0, 1.0, 3, label_width=110)
         self.auto_max_slider, self.auto_max_spin = self._add_slider(layout, "Max Count", 1, 5000, 1000, 0, label_width=110)
@@ -3185,6 +3313,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
             (self.fit_axis_z, "fit_axis_z", False),
             (self.fit_axis_longest, "fit_axis_longest", True),
             (self.mesh_order_combo, "mesh_order_mode", "Cycle"),
+            (self.chk_dynamic_packing, "dynamic_packing", True),
         ]
         for widget, key, default_value in controls:
             widget.setProperty("settings_key", key)
@@ -3451,10 +3580,13 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
 
     def _on_auto_fit_toggled(self):
         is_auto = self.chk_auto_fit.isChecked()
+        is_dynamic = self.chk_dynamic_packing.isChecked()
         self.count_spin.setEnabled(not is_auto)
         self.count_slider.setEnabled(not is_auto)
         self.auto_max_spin.setEnabled(is_auto)
         self.auto_max_slider.setEnabled(is_auto)
+        self.chk_even_length.setEnabled(not is_dynamic)
+        self.chk_lock_no_overlap.setEnabled(not is_dynamic)
         self._on_rebuild()
         self._request_parent_resize()
 
@@ -3552,31 +3684,13 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
             auto_fit = self.chk_auto_fit.isChecked()
             lock_no_overlap = self.chk_lock_no_overlap.isChecked()
             even_by_length = self.chk_even_length.isChecked()
+            dynamic_packing = self.chk_dynamic_packing.isChecked()
 
             safe_limits = []
             for crv in valid_curves:
-                safe_limits.append(
-                    compute_auto_fit_count_multi(
-                        meshes=meshes,
-                        curve=crv,
-                        start_u=start_u,
-                        end_u=end_u,
-                        axis_mode=fit_axis,
-                        padding=padding,
-                        base_scale=base_scale,
-                        random_scale=rand_scale,
-                        trim_ends=trim_ends,
-                        safety_multiplier=fit_safety
-                    )
-                )
-            safe_count_limit = min(safe_limits) if safe_limits else 1
-            hard_cap_limit = max(1, max_count)
-
-            if auto_fit:
-                auto_counts = []
-                for crv in valid_curves:
-                    auto_counts.append(
-                        compute_auto_fit_count_multi(
+                if dynamic_packing:
+                    safe_limits.append(
+                        compute_dynamic_pack_count_multi(
                             meshes=meshes,
                             curve=crv,
                             start_u=start_u,
@@ -3587,9 +3701,67 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
                             random_scale=rand_scale,
                             trim_ends=trim_ends,
                             safety_multiplier=fit_safety,
-                            max_count=max_count
+                            mesh_pick_mode=mesh_order_mode,
+                            mesh_pick_step=mesh_every_n,
+                            random_seed=int(self.seed_spin.value())
                         )
                     )
+                else:
+                    safe_limits.append(
+                        compute_auto_fit_count_multi(
+                            meshes=meshes,
+                            curve=crv,
+                            start_u=start_u,
+                            end_u=end_u,
+                            axis_mode=fit_axis,
+                            padding=padding,
+                            base_scale=base_scale,
+                            random_scale=rand_scale,
+                            trim_ends=trim_ends,
+                            safety_multiplier=fit_safety
+                        )
+                    )
+            safe_count_limit = min(safe_limits) if safe_limits else 1
+            hard_cap_limit = max(1, max_count)
+
+            if auto_fit:
+                auto_counts = []
+                for crv in valid_curves:
+                    if dynamic_packing:
+                        auto_counts.append(
+                            compute_dynamic_pack_count_multi(
+                                meshes=meshes,
+                                curve=crv,
+                                start_u=start_u,
+                                end_u=end_u,
+                                axis_mode=fit_axis,
+                                padding=padding,
+                                base_scale=base_scale,
+                                random_scale=rand_scale,
+                                trim_ends=trim_ends,
+                                safety_multiplier=fit_safety,
+                                max_count=max_count,
+                                mesh_pick_mode=mesh_order_mode,
+                                mesh_pick_step=mesh_every_n,
+                                random_seed=int(self.seed_spin.value())
+                            )
+                        )
+                    else:
+                        auto_counts.append(
+                            compute_auto_fit_count_multi(
+                                meshes=meshes,
+                                curve=crv,
+                                start_u=start_u,
+                                end_u=end_u,
+                                axis_mode=fit_axis,
+                                padding=padding,
+                                base_scale=base_scale,
+                                random_scale=rand_scale,
+                                trim_ends=trim_ends,
+                                safety_multiplier=fit_safety,
+                                max_count=max_count
+                            )
+                        )
                 count = min(auto_counts) if auto_counts else 1
                 self.count_spin.blockSignals(True)
                 self.count_spin.setValue(count)
@@ -3649,19 +3821,38 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
             for idx, curve in enumerate(valid_curves):
                 curve_count = per_curve_counts[idx] if idx < len(per_curve_counts) else count
                 if auto_fit:
-                    curve_count = compute_auto_fit_count_multi(
-                        meshes=meshes,
-                        curve=curve,
-                        start_u=start_u,
-                        end_u=end_u,
-                        axis_mode=fit_axis,
-                        padding=padding,
-                        base_scale=base_scale,
-                        random_scale=rand_scale,
-                        trim_ends=trim_ends,
-                        safety_multiplier=fit_safety,
-                        max_count=max_count
-                    )
+                    if dynamic_packing:
+                        curve_count = compute_dynamic_pack_count_multi(
+                            meshes=meshes,
+                            curve=curve,
+                            start_u=start_u,
+                            end_u=end_u,
+                            axis_mode=fit_axis,
+                            padding=padding,
+                            base_scale=base_scale,
+                            random_scale=rand_scale,
+                            trim_ends=trim_ends,
+                            safety_multiplier=fit_safety,
+                            max_count=max_count,
+                            mesh_pick_mode=mesh_order_mode,
+                            mesh_pick_step=mesh_every_n,
+                            random_seed=random_seed + (idx * 97),
+                            sample_index_start=sample_index_offset
+                        )
+                    else:
+                        curve_count = compute_auto_fit_count_multi(
+                            meshes=meshes,
+                            curve=curve,
+                            start_u=start_u,
+                            end_u=end_u,
+                            axis_mode=fit_axis,
+                            padding=padding,
+                            base_scale=base_scale,
+                            random_scale=rand_scale,
+                            trim_ends=trim_ends,
+                            safety_multiplier=fit_safety,
+                            max_count=max_count
+                        )
                 result = build_curve_distribution(
                     mesh=mesh,
                     curve=curve,
@@ -3690,7 +3881,8 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
                     meshes=meshes,
                     mesh_pick_mode=mesh_order_mode,
                     mesh_pick_step=mesh_every_n,
-                    sample_index_start=sample_index_offset
+                    sample_index_start=sample_index_offset,
+                    dynamic_packing=dynamic_packing
                 )
                 all_results.extend(result)
                 sample_index_offset += max(0, int(curve_count))

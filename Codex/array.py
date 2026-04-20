@@ -1069,6 +1069,52 @@ def get_transform_from_selection():
     return cmds.ls(sl=True, long=True, transforms=True) or []
 
 
+def _unique_in_order(items):
+    ordered = []
+    seen = set()
+    for item in items or []:
+        if item in seen:
+            continue
+        seen.add(item)
+        ordered.append(item)
+    return ordered
+
+
+def extract_mesh_and_curve_transforms_from_selection(selection_items):
+    """
+    Resolve selected transforms, shapes, and components into unique mesh/curve transforms.
+    Keeps user selection order when possible.
+    """
+    ordered_transforms = []
+
+    for item in selection_items or []:
+        root = item.split(".", 1)[0]
+        if not _safe_exists(root):
+            continue
+
+        node_type = ""
+        try:
+            node_type = cmds.nodeType(root)
+        except:
+            pass
+
+        transform = None
+        if node_type == "transform":
+            transform = root
+        else:
+            parents = cmds.listRelatives(root, parent=True, fullPath=True) or []
+            if parents:
+                transform = parents[0]
+
+        if transform and _safe_exists(transform):
+            ordered_transforms.append(transform)
+
+    ordered_transforms = _unique_in_order(ordered_transforms)
+    meshes = [obj for obj in ordered_transforms if is_mesh_transform(obj)]
+    curves = [obj for obj in ordered_transforms if is_curve_transform(obj)]
+    return meshes, curves
+
+
 def is_mesh_transform(obj):
     if not _safe_exists(obj):
         return False
@@ -1087,6 +1133,44 @@ def is_curve_transform(obj):
         if cmds.nodeType(s) == "nurbsCurve":
             return True
     return False
+
+
+def set_nodes_hidden_in_outliner(nodes, hidden=True):
+    """
+    Toggle Maya's outliner-only visibility flag on transform nodes.
+    Safe no-op when attribute or node is unavailable.
+    """
+    for node in (nodes or []):
+        if not _safe_exists(node):
+            continue
+        try:
+            if cmds.attributeQuery("hiddenInOutliner", node=node, exists=True):
+                cmds.setAttr("{}.hiddenInOutliner".format(node), bool(hidden))
+        except:
+            pass
+
+
+def unlock_transform_channels(transform, attrs=("tx", "ty", "tz", "rx", "ry", "rz", "sx", "sy", "sz")):
+    """
+    Best-effort unlock of transform channels on preview objects.
+    Returns attribute names that remain non-settable.
+    """
+    locked_or_blocked = []
+    if not _safe_exists(transform):
+        return locked_or_blocked
+
+    for attr_name in attrs:
+        plug = "{}.{}".format(transform, attr_name)
+        try:
+            cmds.setAttr(plug, lock=False, keyable=True, channelBox=True)
+        except:
+            pass
+        try:
+            if not cmds.getAttr(plug, settable=True):
+                locked_or_blocked.append(attr_name)
+        except:
+            locked_or_blocked.append(attr_name)
+    return locked_or_blocked
 
 
 def _extract_edge_components(selection_items):
@@ -1589,6 +1673,7 @@ def build_curve_distribution(
             end_u=trimmed_end_u,
             even_by_length=even_by_length
         )
+        warned_locked_channels = False
 
         for i, u in enumerate(u_samples):
 
@@ -1608,6 +1693,14 @@ def build_curve_distribution(
                     valid_meshes, mesh_pick_mode, mesh_pick_step, random_seed, i
                 )
                 new_obj = cmds.duplicate(sample_mesh, rr=True, name="{}{}{:03d}".format(CURVE_PREVIEW_PREFIX, name_prefix, i + 1))[0]
+
+            blocked_attrs = unlock_transform_channels(new_obj)
+            if blocked_attrs and not warned_locked_channels:
+                warned_locked_channels = True
+                cmds.warning(
+                    "Some transform channels are locked or driven on preview objects: {}. "
+                    "Scale/rotation/translation updates may be limited.".format(", ".join(blocked_attrs))
+                )
 
             rx_rand = rand_rot[0] * get_random_for_index(random_seed, i, 0)
             ry_rand = rand_rot[1] * get_random_for_index(random_seed, i, 1)
@@ -2336,6 +2429,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
     def __init__(self, parent=None):
         super(CurveDistributeTab, self).__init__(parent)
         self._settings_defaults = []
+        self._curves_hidden_in_outliner = True
 
         self._rebuild_timer = QtCore.QTimer()
         self._rebuild_timer.setSingleShot(True)
@@ -2458,6 +2552,13 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         self.btn_select_curve.setToolTip("Select Curve")
         self.btn_select_curve.clicked.connect(self._on_select_curve)
         select_layout.addWidget(self.btn_select_curve)
+
+        self.btn_toggle_curve_outliner = QtWidgets.QPushButton()
+        self.btn_toggle_curve_outliner.setFixedSize(28, 28)
+        self.btn_toggle_curve_outliner.setObjectName("selectCurveBtn")
+        self.btn_toggle_curve_outliner.setToolTip("Toggle Curve Hidden in Outliner")
+        self.btn_toggle_curve_outliner.clicked.connect(self._on_toggle_curve_outliner)
+        select_layout.addWidget(self.btn_toggle_curve_outliner)
 
         self.btn_refresh = QtWidgets.QPushButton()
         self.btn_refresh.setFixedSize(28, 28)
@@ -2840,6 +2941,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         self.btn_select_mesh.setText("\u25a3")
         self.btn_select_curve.setText("\u223f")
         self.btn_refresh.setText("\u27f3")
+        self._update_curve_outliner_toggle_ui()
 
     def _update_start_button(self):
         if _CURVE_STATE["started"]:
@@ -2883,6 +2985,20 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
             self.curve_length_label.setText("Length Total : {:.3f}".format(total_length))
         else:
             self.curve_length_label.setText("Length Total : -")
+
+    def _update_curve_outliner_toggle_ui(self):
+        if self._curves_hidden_in_outliner:
+            self.btn_toggle_curve_outliner.setText("H")
+            self.btn_toggle_curve_outliner.setToolTip("Curves are hidden in Outliner (click to show)")
+        else:
+            self.btn_toggle_curve_outliner.setText("S")
+            self.btn_toggle_curve_outliner.setToolTip("Curves are visible in Outliner (click to hide)")
+
+    def _set_curves_hidden_in_outliner(self, hidden):
+        curves = [c for c in _CURVE_STATE.get("curves", []) if _safe_exists(c)]
+        set_nodes_hidden_in_outliner(curves, hidden=hidden)
+        self._curves_hidden_in_outliner = bool(hidden)
+        self._update_curve_outliner_toggle_ui()
 
     def _setup_live_callbacks(self):
         for job_id in _CURVE_STATE.get("script_jobs", []):
@@ -2946,9 +3062,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
 
     def _on_start(self):
         selection = cmds.ls(sl=True, long=True, fl=True) or []
-        transforms = cmds.ls(sl=True, long=True, transforms=True) or []
-        meshes = [obj for obj in transforms if is_mesh_transform(obj)]
-        curves = [obj for obj in transforms if is_curve_transform(obj)]
+        meshes, curves = extract_mesh_and_curve_transforms_from_selection(selection)
         temp_curves = []
 
         if not meshes:
@@ -2976,6 +3090,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         _CURVE_STATE["temp_curves"] = temp_curves
         _CURVE_STATE["started"] = True
         _CURVE_STATE["baked"] = False
+        self._set_curves_hidden_in_outliner(True)
         self._setup_live_callbacks()
 
         self._update_start_button()
@@ -3179,6 +3294,16 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         curves = [c for c in _CURVE_STATE.get("curves", []) if _safe_exists(c)]
         if curves:
             cmds.select(curves, r=True)
+
+    def _on_toggle_curve_outliner(self):
+        if not _CURVE_STATE.get("started"):
+            cmds.warning("Start d'abord pour gérer les curves.")
+            return
+        self._set_curves_hidden_in_outliner(not self._curves_hidden_in_outliner)
+        if self._curves_hidden_in_outliner:
+            self.status_label.setText("Curves hidden in Outliner")
+        else:
+            self.status_label.setText("Curves visible in Outliner")
 
     def _on_refresh(self):
         if _CURVE_STATE.get("started"):

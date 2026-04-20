@@ -36,14 +36,14 @@ SWEEP_PREVIEW_SHADER = "PR_SweepPreview_Mat"
 SWEEP_PREVIEW_SG = "PR_SweepPreview_SG"
 SWEEP_PREVIEW_TRANSPARENCY = 0.7
 SWEEP_UI_SPECS = {
-    "profilePolySides": {"label": "Sides", "min": 3, "max": 64, "default": 16, "decimals": 0},
-    "scaleProfileX": {"label": "Scale X", "min": 0.01, "max": 5.0, "default": 1.0, "decimals": 3},
-    "rotateProfile": {"label": "Rotate", "min": -180.0, "max": 180.0, "default": 0.0, "decimals": 3},
-    "twist": {"label": "Twist", "min": -360.0, "max": 360.0, "default": 0.0, "decimals": 3},
-    "taper": {"label": "Taper", "min": -5.0, "max": 5.0, "default": 1.0, "decimals": 3},
-    "interpolationPrecision": {"label": "Precision", "min": 1.0, "max": 100.0, "default": 75.0, "decimals": 3},
-    "interpolationMode": {"label": "Interp Mode", "min": 0, "max": 3, "default": 0, "decimals": 0},
-    "interpolationOptimize": {"label": "Optimize", "min": 0, "max": 1, "default": 0, "decimals": 0},
+    "profilePolySides": {"label": "Sides", "min": 3, "max": 64, "default": 16, "decimals": 0, "step": 1, "allow_over_max": True},
+    "scaleProfileX": {"label": "Scale X", "min": 0.01, "max": 5.0, "default": 1.0, "decimals": 3, "step": 0.1, "allow_over_max": True},
+    "rotateProfile": {"label": "Rotate", "min": -180.0, "max": 180.0, "default": 0.0, "decimals": 3, "step": 45.0, "allow_over_max": True},
+    "twist": {"label": "Twist", "min": -360.0, "max": 360.0, "default": 0.0, "decimals": 3, "step": 45.0, "allow_over_max": True},
+    "taper": {"label": "Taper", "min": -5.0, "max": 5.0, "default": 1.0, "decimals": 3, "step": 0.1, "allow_over_max": True},
+    "interpolationPrecision": {"label": "Precision", "min": 1.0, "max": 100.0, "default": 75.0, "decimals": 3, "step": 1.0, "allow_over_max": True},
+    "interpolationMode": {"label": "Interp Mode", "min": 0, "max": 3, "default": 0, "decimals": 0, "step": 1, "allow_over_max": False},
+    "interpolationOptimize": {"label": "Optimize", "min": 0, "max": 1, "default": 0, "decimals": 0, "step": 1, "allow_over_max": False},
 }
 SWEEP_DEFAULT_SETTINGS = {
     attr: spec["default"] for attr, spec in SWEEP_UI_SPECS.items()
@@ -633,7 +633,11 @@ def set_sweep_preview_setting(attr, val):
     min_val = spec["min"]
     max_val = spec["max"]
     decimals = spec.get("decimals", 3)
-    clamped = max(min_val, min(max_val, float(val)))
+    allow_over_max = bool(spec.get("allow_over_max", False))
+    if allow_over_max:
+        clamped = max(min_val, float(val))
+    else:
+        clamped = max(min_val, min(max_val, float(val)))
     final_val = int(round(clamped)) if decimals == 0 else float(clamped)
     _sweep_preview_settings[attr] = final_val
 
@@ -1384,9 +1388,37 @@ def _split_edges_by_connectivity(edges):
     return groups
 
 
+def _expand_selection_to_edge_loops(edges):
+    expanded = []
+    seen = set()
+    for edge in edges:
+        mesh, sep, suffix = edge.partition(".e[")
+        if not sep:
+            continue
+        try:
+            edge_index = int(suffix.rstrip("]"))
+        except Exception:
+            continue
+        loop_ids = []
+        try:
+            loop_ids = cmds.polySelect(mesh, edgeLoop=edge_index, noSelection=True) or []
+        except Exception:
+            loop_ids = []
+        if not loop_ids:
+            loop_ids = [edge_index]
+        for eid in loop_ids:
+            e_comp = "{}.e[{}]".format(mesh, int(eid))
+            if e_comp in seen:
+                continue
+            seen.add(e_comp)
+            expanded.append(e_comp)
+    return expanded
+
+
 def edge_to_curve():
     sel = cmds.ls(sl=True, fl=True, long=True) or []
-    edges = list(dict.fromkeys([c for c in sel if ".e[" in c]))
+    raw_edges = list(dict.fromkeys([c for c in sel if ".e[" in c]))
+    edges = _expand_selection_to_edge_loops(raw_edges)
     if not edges:
         cmds.warning("[PR] Select edges.")
         return
@@ -3478,7 +3510,7 @@ def _pr_set_ui_values(radius, segments):
         ui.seg_slider.blockSignals(False)
         ui.rad_slider.blockSignals(False)
 
-        if _chamfer_active and is_chamfer_curve_selected():
+        if _chamfer_active:
             chamfer_cv(segments, radius, True)
         cmds.refresh(f=True)
     except Exception:
@@ -3570,6 +3602,7 @@ def _pr_ensure_drag_ctx():
             pressCommand=_pr_drag_press,
             dragCommand=_pr_drag_move,
             releaseCommand=_pr_drag_release,
+            space="screen",
             cursor="hand"
         )
     except Exception:
@@ -3935,6 +3968,24 @@ class PRColorBtn(QtWidgets.QPushButton):
         ))
 
 
+class PRDoubleSpinBox(QtWidgets.QDoubleSpinBox):
+    """
+    DoubleSpinBox tolerant a la saisie FR/EN:
+    - accepte "1.25" et "1,25"
+    - normalise silencieusement le texte saisi
+    """
+    def valueFromText(self, text):
+        cleaned = str(text).strip().replace(",", ".")
+        try:
+            return float(cleaned)
+        except Exception:
+            return super(PRDoubleSpinBox, self).valueFromText(text)
+
+    def validate(self, text, pos):
+        cleaned = str(text).replace(",", ".")
+        return super(PRDoubleSpinBox, self).validate(cleaned, pos)
+
+
 # ============================================================
 # UI - SECTION LABEL
 # ============================================================
@@ -3996,7 +4047,7 @@ class MirrorAdvancedDialog(QtWidgets.QDialog):
         adv_form.setLabelAlignment(QtCore.Qt.AlignLeft)
         adv_form.setContentsMargins(6, 0, 0, 0)
 
-        self.distance_spin = QtWidgets.QDoubleSpinBox()
+        self.distance_spin = PRDoubleSpinBox()
         self.distance_spin.setDecimals(6)
         self.distance_spin.setRange(-999999.0, 999999.0)
         self.distance_spin.setSingleStep(0.01)
@@ -4019,7 +4070,7 @@ class MirrorAdvancedDialog(QtWidgets.QDialog):
         self.auto_close_cb = QtWidgets.QCheckBox("Auto Close Result")
         adv_form.addRow("", self.auto_close_cb)
 
-        self.seam_tol_spin = QtWidgets.QDoubleSpinBox()
+        self.seam_tol_spin = PRDoubleSpinBox()
         self.seam_tol_spin.setDecimals(6)
         self.seam_tol_spin.setRange(0.0, 100.0)
         self.seam_tol_spin.setSingleStep(0.0001)
@@ -4277,7 +4328,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
             bg="#1a3060",
             fg=self.C_DRAW
         )
-        self.auto_curve_len_spin = QtWidgets.QDoubleSpinBox()
+        self.auto_curve_len_spin = PRDoubleSpinBox()
         self.auto_curve_len_spin.setRange(0.01, 9999)
         self.auto_curve_len_spin.setValue(AUTO_CURVE_LENGTH_DEFAULT)
         self.auto_curve_len_spin.setDecimals(2)
@@ -4416,7 +4467,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         self.rad_slider.setMaximum(1000)
         row.addWidget(self.rad_slider)
 
-        self.rad_spin = QtWidgets.QDoubleSpinBox()
+        self.rad_spin = PRDoubleSpinBox()
         self.rad_spin.setDecimals(3)
         self.rad_spin.setMinimum(0.0)
         self.rad_spin.setMaximum(RADIUS_MAX_SPINBOX)
@@ -4491,7 +4542,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         row.addWidget(slider)
 
         if decimals > 0:
-            spinbox = QtWidgets.QDoubleSpinBox()
+            spinbox = PRDoubleSpinBox()
             spinbox.setDecimals(decimals)
             spinbox.setMinimum(min_val)
             spinbox.setMaximum(RADIUS_MAX_SPINBOX)
@@ -4544,7 +4595,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         slider.setMaximum(1000)
         row.addWidget(slider)
 
-        spinbox = QtWidgets.QDoubleSpinBox()
+        spinbox = PRDoubleSpinBox()
         spinbox.setDecimals(3)
         spinbox.setMinimum(min_val)
         spinbox.setMaximum(RADIUS_MAX_SPINBOX)
@@ -4589,7 +4640,9 @@ class PRCurveToolsUI(QtWidgets.QDialog):
                     spec["max"],
                     spec["default"],
                     spec["decimals"],
-                    attr
+                    attr,
+                    spec.get("step", 1.0),
+                    bool(spec.get("allow_over_max", False))
                 )
                 self._sweep_controls[attr] = (slider, spinbox)
 
@@ -4627,7 +4680,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         parent_layout.addLayout(row)
         return ("combo", combo)
 
-    def _add_sweep_slider(self, parent_layout, label, min_val, max_val, default, decimals, attr):
+    def _add_sweep_slider(self, parent_layout, label, min_val, max_val, default, decimals, attr, step, allow_over_max):
         row = QtWidgets.QHBoxLayout()
         row.setSpacing(5)
 
@@ -4641,21 +4694,32 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         row.addWidget(slider)
 
         if decimals > 0:
-            spinbox = QtWidgets.QDoubleSpinBox()
+            spinbox = PRDoubleSpinBox()
             spinbox.setDecimals(decimals)
             spinbox.setMinimum(min_val)
-            spinbox.setMaximum(max_val)
+            spinbox.setMaximum(RADIUS_MAX_SPINBOX if allow_over_max else max_val)
             spinbox.setKeyboardTracking(False)
+            spinbox.setSingleStep(float(step))
         else:
             spinbox = QtWidgets.QSpinBox()
             spinbox.setMinimum(int(min_val))
-            spinbox.setMaximum(int(max_val))
+            spinbox.setMaximum(RADIUS_MAX_SPINBOX if allow_over_max else int(max_val))
             spinbox.setKeyboardTracking(False)
+            spinbox.setSingleStep(max(1, int(round(step))))
 
         spinbox.setFixedWidth(62)
         spinbox.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
         spinbox.setValue(default if decimals > 0 else int(default))
         row.addWidget(spinbox)
+
+        minus_btn = QtWidgets.QPushButton("-")
+        minus_btn.setFixedSize(18, 18)
+        minus_btn.setToolTip("Divise la valeur par 2")
+        plus_btn = QtWidgets.QPushButton("+")
+        plus_btn.setFixedSize(18, 18)
+        plus_btn.setToolTip("Multiplie la valeur par 2")
+        row.addWidget(minus_btn)
+        row.addWidget(plus_btn)
 
         def update_spinbox(val):
             ratio = val / 1000.0
@@ -4672,10 +4736,22 @@ class PRCurveToolsUI(QtWidgets.QDialog):
             slider.blockSignals(True)
             slider.setValue(int(ratio * 1000))
             slider.blockSignals(False)
-            set_sweep_preview_setting(attr, clamped)
+            set_sweep_preview_setting(attr, float(val))
+
+        def _half_value():
+            cur = float(spinbox.value())
+            nxt = max(min_val, cur / 2.0)
+            spinbox.setValue(int(round(nxt)) if decimals == 0 else nxt)
+
+        def _double_value():
+            cur = float(spinbox.value())
+            nxt = cur * 2.0 if abs(cur) > 1e-12 else max(float(step), 0.1)
+            spinbox.setValue(int(round(nxt)) if decimals == 0 else nxt)
 
         slider.valueChanged.connect(update_spinbox)
         spinbox.valueChanged.connect(update_slider)
+        minus_btn.clicked.connect(_half_value)
+        plus_btn.clicked.connect(_double_value)
 
         ratio = (default - min_val) / (max_val - min_val)
         slider.setValue(int(ratio * 1000))
@@ -5059,7 +5135,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         slider.setMaximum(1000)
         row.addWidget(slider)
 
-        spinbox = QtWidgets.QDoubleSpinBox()
+        spinbox = PRDoubleSpinBox()
         spinbox.setDecimals(decimals)
         spinbox.setRange(min_val, max_val)
         spinbox.setSingleStep(0.0001 if key == "seam_tol" else 0.01)

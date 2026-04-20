@@ -22,6 +22,8 @@ import maya.OpenMayaUI as omui
 # ============================================================
 WINDOW_OBJECT_NAME = "ProCurve"
 WINDOW_TITLE = "PR Curve Tools v2.9"
+UI_SCALE_DEFAULT_PERCENT = 100
+UI_SCALE_PRESETS = (100, 90, 80, 75, 66, 50)
 
 SEGMENTS_MIN = 0
 SEGMENTS_MAX = 20
@@ -3817,21 +3819,35 @@ def _run_boolean_curve_internal(operation_str):
 class PRColorBtn(QtWidgets.QPushButton):
     def __init__(self, text="", tip="", bg="#2a2a2a", fg="#909090", w=None, h=26, parent=None):
         super(PRColorBtn, self).__init__(text, parent)
-        if w:
-            self.setFixedWidth(w)
-        self.setFixedHeight(h)
+        self._base_fixed_width = int(w) if w else None
+        self._base_fixed_height = int(h)
+        self._ui_scale = 1.0
+        if self._base_fixed_width:
+            self.setFixedWidth(self._base_fixed_width)
+        self.setFixedHeight(self._base_fixed_height)
         self.setToolTip(tip)
         self._bg = bg
         self._fg = fg
         self._update_style()
 
+    def apply_scale(self, scale):
+        self._ui_scale = max(0.4, float(scale))
+        if self._base_fixed_width:
+            self.setFixedWidth(max(18, int(round(self._base_fixed_width * self._ui_scale))))
+        self.setFixedHeight(max(18, int(round(self._base_fixed_height * self._ui_scale))))
+        self._update_style()
+
     def _update_style(self):
         lighter = QtGui.QColor(self._bg).lighter(130).name()
+        font_px = max(8, int(round(11 * self._ui_scale)))
+        pad_v = max(1, int(round(3 * self._ui_scale)))
+        pad_h = max(3, int(round(8 * self._ui_scale)))
+        radius = max(2, int(round(3 * self._ui_scale)))
         self.setStyleSheet("""
             QPushButton {{
                 background-color: {bg}; color: {fg};
-                border: 1px solid {border}; border-radius: 3px;
-                font-size: 11px; font-weight: bold; padding: 3px 8px;
+                border: 1px solid {border}; border-radius: {radius}px;
+                font-size: {font_px}px; font-weight: bold; padding: {pad_v}px {pad_h}px;
             }}
             QPushButton:hover {{ background-color: {hover}; border-color: {fg}; }}
             QPushButton:pressed {{ background-color: #111; }}
@@ -3839,7 +3855,11 @@ class PRColorBtn(QtWidgets.QPushButton):
         """.format(
             bg=self._bg, fg=self._fg,
             border=QtGui.QColor(self._bg).lighter(150).name(),
-            hover=lighter
+            hover=lighter,
+            radius=radius,
+            font_px=font_px,
+            pad_v=pad_v,
+            pad_h=pad_h
         ))
 
 
@@ -4084,10 +4104,16 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         self._mirror_preview_sources = []
         self._mirror_preview_curves = []
         self._mirror_preview_busy = False
+        self._ui_scale_percent = int(UI_SCALE_DEFAULT_PERCENT)
+        self._base_window_min_width = 310
+        self._base_window_min_height = 0
+        self._scaled_widget_specs = []
+        self._scaled_layout_specs = []
+        self._ui_scale_guard = False
 
         self.setObjectName(WINDOW_OBJECT_NAME)
         self.setWindowTitle(WINDOW_TITLE)
-        self.setMinimumWidth(310)
+        self.setMinimumWidth(self._base_window_min_width)
         self.setSizeGripEnabled(True)
         self.setWindowFlags(QtCore.Qt.Window | QtCore.Qt.WindowCloseButtonHint)
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose)
@@ -4099,7 +4125,8 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         self._rebuild_timer.timeout.connect(self._do_live_chamfer)
 
         self._build_ui()
-        self._apply_global_style()
+        self._cache_ui_scale_bases()
+        self._apply_ui_scale(self._ui_scale_percent, warn=False)
         self.adjustSize()
 
         try:
@@ -4114,6 +4141,17 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(5)
+        top_row = QtWidgets.QHBoxLayout()
+        top_row.setSpacing(4)
+        top_row.addStretch()
+        self.ui_scale_btn = QtWidgets.QToolButton()
+        self.ui_scale_btn.setText("UI 100%")
+        self.ui_scale_btn.setToolTip("Click droit: presets de scale UI")
+        self.ui_scale_btn.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.ui_scale_btn.setFixedWidth(68)
+        self.ui_scale_btn.setFixedHeight(20)
+        top_row.addWidget(self.ui_scale_btn)
+        layout.addLayout(top_row)
 
         layout.addWidget(SectionLabel("  DRAW", self.C_DRAW))
 
@@ -4562,23 +4600,38 @@ class PRCurveToolsUI(QtWidgets.QDialog):
     # GLOBAL STYLE
     # ------------------------------------------------------------------
     def _apply_global_style(self):
+        scale = max(0.4, float(self._ui_scale_percent) / 100.0)
+        font_px = max(8, int(round(11 * scale)))
+        button_pad_v = max(1, int(round(4 * scale)))
+        button_pad_h = max(2, int(round(6 * scale)))
+        border_radius = max(2, int(round(4 * scale)))
+        groove_h = max(2, int(round(3 * scale)))
+        handle_w = max(8, int(round(10 * scale)))
+        handle_margin = int(round(-4 * scale))
+        spin_pad = max(1, int(round(2 * scale)))
+        combo_pad_v = max(1, int(round(2 * scale)))
+        combo_pad_h = max(2, int(round(4 * scale)))
+        combo_min_h = max(14, int(round(18 * scale)))
+        drop_w = max(12, int(round(16 * scale)))
+        check_spacing = max(3, int(round(6 * scale)))
+        check_size = max(10, int(round(13 * scale)))
         self.setStyleSheet("""
             QDialog {
                 background-color: #1a1a1a;
                 border: 1px solid #2a2a2a;
-                border-radius: 4px;
+                border-radius: %dpx;
             }
             QLabel {
                 color: #808080;
-                font-size: 11px;
+                font-size: %dpx;
             }
             QPushButton {
                 background-color: #242424;
                 color: #808080;
                 border: 1px solid #333;
-                border-radius: 3px;
-                font-size: 11px;
-                padding: 4px 6px;
+                border-radius: %dpx;
+                font-size: %dpx;
+                padding: %dpx %dpx;
             }
             QPushButton:hover {
                 background-color: #2e2e2e;
@@ -4588,14 +4641,14 @@ class PRCurveToolsUI(QtWidgets.QDialog):
             QPushButton:pressed { background-color: #111; }
             QPushButton:disabled { background-color: #1a1a1a; color: #333; border-color: #222; }
             QSlider::groove:horizontal {
-                height: 3px;
+                height: %dpx;
                 background: #111;
                 border-radius: 1px;
             }
             QSlider::handle:horizontal {
                 background: #555;
-                width: 10px;
-                margin: -4px 0;
+                width: %dpx;
+                margin: %dpx 0;
                 border-radius: 5px;
             }
             QSlider::handle:horizontal:hover { background: #888; }
@@ -4605,35 +4658,40 @@ class PRCurveToolsUI(QtWidgets.QDialog):
                 color: #909090;
                 border: 1px solid #2e2e2e;
                 border-radius: 2px;
-                padding: 2px;
-                font-size: 11px;
+                padding: %dpx;
+                font-size: %dpx;
             }
             QComboBox {
                 background-color: #1e1e1e;
                 color: #909090;
                 border: 1px solid #2e2e2e;
                 border-radius: 2px;
-                padding: 2px 4px;
-                font-size: 11px;
-                min-height: 18px;
+                padding: %dpx %dpx;
+                font-size: %dpx;
+                min-height: %dpx;
             }
-            QComboBox::drop-down { border: none; width: 16px; }
+            QComboBox::drop-down { border: none; width: %dpx; }
             QComboBox QAbstractItemView {
                 background-color: #1e1e1e;
                 color: #b0b0b0;
                 selection-background-color: #333;
                 border: 1px solid #2e2e2e;
             }
-            QCheckBox { color: #707070; font-size: 11px; spacing: 6px; }
+            QCheckBox { color: #707070; font-size: %dpx; spacing: %dpx; }
             QCheckBox::indicator {
-                width: 13px; height: 13px;
+                width: %dpx; height: %dpx;
                 border-radius: 2px;
                 border: 1px solid #333;
                 background: #1e1e1e;
             }
             QCheckBox::indicator:checked { background: #334; border-color: #4a6a9f; }
             QCheckBox::indicator:hover { border-color: #555; }
-        """)
+        """ % (
+            border_radius, font_px, border_radius, font_px, button_pad_v, button_pad_h,
+            groove_h, handle_w, handle_margin, spin_pad, font_px,
+            combo_pad_v, combo_pad_h, font_px, combo_min_h, drop_w,
+            font_px, check_spacing, check_size, check_size
+        ))
 
     # ------------------------------------------------------------------
     # SIGNALS
@@ -4699,9 +4757,105 @@ class PRCurveToolsUI(QtWidgets.QDialog):
 
         self.snap_chk.toggled.connect(self._on_snap_toggled)
         self.on_top_chk.toggled.connect(self._on_always_on_top_toggled)
+        self.ui_scale_btn.customContextMenuRequested.connect(self._show_ui_scale_menu)
+        self.ui_scale_btn.clicked.connect(self._show_ui_scale_menu_from_button)
         self._sync_sweep_ui_from_settings()
         self._sync_mirror_controls_from_state()
         self._update_bake_button()
+
+    def _cache_ui_scale_bases(self):
+        self._scaled_widget_specs = []
+        self._scaled_layout_specs = []
+        for widget in self.findChildren(QtWidgets.QWidget):
+            if widget is self or isinstance(widget, PRColorBtn):
+                continue
+            min_w = int(widget.minimumWidth())
+            max_w = int(widget.maximumWidth())
+            min_h = int(widget.minimumHeight())
+            max_h = int(widget.maximumHeight())
+            fixed_w = min_w if (0 < min_w < 16777215 and min_w == max_w) else None
+            fixed_h = min_h if (0 < min_h < 16777215 and min_h == max_h) else None
+            if fixed_w is not None or fixed_h is not None:
+                self._scaled_widget_specs.append((widget, fixed_w, fixed_h))
+        for lay in self.findChildren(QtWidgets.QLayout):
+            try:
+                margins = lay.contentsMargins()
+                self._scaled_layout_specs.append(
+                    (lay, int(lay.spacing()), (margins.left(), margins.top(), margins.right(), margins.bottom()))
+                )
+            except Exception:
+                continue
+
+    def _show_ui_scale_menu_from_button(self):
+        if not hasattr(self, "ui_scale_btn") or not self.ui_scale_btn:
+            return
+        pos = self.ui_scale_btn.mapToGlobal(QtCore.QPoint(0, self.ui_scale_btn.height()))
+        self._show_ui_scale_menu(pos)
+
+    def _show_ui_scale_menu(self, pos):
+        if not hasattr(self, "ui_scale_btn") or not self.ui_scale_btn:
+            return
+        global_pos = pos if isinstance(pos, QtCore.QPoint) else self.ui_scale_btn.mapToGlobal(QtCore.QPoint(0, 0))
+        menu = QtWidgets.QMenu(self)
+        for pct in UI_SCALE_PRESETS:
+            action = menu.addAction("{}%".format(int(pct)))
+            action.setCheckable(True)
+            action.setChecked(int(self._ui_scale_percent) == int(pct))
+            action.triggered.connect(lambda checked=False, value=int(pct): self._apply_ui_scale(value))
+        if hasattr(menu, "exec"):
+            menu.exec(global_pos)
+        else:
+            menu.exec_(global_pos)
+
+    def _apply_ui_scale(self, percent, warn=True):
+        if self._ui_scale_guard:
+            return
+        try:
+            percent_val = int(round(float(percent)))
+        except Exception:
+            if warn:
+                cmds.warning("[PR] UI scale invalide: {}".format(percent))
+            return
+        if percent_val < 50 or percent_val > 140:
+            if warn:
+                cmds.warning("[PR] UI scale hors limites (50-140): {}".format(percent_val))
+            return
+        self._ui_scale_guard = True
+        try:
+            self._ui_scale_percent = percent_val
+            scale = float(percent_val) / 100.0
+            self.setMinimumWidth(max(180, int(round(self._base_window_min_width * scale))))
+            self.setMinimumHeight(max(0, int(round(self._base_window_min_height * scale))))
+
+            for widget, base_w, base_h in self._scaled_widget_specs:
+                if not widget:
+                    continue
+                if base_w is not None:
+                    target_w = max(14, int(round(base_w * scale)))
+                    widget.setMinimumWidth(target_w)
+                    widget.setMaximumWidth(target_w)
+                if base_h is not None:
+                    target_h = max(14, int(round(base_h * scale)))
+                    widget.setMinimumHeight(target_h)
+                    widget.setMaximumHeight(target_h)
+            for btn in self.findChildren(PRColorBtn):
+                btn.apply_scale(scale)
+            for lay, spacing, margins in self._scaled_layout_specs:
+                if not lay:
+                    continue
+                if spacing >= 0:
+                    lay.setSpacing(max(0, int(round(spacing * scale))))
+                lay.setContentsMargins(
+                    max(0, int(round(margins[0] * scale))),
+                    max(0, int(round(margins[1] * scale))),
+                    max(0, int(round(margins[2] * scale))),
+                    max(0, int(round(margins[3] * scale))),
+                )
+            self.ui_scale_btn.setText("UI {}%".format(percent_val))
+            self._apply_global_style()
+            self.adjustSize()
+        finally:
+            self._ui_scale_guard = False
 
     def _do_slot_tool(self):
         try:

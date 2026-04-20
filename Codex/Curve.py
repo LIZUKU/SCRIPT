@@ -4435,10 +4435,13 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         self.fill_btn.customContextMenuRequested.connect(self._show_ring_fill_menu)
         self.sweep_btn = PRColorBtn("Sweep Mesh", bg="#0f2a2a", fg=self.C_MESH)
         self.bake_btn = PRColorBtn("Bake", bg="#0f3010", fg="#50ff50", w=56)
+        self.cancel_sweep_btn = PRColorBtn("Cancel", bg="#2a2a2a", fg="#909090", w=56)
         self.bake_btn.setEnabled(False)
+        self.cancel_sweep_btn.setEnabled(False)
         row.addWidget(self.fill_btn, 1)
         row.addWidget(self.sweep_btn, 1)
         row.addWidget(self.bake_btn, 1)
+        row.addWidget(self.cancel_sweep_btn, 1)
         layout.addLayout(row)
         self.sweep_settings_widget = QtWidgets.QWidget()
         self.sweep_settings_layout = QtWidgets.QVBoxLayout(self.sweep_settings_widget)
@@ -4956,6 +4959,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         self.fill_btn.clicked.connect(lambda: ring_fill(delete_curves=False))
         self.sweep_btn.clicked.connect(self._do_sweep)
         self.bake_btn.clicked.connect(self._do_bake)
+        self.cancel_sweep_btn.clicked.connect(self._do_sweep_cancel)
 
         self.snap_chk.toggled.connect(self._on_snap_toggled)
         self.on_top_chk.toggled.connect(self._on_always_on_top_toggled)
@@ -5602,6 +5606,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
     def _update_bake_button(self):
         is_active = is_sweep_preview_active()
         self.bake_btn.setEnabled(is_active)
+        self.cancel_sweep_btn.setEnabled(is_active)
         if hasattr(self, "sweep_settings_widget"):
             was_visible = self.sweep_settings_widget.isVisible()
             self.sweep_settings_widget.setVisible(is_active)
@@ -5706,6 +5711,10 @@ class PRCurveToolsUI(QtWidgets.QDialog):
 
     def _do_bake(self):
         sweep_bake()
+        self._update_bake_button()
+
+    def _do_sweep_cancel(self):
+        sweep_cancel()
         self._update_bake_button()
 
     def closeEvent(self, event):

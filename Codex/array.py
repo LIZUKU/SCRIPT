@@ -2000,17 +2000,7 @@ def build_curve_distribution(
         )
         warned_locked_channels = False
         is_closed = _is_closed_curve(curve)
-        first_pos = None
-        seam_overlap_distance_sq = 1e-8
-        if is_closed and count > 1:
-            approx_step = estimate_mesh_spacing_multi(
-                valid_meshes,
-                axis_mode=fit_axis_mode,
-                extra_padding=padding,
-                base_scale=base_scale,
-                random_scale=rand_scale
-            )
-            seam_overlap_distance_sq = max(1e-8, (approx_step * 0.2) ** 2)
+        first_u = u_samples[0] if u_samples else None
 
         for i, u in enumerate(u_samples):
 
@@ -2020,13 +2010,10 @@ def build_curve_distribution(
             except:
                 continue
 
-            if is_closed:
-                if first_pos is None:
-                    first_pos = tuple(pos)
-                elif i == (len(u_samples) - 1):
-                    seam_delta = vec_sub(pos, first_pos)
-                    if vec_dot(seam_delta, seam_delta) <= seam_overlap_distance_sq:
-                        continue
+            if is_closed and first_u is not None and i > 0:
+                u_delta = abs(float(u) - float(first_u))
+                if (u_delta <= 1e-8) or (abs(1.0 - u_delta) <= 1e-8):
+                    continue
 
             if use_instance:
                 sample_mesh = _pick_mesh_for_sample(

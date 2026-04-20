@@ -1437,6 +1437,13 @@ def compute_curve_u_samples(curve, count, start_u, end_u, even_by_length=True):
                 result.append(u)
             if len(result) == count:
                 return result
+            cmds.warning(
+                "Even-by-length sampling fallback: '{}' has degenerate segment, using parametric spacing.".format(curve)
+            )
+        else:
+            cmds.warning(
+                "Even-by-length sampling unavailable for '{}', using parametric spacing.".format(curve)
+            )
 
     return [
         start_u + ((end_u - start_u) * (float(i) / float(count - 1)))
@@ -1670,6 +1677,7 @@ def _create_centered_proxy_mesh(mesh, proxy_name="__curveScatter_proxy__"):
         if vec_len(center) > 0.0001:
             cmds.move(-center[0], -center[1], -center[2], proxy + ".vtx[*]", r=True, os=True)
             cmds.delete(proxy, constructionHistory=True)
+        cmds.xform(proxy, ws=True, t=[0, 0, 0])
         cmds.xform(proxy, os=True, pivots=[0, 0, 0])
         return proxy
     except Exception:
@@ -1704,6 +1712,7 @@ def build_curve_distribution(
     meshes=None,
     mesh_pick_mode="cycle",
     mesh_pick_step=2,
+    sample_index_start=0,
 ):
     valid_meshes = _unique_in_order([m for m in (meshes or [mesh]) if _safe_exists(m)])
     if not valid_meshes or not _safe_exists(curve):
@@ -1739,51 +1748,51 @@ def build_curve_distribution(
     results = []
     local_center_offsets = {m: get_mesh_center_offset_local(m) for m in valid_meshes}
 
-    # For multiple source meshes, build one centered proxy per input mesh.
-    # This removes large placement offsets caused by heterogeneous pivot setups.
     proxy_by_source = {}
     proxy_meshes_to_delete = []
     use_proxy_mode = len(valid_meshes) > 1
 
-    if use_proxy_mode:
-        for idx, src_mesh in enumerate(valid_meshes):
-            proxy = _create_centered_proxy_mesh(src_mesh, proxy_name="__curveScatter_proxy_{}__".format(idx + 1))
-            if proxy and _safe_exists(proxy):
-                proxy_by_source[src_mesh] = proxy
-                proxy_meshes_to_delete.append(proxy)
-            else:
-                proxy_by_source[src_mesh] = src_mesh
-    else:
-        proxy = _create_centered_proxy_mesh(primary_mesh)
-        if proxy and _safe_exists(proxy):
-            proxy_by_source[primary_mesh] = proxy
-            proxy_meshes_to_delete.append(proxy)
-            use_proxy_mode = True
-
-    trimmed_start_u = start_u
-    trimmed_end_u = end_u
-
-    if trim_ends and count > 1:
-        curve_len = max(0.0001, get_curve_length(curve))
-        step_est = estimate_mesh_spacing(
-            primary_mesh,
-            axis_mode=fit_axis_mode,
-            extra_padding=padding,
-            base_scale=base_scale,
-            random_scale=rand_scale
-        )
-        half_ratio = (step_est * 0.5) / curve_len
-        max_half_ratio = max(0.0, (end_u - start_u) * 0.49)
-        half_ratio = min(half_ratio, max_half_ratio)
-
-        trimmed_start_u = clamp(start_u + half_ratio, 0.0, 1.0)
-        trimmed_end_u = clamp(end_u - half_ratio, 0.0, 1.0)
-
-        if trimmed_end_u < trimmed_start_u:
-            trimmed_start_u = start_u
-            trimmed_end_u = end_u
-
     try:
+        # For multiple source meshes, build one centered proxy per input mesh.
+        # This removes large placement offsets caused by heterogeneous pivot setups.
+        if use_proxy_mode:
+            for idx, src_mesh in enumerate(valid_meshes):
+                proxy = _create_centered_proxy_mesh(src_mesh, proxy_name="__curveScatter_proxy_{}__".format(idx + 1))
+                if proxy and _safe_exists(proxy):
+                    proxy_meshes_to_delete.append(proxy)
+                    proxy_by_source[src_mesh] = proxy
+                else:
+                    proxy_by_source[src_mesh] = src_mesh
+        else:
+            proxy = _create_centered_proxy_mesh(primary_mesh)
+            if proxy and _safe_exists(proxy):
+                proxy_meshes_to_delete.append(proxy)
+                proxy_by_source[primary_mesh] = proxy
+                use_proxy_mode = True
+
+        trimmed_start_u = start_u
+        trimmed_end_u = end_u
+
+        if trim_ends and count > 1:
+            curve_len = max(0.0001, get_curve_length(curve))
+            step_est = estimate_mesh_spacing(
+                primary_mesh,
+                axis_mode=fit_axis_mode,
+                extra_padding=padding,
+                base_scale=base_scale,
+                random_scale=rand_scale
+            )
+            half_ratio = (step_est * 0.5) / curve_len
+            max_half_ratio = max(0.0, (end_u - start_u) * 0.49)
+            half_ratio = min(half_ratio, max_half_ratio)
+
+            trimmed_start_u = clamp(start_u + half_ratio, 0.0, 1.0)
+            trimmed_end_u = clamp(end_u - half_ratio, 0.0, 1.0)
+
+            if trimmed_end_u < trimmed_start_u:
+                trimmed_start_u = start_u
+                trimmed_end_u = end_u
+
         u_samples = compute_curve_u_samples(
             curve=curve,
             count=count,
@@ -1803,7 +1812,7 @@ def build_curve_distribution(
 
             if use_instance:
                 sample_mesh = _pick_mesh_for_sample(
-                    valid_meshes, mesh_pick_mode, mesh_pick_step, random_seed, i
+                    valid_meshes, mesh_pick_mode, mesh_pick_step, random_seed, int(sample_index_start) + i
                 ) if len(valid_meshes) > 1 else primary_mesh
                 if not _safe_exists(sample_mesh):
                     sample_mesh = primary_mesh
@@ -1813,7 +1822,7 @@ def build_curve_distribution(
                 new_obj = cmds.instance(source_for_spawn, name="{}{}{:03d}".format(CURVE_PREVIEW_PREFIX, name_prefix, i + 1))[0]
             else:
                 sample_mesh = _pick_mesh_for_sample(
-                    valid_meshes, mesh_pick_mode, mesh_pick_step, random_seed, i
+                    valid_meshes, mesh_pick_mode, mesh_pick_step, random_seed, int(sample_index_start) + i
                 ) if len(valid_meshes) > 1 else primary_mesh
                 if not _safe_exists(sample_mesh):
                     sample_mesh = primary_mesh
@@ -2958,6 +2967,16 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         current = int(self.count_spin.value())
         if current > max_value:
             self.count_spin.setValue(max_value)
+        self._sync_count_slider_with_spin()
+
+    def _sync_count_slider_with_spin(self):
+        current_min = float(self.count_spin.minimum())
+        current_max = float(self.count_spin.maximum())
+        value = float(self.count_spin.value())
+        ratio = (value - current_min) / (current_max - current_min) if (current_max - current_min) > 0 else 0.0
+        self.count_slider.blockSignals(True)
+        self.count_slider.setValue(int(clamp(ratio, 0.0, 1.0) * 1000.0))
+        self.count_slider.blockSignals(False)
 
     def _sync_count_preset_from_range(self):
         max_v = int(self.count_spin.maximum())
@@ -3370,6 +3389,16 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
                     start_u=start_u,
                     end_u=end_u
                 )
+            if lock_no_overlap and not auto_fit:
+                per_curve_counts = [
+                    min(per_curve_counts[idx], safe_limits[idx] if idx < len(safe_limits) else per_curve_counts[idx])
+                    for idx in range(len(per_curve_counts))
+                ]
+                count = sum(per_curve_counts)
+                if int(self.count_spin.value()) != count:
+                    self.count_spin.blockSignals(True)
+                    self.count_spin.setValue(count)
+                    self.count_spin.blockSignals(False)
 
             if count <= 0:
                 curve_cleanup_preview()
@@ -3403,6 +3432,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
 
             all_results = []
             usable_len = 0.0
+            sample_index_offset = 0
             for idx, curve in enumerate(valid_curves):
                 curve_count = per_curve_counts[idx] if idx < len(per_curve_counts) else count
                 if auto_fit:
@@ -3446,9 +3476,11 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
                     even_by_length=even_by_length,
                     meshes=meshes,
                     mesh_pick_mode=mesh_order_mode,
-                    mesh_pick_step=mesh_every_n
+                    mesh_pick_step=mesh_every_n,
+                    sample_index_start=sample_index_offset
                 )
                 all_results.extend(result)
+                sample_index_offset += max(0, int(curve_count))
                 usable_len += get_curve_length(curve) * max(0.0, (end_u - start_u))
 
             step_est = estimate_mesh_spacing_multi(
@@ -3500,15 +3532,17 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         meshes = [m for m in _CURVE_STATE.get("meshes", []) if _safe_exists(m)]
         if meshes:
             cmds.select(meshes, r=True)
-        elif selected_meshes and not _CURVE_STATE.get("started"):
-            cmds.select(selected_meshes, r=True)
+            self.status_label.setText("No new mesh selection — reselected current input")
 
     def _on_select_curve(self):
         selected_curves, temp_curves = self._capture_curves_from_selection()
         if selected_curves:
             _CURVE_STATE["curves"] = selected_curves
             current_temp = [c for c in _CURVE_STATE.get("temp_curves", []) if _safe_exists(c)]
-            _CURVE_STATE["temp_curves"] = _unique_in_order(current_temp + temp_curves)
+            for old_curve in current_temp:
+                if old_curve not in selected_curves:
+                    _safe_delete(old_curve)
+            _CURVE_STATE["temp_curves"] = _unique_in_order([c for c in temp_curves if _safe_exists(c)])
             self._set_curves_hidden_in_viewport(self._curves_hidden_in_viewport)
             self._update_info_labels()
             if not _CURVE_STATE.get("started"):
@@ -3521,8 +3555,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         curves = [c for c in _CURVE_STATE.get("curves", []) if _safe_exists(c)]
         if curves:
             cmds.select(curves, r=True)
-        elif selected_curves and not _CURVE_STATE.get("started"):
-            cmds.select(selected_curves, r=True)
+            self.status_label.setText("No new curve selection — reselected current input")
 
     def _on_toggle_curve_visibility(self):
         if not _CURVE_STATE.get("started"):
@@ -3712,6 +3745,14 @@ class ProToolsCombinedUI(QtWidgets.QDialog):
         scaled_font = QtGui.QFont(base_font)
         scaled_font.setPointSizeF(max(7.0, base_point_size * scale))
         self.setFont(scaled_font)
+        apply_shared_style(self)
+        compact_h = int(round(22 * scale))
+        self.setStyleSheet(
+            self.styleSheet() +
+            "\nQPushButton { min-height: %dpx; }\nQAbstractSpinBox { min-height: %dpx; }\nQComboBox { min-height: %dpx; }"
+            % (compact_h, compact_h, compact_h)
+        )
+        self.adjustSize()
 
     def request_resize(self):
         QtCore.QTimer.singleShot(0, lambda: self._apply_tab_size(self.tabs.currentIndex(), force=True))

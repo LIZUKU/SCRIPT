@@ -1435,6 +1435,46 @@ def compute_curve_u_samples(curve, count, start_u, end_u, even_by_length=True):
     ]
 
 
+def compute_curve_count_allocation(curves, total_count, start_u, end_u):
+    """
+    Split a total instance count across multiple curves proportionally to usable length.
+    Always returns one integer per input curve, summing exactly to total_count.
+    """
+    valid_curves = [c for c in (curves or []) if _safe_exists(c)]
+    curve_count = len(valid_curves)
+    total_count = max(0, int(total_count))
+    if curve_count == 0:
+        return []
+    if total_count <= 0:
+        return [0 for _ in valid_curves]
+
+    usable_ratio = max(0.0, min(1.0, float(end_u)) - max(0.0, min(1.0, float(start_u))))
+    lengths = [max(0.0, get_curve_length(c) * usable_ratio) for c in valid_curves]
+    total_len = sum(lengths)
+
+    if total_len <= 1e-8:
+        base = total_count // curve_count
+        remainder = total_count - (base * curve_count)
+        alloc = [base for _ in valid_curves]
+        for i in range(remainder):
+            alloc[i] += 1
+        return alloc
+
+    raw = [(l / total_len) * total_count for l in lengths]
+    alloc = [int(math.floor(v)) for v in raw]
+    remainder = total_count - sum(alloc)
+
+    if remainder > 0:
+        frac_rank = sorted(
+            [(raw[i] - alloc[i], i) for i in range(curve_count)],
+            key=lambda item: item[0],
+            reverse=True
+        )
+        for _, idx in frac_rank[:remainder]:
+            alloc[idx] += 1
+    return alloc
+
+
 def get_mesh_world_bbox_size(obj):
     if not _safe_exists(obj):
         return [0.0, 0.0, 0.0]
@@ -3130,6 +3170,11 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         curves, temp_curves = self._capture_curves_from_selection()
 
         if not meshes:
+            meshes = [m for m in _CURVE_STATE.get("meshes", []) if _safe_exists(m)]
+        if not curves:
+            curves = [c for c in _CURVE_STATE.get("curves", []) if _safe_exists(c)]
+
+        if not meshes:
             cmds.warning("Sélectionne au moins un mesh transform.")
             self.status_label.setText("Need at least one mesh")
             return
@@ -3252,6 +3297,15 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
                     self.count_spin.setValue(count)
                     self.count_spin.blockSignals(False)
 
+            per_curve_counts = [count for _ in valid_curves]
+            if len(valid_curves) > 1 and not auto_fit:
+                per_curve_counts = compute_curve_count_allocation(
+                    curves=valid_curves,
+                    total_count=count,
+                    start_u=start_u,
+                    end_u=end_u
+                )
+
             if count <= 0:
                 curve_cleanup_preview()
                 self.status_label.setText("0 preview | increase Count")
@@ -3285,7 +3339,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
             all_results = []
             usable_len = 0.0
             for idx, curve in enumerate(valid_curves):
-                curve_count = count
+                curve_count = per_curve_counts[idx] if idx < len(per_curve_counts) else count
                 if auto_fit:
                     curve_count = compute_auto_fit_count_multi(
                         meshes=meshes,
@@ -3367,10 +3421,13 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
 
     def _on_select_mesh(self):
         selected_meshes = self._capture_meshes_from_selection()
-        if selected_meshes and _CURVE_STATE.get("started"):
+        if selected_meshes:
             _CURVE_STATE["meshes"] = selected_meshes
             _CURVE_STATE["mesh"] = selected_meshes[0]
             self._update_info_labels()
+            if not _CURVE_STATE.get("started"):
+                self.status_label.setText("Captured mesh input ({} mesh(es))".format(len(selected_meshes)))
+                return
             self._setup_live_callbacks()
             self._on_rebuild()
             self.status_label.setText("Updated mesh input ({} mesh(es))".format(len(selected_meshes)))
@@ -3383,12 +3440,15 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
 
     def _on_select_curve(self):
         selected_curves, temp_curves = self._capture_curves_from_selection()
-        if selected_curves and _CURVE_STATE.get("started"):
+        if selected_curves:
             _CURVE_STATE["curves"] = selected_curves
             current_temp = [c for c in _CURVE_STATE.get("temp_curves", []) if _safe_exists(c)]
             _CURVE_STATE["temp_curves"] = _unique_in_order(current_temp + temp_curves)
             self._set_curves_hidden_in_viewport(self._curves_hidden_in_viewport)
             self._update_info_labels()
+            if not _CURVE_STATE.get("started"):
+                self.status_label.setText("Captured curve input ({} curve(s))".format(len(selected_curves)))
+                return
             self._setup_live_callbacks()
             self._on_rebuild()
             self.status_label.setText("Updated curve input ({} curve(s))".format(len(selected_curves)))

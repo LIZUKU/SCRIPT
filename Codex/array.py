@@ -1646,6 +1646,36 @@ def get_mesh_center_offset_local(mesh):
         return (0.0, 0.0, 0.0)
 
 
+def _create_centered_proxy_mesh(mesh, proxy_name="__curveScatter_proxy__"):
+    """
+    Duplicate a mesh transform and recenter its geometry so local bbox center
+    sits on the transform pivot. This makes curve placement consistent even
+    when source meshes have very different pivot placements/world offsets.
+    """
+    if not _safe_exists(mesh):
+        return None
+
+    try:
+        proxy = cmds.duplicate(mesh, rr=True, name=proxy_name)[0]
+        bbox = cmds.xform(proxy, q=True, bb=True, os=True)
+        if not bbox or len(bbox) < 6:
+            return proxy
+
+        center = (
+            (bbox[0] + bbox[3]) * 0.5,
+            (bbox[1] + bbox[4]) * 0.5,
+            (bbox[2] + bbox[5]) * 0.5
+        )
+
+        if vec_len(center) > 0.0001:
+            cmds.move(-center[0], -center[1], -center[2], proxy + ".vtx[*]", r=True, os=True)
+            cmds.delete(proxy, constructionHistory=True)
+        cmds.xform(proxy, os=True, pivots=[0, 0, 0])
+        return proxy
+    except Exception:
+        return None
+
+
 def build_curve_distribution(
     mesh,
     curve,
@@ -1708,38 +1738,27 @@ def build_curve_distribution(
         return []
     results = []
     local_center_offsets = {m: get_mesh_center_offset_local(m) for m in valid_meshes}
-    # With multiple source meshes, different pivot placements can create apparent
-    # spacing offsets along the curve. Normalize by bbox center unless user
-    # already explicitly enabled center_on_bbox.
-    auto_center_multi_meshes = len(valid_meshes) > 1
 
-    proxy_mesh = None
-    source_mesh = primary_mesh
-    use_proxy = False
-    use_proxy_mode = len(valid_meshes) == 1
+    # For multiple source meshes, build one centered proxy per input mesh.
+    # This removes large placement offsets caused by heterogeneous pivot setups.
+    proxy_by_source = {}
+    proxy_meshes_to_delete = []
+    use_proxy_mode = len(valid_meshes) > 1
 
     if use_proxy_mode:
-        try:
-            bbox = cmds.exactWorldBoundingBox(primary_mesh)
-            bbox_center = [
-                (bbox[0] + bbox[3]) * 0.5,
-                (bbox[1] + bbox[4]) * 0.5,
-                (bbox[2] + bbox[5]) * 0.5,
-            ]
-            offset = [-bbox_center[0], -bbox_center[1], -bbox_center[2]]
-
-            if vec_len(offset) > 0.001:
-                proxy_mesh = cmds.duplicate(primary_mesh, rr=True, name="__curveScatter_proxy__")[0]
-                cmds.move(offset[0], offset[1], offset[2], proxy_mesh + ".vtx[*]", r=True, ws=True)
-                cmds.delete(proxy_mesh, constructionHistory=True)
-                cmds.makeIdentity(proxy_mesh, apply=True, t=True, r=True, s=True, n=False, pn=True)
-                cmds.xform(proxy_mesh, ws=True, pivots=[0, 0, 0])
-                source_mesh = proxy_mesh
-                use_proxy = True
-        except Exception as e:
-            cmds.warning("Proxy mesh creation failed: {}".format(str(e)))
-            source_mesh = primary_mesh
-            use_proxy = False
+        for idx, src_mesh in enumerate(valid_meshes):
+            proxy = _create_centered_proxy_mesh(src_mesh, proxy_name="__curveScatter_proxy_{}__".format(idx + 1))
+            if proxy and _safe_exists(proxy):
+                proxy_by_source[src_mesh] = proxy
+                proxy_meshes_to_delete.append(proxy)
+            else:
+                proxy_by_source[src_mesh] = src_mesh
+    else:
+        proxy = _create_centered_proxy_mesh(primary_mesh)
+        if proxy and _safe_exists(proxy):
+            proxy_by_source[primary_mesh] = proxy
+            proxy_meshes_to_delete.append(proxy)
+            use_proxy_mode = True
 
     trimmed_start_u = start_u
     trimmed_end_u = end_u
@@ -1783,19 +1802,25 @@ def build_curve_distribution(
                 continue
 
             if use_instance:
-                sample_mesh = source_mesh if use_proxy_mode else _pick_mesh_for_sample(
+                sample_mesh = _pick_mesh_for_sample(
                     valid_meshes, mesh_pick_mode, mesh_pick_step, random_seed, i
-                )
+                ) if len(valid_meshes) > 1 else primary_mesh
                 if not _safe_exists(sample_mesh):
                     sample_mesh = primary_mesh
-                new_obj = cmds.instance(sample_mesh, name="{}{}{:03d}".format(CURVE_PREVIEW_PREFIX, name_prefix, i + 1))[0]
+                source_for_spawn = proxy_by_source.get(sample_mesh, sample_mesh) if use_proxy_mode else sample_mesh
+                if not _safe_exists(source_for_spawn):
+                    source_for_spawn = sample_mesh
+                new_obj = cmds.instance(source_for_spawn, name="{}{}{:03d}".format(CURVE_PREVIEW_PREFIX, name_prefix, i + 1))[0]
             else:
-                sample_mesh = source_mesh if use_proxy_mode else _pick_mesh_for_sample(
+                sample_mesh = _pick_mesh_for_sample(
                     valid_meshes, mesh_pick_mode, mesh_pick_step, random_seed, i
-                )
+                ) if len(valid_meshes) > 1 else primary_mesh
                 if not _safe_exists(sample_mesh):
                     sample_mesh = primary_mesh
-                new_obj = cmds.duplicate(sample_mesh, rr=True, name="{}{}{:03d}".format(CURVE_PREVIEW_PREFIX, name_prefix, i + 1))[0]
+                source_for_spawn = proxy_by_source.get(sample_mesh, sample_mesh) if use_proxy_mode else sample_mesh
+                if not _safe_exists(source_for_spawn):
+                    source_for_spawn = sample_mesh
+                new_obj = cmds.duplicate(source_for_spawn, rr=True, name="{}{}{:03d}".format(CURVE_PREVIEW_PREFIX, name_prefix, i + 1))[0]
 
             blocked_attrs = unlock_transform_channels(new_obj)
             if blocked_attrs and not warned_locked_channels:
@@ -1844,7 +1869,7 @@ def build_curve_distribution(
                     r=True,
                     os=True
                 )
-                if (center_on_bbox or auto_center_multi_meshes) and not use_proxy:
+                if center_on_bbox and not use_proxy_mode:
                     local_center_offset = local_center_offsets.get(sample_mesh, (0.0, 0.0, 0.0))
                     cmds.move(
                         -local_center_offset[0],
@@ -1866,7 +1891,7 @@ def build_curve_distribution(
                 )
 
                 cmds.xform(new_obj, ws=True, ro=final_rot)
-                if (center_on_bbox or auto_center_multi_meshes) and not use_proxy:
+                if center_on_bbox and not use_proxy_mode:
                     local_center_offset = local_center_offsets.get(sample_mesh, (0.0, 0.0, 0.0))
                     cmds.move(
                         -local_center_offset[0],
@@ -1882,8 +1907,9 @@ def build_curve_distribution(
 
             results.append(new_obj)
     finally:
-        if use_proxy and proxy_mesh and _safe_exists(proxy_mesh):
-            _safe_delete(proxy_mesh)
+        for proxy_mesh in proxy_meshes_to_delete:
+            if proxy_mesh and _safe_exists(proxy_mesh):
+                _safe_delete(proxy_mesh)
 
     if clear_existing:
         _CURVE_STATE["preview_objects"] = results
@@ -2927,7 +2953,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
             self._register_default(widget, default_value)
 
     def _set_count_max(self, max_value):
-        max_value = int(clamp(max_value, 15, 5000))
+        max_value = int(clamp(max_value, 50, 5000))
         self.count_spin.setMaximum(max_value)
         current = int(self.count_spin.value())
         if current > max_value:
@@ -2935,26 +2961,26 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
 
     def _sync_count_preset_from_range(self):
         max_v = int(self.count_spin.maximum())
-        if max_v <= 15:
-            self.count_preset_combo.setCurrentText("0-15")
-        elif max_v <= 30:
-            self.count_preset_combo.setCurrentText("0-30")
+        if max_v <= 50:
+            self.count_preset_combo.setCurrentText("0-50")
         elif max_v <= 100:
             self.count_preset_combo.setCurrentText("0-100")
+        elif max_v <= 250:
+            self.count_preset_combo.setCurrentText("0-250")
         elif max_v <= 500:
             self.count_preset_combo.setCurrentText("0-500")
         else:
             self.count_preset_combo.setCurrentText("0-1000+")
 
     def _change_count_range(self, delta):
-        step = 15 if self.count_spin.maximum() < 100 else 50
+        step = 50 if self.count_spin.maximum() < 300 else 100
         self._set_count_max(self.count_spin.maximum() + (delta * step))
         self._sync_count_preset_from_range()
         self._on_rebuild()
 
     def _on_count_preset_changed(self, text):
-        mapping = {"0-15": 15, "0-30": 30, "0-100": 100, "0-500": 500, "0-1000+": 1000}
-        self._set_count_max(mapping.get(text, 1000))
+        mapping = {"0-50": 50, "0-100": 100, "0-250": 250, "0-500": 500, "0-1000+": 1000}
+        self._set_count_max(mapping.get(text, 100))
         self._on_rebuild()
 
     def _add_count_range_controls(self, parent_layout):
@@ -2967,8 +2993,8 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         row.addWidget(lbl)
 
         self.count_preset_combo = QtWidgets.QComboBox()
-        self.count_preset_combo.addItems(["0-15", "0-30", "0-100", "0-500", "0-1000+"])
-        self.count_preset_combo.setCurrentIndex(0)
+        self.count_preset_combo.addItems(["0-50", "0-100", "0-250", "0-500", "0-1000+"])
+        self.count_preset_combo.setCurrentIndex(1)
         self.count_preset_combo.currentTextChanged.connect(self._on_count_preset_changed)
         row.addWidget(self.count_preset_combo)
 

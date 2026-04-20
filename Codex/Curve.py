@@ -90,6 +90,7 @@ _sweep_preview_active = False
 _sweep_preview_curves = []
 _sweep_refresh_in_progress = False
 _sweep_preview_settings = dict(SWEEP_DEFAULT_SETTINGS)
+_sweep_preview_profile = 0
 
 _sweep_original_select_mode = None
 _sweep_original_select_type = {}
@@ -101,6 +102,8 @@ _sweep_original_ep_size = None
 _always_on_top_enabled = True
 _always_on_top_draw_job = None
 SWEEP_MODE_ITEMS = ["Precision", "Start to End", "EP to EP", "Distance"]
+SWEEP_PROFILE_ITEMS = ["Poly", "Rectangle", "Line", "Arc", "Wave", "Custom"]
+SWEEP_PROFILE_ATTR_CANDIDATES = ("sweepProfileType", "profileType", "profileShape", "profilePreset")
 
 
 # ============================================================
@@ -467,8 +470,46 @@ def _find_sweep_creator_from_mesh(mesh_transform):
     return None
 
 
+def _find_first_existing_attr(node, attr_candidates):
+    for attr in attr_candidates:
+        try:
+            if cmds.objExists("{}.{}".format(node, attr)):
+                return attr
+        except Exception:
+            continue
+    return None
+
+
+def _get_sweep_profile_from_creator(sc):
+    attr = _find_first_existing_attr(sc, SWEEP_PROFILE_ATTR_CANDIDATES)
+    if not attr:
+        return None
+    plug = "{}.{}".format(sc, attr)
+    try:
+        value = int(cmds.getAttr(plug))
+    except Exception:
+        return None
+    return max(0, min(len(SWEEP_PROFILE_ITEMS) - 1, value))
+
+
+def _set_sweep_profile_on_creator(sc, profile_idx):
+    attr = _find_first_existing_attr(sc, SWEEP_PROFILE_ATTR_CANDIDATES)
+    if not attr:
+        return False
+    plug = "{}.{}".format(sc, attr)
+    try:
+        if not cmds.getAttr(plug, se=True):
+            return False
+        if cmds.listConnections(plug, s=True, d=False):
+            return False
+        cmds.setAttr(plug, int(profile_idx))
+        return True
+    except Exception:
+        return False
+
+
 def _capture_sweep_settings_from_current_preview():
-    global _sweep_preview_settings
+    global _sweep_preview_settings, _sweep_preview_profile
     _sweep_preview_settings = dict(SWEEP_DEFAULT_SETTINGS)
     for mesh in (_sweep_preview_meshes or []):
         if not _safe_obj_exists(mesh):
@@ -493,6 +534,10 @@ def _capture_sweep_settings_from_current_preview():
                 captured[a] = cmds.getAttr(plug)
             except Exception:
                 pass
+        profile = _get_sweep_profile_from_creator(sc)
+        if profile is not None:
+            _sweep_preview_profile = profile
+
         if captured:
             merged = dict(SWEEP_DEFAULT_SETTINGS)
             merged.update(captured)
@@ -510,6 +555,7 @@ def _apply_sweep_settings_to_meshes(meshes):
         sc = _find_sweep_creator_from_mesh(mesh)
         if not sc:
             continue
+        _set_sweep_profile_on_creator(sc, _sweep_preview_profile)
         for a, val in _sweep_preview_settings.items():
             plug = sc + "." + a
             try:
@@ -551,6 +597,32 @@ def _set_sweep_attr_on_creator(sc, attr, val):
         return True
     except Exception:
         return False
+
+
+def set_sweep_preview_profile(profile_idx):
+    global _sweep_preview_profile
+    try:
+        idx = int(profile_idx)
+    except Exception:
+        idx = 0
+    idx = max(0, min(len(SWEEP_PROFILE_ITEMS) - 1, idx))
+    _sweep_preview_profile = idx
+
+    if not _sweep_preview_active:
+        return
+
+    for mesh in (_sweep_preview_meshes or []):
+        if not _safe_obj_exists(mesh):
+            continue
+        sc = _find_sweep_creator_from_mesh(mesh)
+        if not sc:
+            continue
+        _set_sweep_profile_on_creator(sc, idx)
+
+    try:
+        cmds.refresh(f=True)
+    except Exception:
+        pass
 
 
 def set_sweep_preview_setting(attr, val):
@@ -4141,17 +4213,12 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(5)
-        top_row = QtWidgets.QHBoxLayout()
-        top_row.setSpacing(4)
-        top_row.addStretch()
         self.ui_scale_btn = QtWidgets.QToolButton()
         self.ui_scale_btn.setText("UI 100%")
         self.ui_scale_btn.setToolTip("Click droit: presets de scale UI")
         self.ui_scale_btn.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.ui_scale_btn.setFixedWidth(68)
         self.ui_scale_btn.setFixedHeight(20)
-        top_row.addWidget(self.ui_scale_btn)
-        layout.addLayout(top_row)
 
         layout.addWidget(SectionLabel("  DRAW", self.C_DRAW))
 
@@ -4179,6 +4246,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         self.on_top_chk.setChecked(True)
         row_aot.addWidget(self.on_top_chk)
         row_aot.addStretch()
+        row_aot.addWidget(self.ui_scale_btn, 0, QtCore.Qt.AlignRight)
         layout.addLayout(row_aot)
 
         row = QtWidgets.QHBoxLayout()
@@ -4509,6 +4577,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         return slider, spinbox
 
     def _add_sweep_settings_rows(self, parent_layout):
+        self._sweep_controls["profile"] = self._add_sweep_profile_combo(parent_layout)
         for attr, spec in SWEEP_UI_SPECS.items():
             if attr == "interpolationMode":
                 self._sweep_controls[attr] = self._add_sweep_mode_combo(parent_layout)
@@ -4523,6 +4592,23 @@ class PRCurveToolsUI(QtWidgets.QDialog):
                     attr
                 )
                 self._sweep_controls[attr] = (slider, spinbox)
+
+    def _add_sweep_profile_combo(self, parent_layout):
+        row = QtWidgets.QHBoxLayout()
+        row.setSpacing(5)
+
+        lbl = QtWidgets.QLabel("Profile")
+        lbl.setFixedWidth(62)
+        row.addWidget(lbl)
+
+        combo = QtWidgets.QComboBox()
+        combo.addItems(SWEEP_PROFILE_ITEMS)
+        combo.setCurrentIndex(int(_sweep_preview_profile))
+        combo.currentIndexChanged.connect(lambda idx: set_sweep_preview_profile(int(idx)))
+        row.addWidget(combo)
+        row.addStretch()
+        parent_layout.addLayout(row)
+        return ("profile_combo", combo)
 
     def _add_sweep_mode_combo(self, parent_layout):
         row = QtWidgets.QHBoxLayout()
@@ -5357,7 +5443,13 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         for attr, control in self._sweep_controls.items():
             spec = SWEEP_UI_SPECS.get(attr, {})
             cur_val = _sweep_preview_settings.get(attr, spec.get("default", 0))
-            if isinstance(control, tuple) and control and control[0] == "combo":
+            if isinstance(control, tuple) and control and control[0] == "profile_combo":
+                combo = control[1]
+                idx = int(max(0, min(len(SWEEP_PROFILE_ITEMS) - 1, int(_sweep_preview_profile))))
+                combo.blockSignals(True)
+                combo.setCurrentIndex(idx)
+                combo.blockSignals(False)
+            elif isinstance(control, tuple) and control and control[0] == "combo":
                 combo = control[1]
                 idx = int(max(0, min(len(SWEEP_MODE_ITEMS) - 1, int(round(float(cur_val))))))
                 combo.blockSignals(True)
@@ -5482,6 +5574,7 @@ class PRCurveToolsUI(QtWidgets.QDialog):
 
     def _do_sweep(self):
         sweep_mesh_preview()
+        set_sweep_preview_profile(_sweep_preview_profile)
         for attr, spec in SWEEP_UI_SPECS.items():
             set_sweep_preview_setting(attr, _sweep_preview_settings.get(attr, spec["default"]))
         self._sync_sweep_ui_from_settings()

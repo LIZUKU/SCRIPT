@@ -466,7 +466,7 @@ class XYZSliderWidget(QtWidgets.QWidget):
         for axis in self._axis_order:
             btn = QtWidgets.QPushButton(axis.upper())
             btn.setCheckable(True)
-            btn.setFixedSize(22, 20)
+            btn.setFixedSize(20, 18)
             off_color = axis_colors.get(axis, AXIS_TOGGLE_OFF_COLOR)
             btn.setStyleSheet(
                 "QPushButton { background-color: %s; } QPushButton:checked { background-color: %s; color: #101010; font-weight: bold; }"
@@ -500,7 +500,7 @@ class XYZSliderWidget(QtWidgets.QWidget):
         self.spinbox.setMaximum(max_val if decimals > 0 else int(max_val))
         self.spinbox.setValue(default if decimals > 0 else int(default))
         self.spinbox.setFixedWidth(82)
-        self.spinbox.setFixedHeight(20)
+        self.spinbox.setFixedHeight(18)
         self.spinbox.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
         bottom_row.addWidget(self.spinbox)
         root.addLayout(bottom_row)
@@ -1939,7 +1939,9 @@ def build_curve_distribution(
 
     proxy_by_source = {}
     proxy_meshes_to_delete = []
-    use_proxy_mode = len(valid_meshes) > 1
+    # Keep placement behavior consistent for single and multi mesh inputs.
+    # Prevents large offsets when a source pivot is far from geometry center.
+    use_proxy_mode = True
 
     try:
         # For multiple source meshes, build one centered proxy per input mesh.
@@ -1983,6 +1985,8 @@ def build_curve_distribution(
             even_by_length=even_by_length
         )
         warned_locked_channels = False
+        is_closed = _is_closed_curve(curve)
+        first_pos = None
 
         for i, u in enumerate(u_samples):
 
@@ -1991,6 +1995,14 @@ def build_curve_distribution(
                 tangent, curve_normal = get_curve_tangent_and_normal(curve, u)
             except:
                 continue
+
+            if is_closed:
+                if first_pos is None:
+                    first_pos = tuple(pos)
+                elif i == (len(u_samples) - 1):
+                    seam_delta = vec_sub(pos, first_pos)
+                    if vec_dot(seam_delta, seam_delta) <= 1e-8:
+                        continue
 
             if use_instance:
                 sample_mesh = _pick_mesh_for_sample(
@@ -3222,37 +3234,37 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         label.setFixedWidth(110)
         container.addWidget(label)
 
-        grid = QtWidgets.QGridLayout()
-        grid.setHorizontalSpacing(4)
-        grid.setVerticalSpacing(4)
+        row = QtWidgets.QHBoxLayout()
+        row.setSpacing(3)
 
         buttons = [
-            ("X+45", "x", 45.0, 0, 0),
-            ("X+90", "x", 90.0, 0, 1),
-            ("Y+45", "y", 45.0, 0, 2),
-            ("Y+90", "y", 90.0, 0, 3),
-            ("Z+45", "z", 45.0, 1, 0),
-            ("Z+90", "z", 90.0, 1, 1),
-            ("Reset", None, 0.0, 1, 2),
+            ("X+45", "x", 45.0),
+            ("X+90", "x", 90.0),
+            ("Y+45", "y", 45.0),
+            ("Y+90", "y", 90.0),
+            ("Z+45", "z", 45.0),
+            ("Z+90", "z", 90.0),
+            ("Reset", None, 0.0),
         ]
 
-        for text, axis, delta, r, c in buttons:
+        for text, axis, delta in buttons:
             btn = QtWidgets.QPushButton(text)
-            btn.setFixedHeight(20)
-            btn.setMinimumWidth(44)
+            btn.setFixedHeight(18)
+            btn.setMinimumWidth(40 if axis is not None else 46)
+            btn.setStyleSheet("font-size: 10px; padding: 1px 4px;")
             if text.startswith("X"):
-                btn.setStyleSheet("background-color: %s;" % AXIS_X_COLOR)
+                btn.setStyleSheet("font-size: 10px; padding: 1px 4px; background-color: %s;" % AXIS_X_COLOR)
             elif text.startswith("Y"):
-                btn.setStyleSheet("background-color: %s;" % AXIS_Y_COLOR)
+                btn.setStyleSheet("font-size: 10px; padding: 1px 4px; background-color: %s;" % AXIS_Y_COLOR)
             elif text.startswith("Z"):
-                btn.setStyleSheet("background-color: %s;" % AXIS_Z_COLOR)
+                btn.setStyleSheet("font-size: 10px; padding: 1px 4px; background-color: %s;" % AXIS_Z_COLOR)
             if axis is None:
                 btn.clicked.connect(self._reset_rotation_offsets)
             else:
                 btn.clicked.connect(lambda _, a=axis, d=delta: self._increment_rotation_axis(a, d))
-            grid.addWidget(btn, r, c)
+            row.addWidget(btn)
 
-        container.addLayout(grid)
+        container.addLayout(row)
         container.addStretch()
         parent_layout.addLayout(container)
 

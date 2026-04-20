@@ -4691,6 +4691,8 @@ class PRCurveToolsUI(QtWidgets.QDialog):
         slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         slider.setMinimum(0)
         slider.setMaximum(1000)
+        slider.setProperty("prBaseMax", float(max_val))
+        slider.setProperty("prSliderMax", float(max_val))
         row.addWidget(slider)
 
         if decimals > 0:
@@ -4714,16 +4716,47 @@ class PRCurveToolsUI(QtWidgets.QDialog):
 
         minus_btn = QtWidgets.QPushButton("-")
         minus_btn.setFixedSize(18, 18)
-        minus_btn.setToolTip("Divise la valeur par 2")
+        minus_btn.setToolTip("Retire un pas")
         plus_btn = QtWidgets.QPushButton("+")
         plus_btn.setFixedSize(18, 18)
-        plus_btn.setToolTip("Multiplie la valeur par 2")
+        plus_btn.setToolTip("Ajoute un pas")
+        reset_btn = QtWidgets.QPushButton("R")
+        reset_btn.setFixedSize(18, 18)
+        reset_btn.setToolTip("Reset valeur + plage slider")
         row.addWidget(minus_btn)
         row.addWidget(plus_btn)
+        row.addWidget(reset_btn)
+
+        def _get_slider_soft_max():
+            current = slider.property("prSliderMax")
+            if current is None:
+                return float(max_val)
+            try:
+                return max(float(min_val), float(current))
+            except Exception:
+                return float(max_val)
+
+        def _set_slider_soft_max(new_max):
+            try:
+                safe_max = max(float(min_val), float(new_max))
+            except Exception:
+                safe_max = float(max_val)
+            slider.setProperty("prSliderMax", safe_max)
+
+        def _expand_slider_range_if_needed(val):
+            if not allow_over_max:
+                return
+            try:
+                v = float(val)
+            except Exception:
+                return
+            if v > _get_slider_soft_max():
+                _set_slider_soft_max(v)
 
         def update_spinbox(val):
             ratio = val / 1000.0
-            real_val = min_val + ratio * (max_val - min_val)
+            soft_max = _get_slider_soft_max()
+            real_val = min_val + ratio * (soft_max - min_val)
             final_val = real_val if decimals > 0 else int(round(real_val))
             spinbox.blockSignals(True)
             spinbox.setValue(final_val)
@@ -4731,29 +4764,36 @@ class PRCurveToolsUI(QtWidgets.QDialog):
             set_sweep_preview_setting(attr, final_val)
 
         def update_slider(val):
-            clamped = max(min_val, min(max_val, float(val)))
-            ratio = (clamped - min_val) / (max_val - min_val)
+            _expand_slider_range_if_needed(val)
+            soft_max = _get_slider_soft_max()
+            clamped = max(min_val, min(soft_max, float(val)))
+            ratio = 0.0 if abs(soft_max - min_val) < 1e-12 else (clamped - min_val) / (soft_max - min_val)
             slider.blockSignals(True)
             slider.setValue(int(ratio * 1000))
             slider.blockSignals(False)
             set_sweep_preview_setting(attr, float(val))
 
-        def _half_value():
+        def _minus_value():
             cur = float(spinbox.value())
-            nxt = max(min_val, cur / 2.0)
+            nxt = max(min_val, cur - float(step))
             spinbox.setValue(int(round(nxt)) if decimals == 0 else nxt)
 
-        def _double_value():
+        def _plus_value():
             cur = float(spinbox.value())
-            nxt = cur * 2.0 if abs(cur) > 1e-12 else max(float(step), 0.1)
+            nxt = cur + float(step)
             spinbox.setValue(int(round(nxt)) if decimals == 0 else nxt)
+
+        def _reset_value():
+            _set_slider_soft_max(float(max_val))
+            spinbox.setValue(default if decimals > 0 else int(default))
 
         slider.valueChanged.connect(update_spinbox)
         spinbox.valueChanged.connect(update_slider)
-        minus_btn.clicked.connect(_half_value)
-        plus_btn.clicked.connect(_double_value)
+        minus_btn.clicked.connect(_minus_value)
+        plus_btn.clicked.connect(_plus_value)
+        reset_btn.clicked.connect(_reset_value)
 
-        ratio = (default - min_val) / (max_val - min_val)
+        ratio = 0.0 if abs(max_val - min_val) < 1e-12 else (default - min_val) / (max_val - min_val)
         slider.setValue(int(ratio * 1000))
         parent_layout.addLayout(row)
         return slider, spinbox
@@ -5536,6 +5576,14 @@ class PRCurveToolsUI(QtWidgets.QDialog):
                 slider, spinbox = control
                 min_val = spec.get("min", 0.0)
                 max_val = spec.get("max", 1.0)
+                if bool(spec.get("allow_over_max", False)):
+                    slider_max = slider.property("prSliderMax")
+                    try:
+                        slider_max = max(float(max_val), float(cur_val), float(slider_max))
+                    except Exception:
+                        slider_max = float(max_val)
+                    slider.setProperty("prSliderMax", slider_max)
+                    max_val = slider_max
                 try:
                     ratio = (float(cur_val) - min_val) / (max_val - min_val)
                 except Exception:

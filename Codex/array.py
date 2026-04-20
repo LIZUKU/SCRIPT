@@ -477,6 +477,13 @@ class XYZSliderWidget(QtWidgets.QWidget):
             top_row.addWidget(btn)
             self._axis_buttons[axis] = btn
 
+        self.reset_btn = QtWidgets.QPushButton("R")
+        self.reset_btn.setToolTip("Reset XYZ values")
+        self.reset_btn.setFixedSize(18, 16)
+        self.reset_btn.setStyleSheet("font-size: 9px; padding: 0px;")
+        self.reset_btn.clicked.connect(self.reset)
+        top_row.addWidget(self.reset_btn)
+
         top_row.addStretch()
         root.addLayout(top_row)
 
@@ -1991,6 +1998,16 @@ def build_curve_distribution(
         warned_locked_channels = False
         is_closed = _is_closed_curve(curve)
         first_pos = None
+        seam_overlap_distance_sq = 1e-8
+        if is_closed and count > 1:
+            approx_step = estimate_mesh_spacing_multi(
+                valid_meshes,
+                axis_mode=fit_axis_mode,
+                extra_padding=padding,
+                base_scale=base_scale,
+                random_scale=rand_scale
+            )
+            seam_overlap_distance_sq = max(1e-8, (approx_step * 0.2) ** 2)
 
         for i, u in enumerate(u_samples):
 
@@ -2005,7 +2022,7 @@ def build_curve_distribution(
                     first_pos = tuple(pos)
                 elif i == (len(u_samples) - 1):
                     seam_delta = vec_sub(pos, first_pos)
-                    if vec_dot(seam_delta, seam_delta) <= 1e-8:
+                    if vec_dot(seam_delta, seam_delta) <= seam_overlap_distance_sq:
                         continue
 
             if use_instance:

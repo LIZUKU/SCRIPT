@@ -1708,6 +1708,10 @@ def build_curve_distribution(
         return []
     results = []
     local_center_offsets = {m: get_mesh_center_offset_local(m) for m in valid_meshes}
+    # With multiple source meshes, different pivot placements can create apparent
+    # spacing offsets along the curve. Normalize by bbox center unless user
+    # already explicitly enabled center_on_bbox.
+    auto_center_multi_meshes = len(valid_meshes) > 1
 
     proxy_mesh = None
     source_mesh = primary_mesh
@@ -1840,7 +1844,7 @@ def build_curve_distribution(
                     r=True,
                     os=True
                 )
-                if center_on_bbox and not use_proxy:
+                if (center_on_bbox or auto_center_multi_meshes) and not use_proxy:
                     local_center_offset = local_center_offsets.get(sample_mesh, (0.0, 0.0, 0.0))
                     cmds.move(
                         -local_center_offset[0],
@@ -1862,7 +1866,7 @@ def build_curve_distribution(
                 )
 
                 cmds.xform(new_obj, ws=True, ro=final_rot)
-                if center_on_bbox and not use_proxy:
+                if (center_on_bbox or auto_center_multi_meshes) and not use_proxy:
                     local_center_offset = local_center_offsets.get(sample_mesh, (0.0, 0.0, 0.0))
                     cmds.move(
                         -local_center_offset[0],
@@ -2730,8 +2734,10 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         layout.addWidget(self.btn_even_distribute)
 
         self.padding_slider, self.padding_spin = self._add_slider(layout, "Padding", -10.0, 50.0, 0.0, 3, label_width=110)
-        self.safety_slider, self.safety_spin = self._add_slider(layout, "Fit Safety", 0.5, 3.0, 1.05, 3, label_width=110)
+        self.safety_slider, self.safety_spin = self._add_slider(layout, "Fit Safety", 0.5, 3.0, 1.0, 3, label_width=110)
         self.auto_max_slider, self.auto_max_spin = self._add_slider(layout, "Max Count", 1, 5000, 1000, 0, label_width=110)
+        self.auto_max_spin.setToolTip("Global hard cap for generated preview count")
+        self.auto_max_slider.setToolTip("Global hard cap for generated preview count")
 
         self.mesh_order_combo = QtWidgets.QComboBox()
         self.mesh_order_combo.addItems(["Cycle", "Every N", "Random"])
@@ -2748,7 +2754,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         mesh_order_row.addStretch()
         layout.addLayout(mesh_order_row)
 
-        self.mesh_every_n_slider, self.mesh_every_n_spin = self._add_slider(layout, "Every N", 1, 10, 2, 0, label_width=110)
+        self.mesh_every_n_slider, self.mesh_every_n_spin = self._add_slider(layout, "Every N", 1, 10, 1, 0, label_width=110)
 
         axis_row = QtWidgets.QHBoxLayout()
         axis_row.setSpacing(8)
@@ -2889,9 +2895,9 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
     def _register_persisted_controls(self):
         controls = [
             (self.padding_spin, "padding", 0.0),
-            (self.safety_spin, "fit_safety", 1.05),
+            (self.safety_spin, "fit_safety", 1.0),
             (self.auto_max_spin, "auto_max", 1000),
-            (self.mesh_every_n_spin, "mesh_every_n", 2),
+            (self.mesh_every_n_spin, "mesh_every_n", 1),
             (self.offx_spin, "off_x", 0.0),
             (self.offy_spin, "off_y", 0.0),
             (self.offz_spin, "off_z", 0.0),
@@ -3292,6 +3298,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
                     )
                 )
             safe_count_limit = min(safe_limits) if safe_limits else 1
+            hard_cap_limit = max(1, max_count)
 
             if auto_fit:
                 auto_counts = []
@@ -3322,6 +3329,12 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
                     self.count_spin.blockSignals(True)
                     self.count_spin.setValue(count)
                     self.count_spin.blockSignals(False)
+            # "Max Count" is treated as a global hard-cap in all modes.
+            count = min(count, hard_cap_limit)
+            if not auto_fit and count != int(self.count_spin.value()):
+                self.count_spin.blockSignals(True)
+                self.count_spin.setValue(count)
+                self.count_spin.blockSignals(False)
 
             per_curve_counts = [count for _ in valid_curves]
             if len(valid_curves) > 1 and not auto_fit:
@@ -3428,13 +3441,13 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
                 )
             elif lock_no_overlap:
                 self.status_label.setText(
-                        "{} preview | usable {:.3f} | safe max {}".format(
-                        len(all_results), usable_len, safe_count_limit
+                        "{} preview | usable {:.3f} | safe max {} | hard cap {}".format(
+                        len(all_results), usable_len, safe_count_limit, hard_cap_limit
                     )
                 )
             else:
                 self.status_label.setText(
-                    "{} preview | usable {:.3f}".format(len(all_results), usable_len)
+                    "{} preview | usable {:.3f} | hard cap {}".format(len(all_results), usable_len, hard_cap_limit)
                 )
 
             cmds.refresh(force=False)

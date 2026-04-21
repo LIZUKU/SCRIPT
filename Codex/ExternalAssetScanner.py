@@ -2,6 +2,7 @@
 
 import os
 import re
+import time
 import traceback
 
 import maya.cmds as cmds
@@ -132,6 +133,27 @@ def extract_kit_name_from_string(name):
     return "_".join(upper)
 
 
+def is_probable_texture_name(asset_name):
+    """
+    Avoid listing texture-like families as reused assets.
+    Example: QDD_CRACK_CONCRETE_ALB, ARC_WALL_NOR_02
+    """
+    name = (asset_name or "").upper()
+    if not name or "_" not in name:
+        return False
+
+    parts = name.split("_")
+    if len(parts) < 3:
+        return False
+
+    tail = parts[-1]
+    if tail in MAP_SUFFIXES:
+        return True
+    if re.match(r"^\d+$", tail) and len(parts) >= 2 and parts[-2] in MAP_SUFFIXES:
+        return True
+    return False
+
+
 def current_asset_from_scene():
     path = scene_path()
     if not path:
@@ -246,6 +268,8 @@ def scan_reused_assets(scan_all=True, include_kits=True, current_asset=None):
     for node in nodes:
         main_name = extract_main_name_from_string(node)
         if main_name:
+            if is_probable_texture_name(main_name):
+                continue
             if current_asset and main_name == current_asset:
                 continue
             reused.setdefault(main_name, []).append(node)
@@ -254,6 +278,8 @@ def scan_reused_assets(scan_all=True, include_kits=True, current_asset=None):
         if include_kits:
             kit_name = extract_kit_name_from_string(node)
             if kit_name:
+                if is_probable_texture_name(kit_name):
+                    continue
                 if current_asset and kit_name == current_asset:
                     continue
                 kits.setdefault(kit_name, []).append(node)
@@ -434,6 +460,8 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
         self.data_kits = {}
         self.data_textures = {}
         self.last_shader_assignments = []
+        self.shader_assignment_history = []
+        self.last_failed_loads = []
 
         self.current_asset = current_asset_from_scene()
         self.current_category = current_asset_category_from_scene()
@@ -598,15 +626,23 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
         self.load_list_btn = QtWidgets.QPushButton("Load From List")
         self.load_sel_btn = QtWidgets.QPushButton("Load From Maya Selection")
         self.load_current_btn = QtWidgets.QPushButton("Load Current Asset")
+        self.select_failed_btn = QtWidgets.QPushButton("Select Failed In List")
+        self.retry_failed_btn = QtWidgets.QPushButton("Retry Failed")
         self.load_current_btn.setEnabled(False)
+        self.select_failed_btn.setEnabled(False)
+        self.retry_failed_btn.setEnabled(False)
 
         self.load_list_btn.clicked.connect(self.load_from_list)
         self.load_sel_btn.clicked.connect(self.load_from_maya_selection)
         self.load_current_btn.clicked.connect(self.load_current_asset)
+        self.select_failed_btn.clicked.connect(self.select_failed_assets_in_ui)
+        self.retry_failed_btn.clicked.connect(self.retry_failed_assets)
 
         row_b.addWidget(self.load_list_btn)
         row_b.addWidget(self.load_sel_btn)
         row_b.addWidget(self.load_current_btn)
+        row_b.addWidget(self.select_failed_btn)
+        row_b.addWidget(self.retry_failed_btn)
 
         root.addLayout(row_b)
 
@@ -638,12 +674,21 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
 
         root.addLayout(row_c)
 
+        self.log_box = QtWidgets.QGroupBox("Log")
+        self.log_box.setCheckable(True)
+        self.log_box.setChecked(False)
+        self.log_box.toggled.connect(self._on_log_toggled)
+        log_layout = QtWidgets.QVBoxLayout(self.log_box)
+        log_layout.setContentsMargins(6, 12, 6, 6)
+
         self.report = QtWidgets.QPlainTextEdit()
         self.report.setReadOnly(True)
-        root.addWidget(self.report, 1)
+        log_layout.addWidget(self.report, 1)
+        root.addWidget(self.log_box, 1)
 
         self.status_label = QtWidgets.QLabel("")
         root.addWidget(self.status_label)
+        self._on_log_toggled(self.log_box.isChecked())
 
     def _log(self, text=""):
         self.report.appendPlainText(text)
@@ -652,6 +697,13 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
 
     def _set_status(self, text):
         self.status_label.setText(text)
+
+    def _on_log_toggled(self, checked):
+        self.report.setVisible(checked)
+        if checked:
+            self.log_box.setMaximumHeight(16777215)
+        else:
+            self.log_box.setMaximumHeight(34)
 
     def _prefixes(self):
         raw = self.prefixes_edit.text().strip()
@@ -726,6 +778,9 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
         self.tree_reused.set_data(self.data_reused)
         self.tree_kit.set_data(self.data_kits)
         self.tree_texture.set_data(self.data_textures)
+        self.tabs.setTabText(0, "Reused Assets ({})".format(len(self.data_reused)))
+        self.tabs.setTabText(1, "KIT ({})".format(len(self.data_kits)))
+        self.tabs.setTabText(2, "Textures ({})".format(len(self.data_textures)))
 
         current_in_scene = bool(self.current_asset and self._find_nodes_for_asset_name(self.current_asset))
         self.select_current_btn.setEnabled(current_in_scene)
@@ -862,7 +917,10 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
                 obj = QDLoad.by_catalog(candidate, category)
                 if obj is None:
                     raise RuntimeError("QDLoad.by_catalog returned None")
-                obj.update_status(b_recursive=True)
+                try:
+                    obj.update_status(b_recursive=True)
+                except Exception as e:
+                    self._log("    WARN update_status failed for {} -> {}".format(candidate, e))
                 self._log("    OK {}".format(candidate))
                 return True, candidate
             except Exception as e:
@@ -878,6 +936,7 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
         ok = []
         skipped = []
         failed = []
+        self.last_failed_loads = []
 
         progress = QtWidgets.QProgressDialog("Loading...", "Cancel", 0, len(names), self)
         progress.setWindowTitle(title)
@@ -890,6 +949,7 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
             progress.setValue(i)
             progress.setLabelText("Loading {}".format(name))
             QtWidgets.QApplication.processEvents()
+            time.sleep(0.01)
 
             if progress.wasCanceled():
                 break
@@ -913,6 +973,7 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
                 cmds.refresh(force=True)
             except Exception:
                 pass
+            QtWidgets.QApplication.processEvents()
 
         progress.setValue(len(names))
 
@@ -929,7 +990,41 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
             self._log("    {} -> {}".format(src, err))
         self._log("=" * 80)
 
+        self.last_failed_loads = [src for src, _err in failed]
+        self.select_failed_btn.setEnabled(bool(self.last_failed_loads))
+        self.retry_failed_btn.setEnabled(bool(self.last_failed_loads))
         self._scan()
+
+    def select_failed_assets_in_ui(self):
+        if not self.last_failed_loads:
+            cmds.warning("No failed assets from previous load.")
+            return
+
+        tree, data, kind = self.current_tree()
+        if kind == "texture":
+            self.tabs.setCurrentIndex(0)
+            tree, data, kind = self.current_tree()
+
+        wanted = set(x.upper() for x in self.last_failed_loads)
+        tree.clearSelection()
+        selected = 0
+        for i in range(tree.topLevelItemCount()):
+            item = tree.topLevelItem(i)
+            if item.text(0).upper() in wanted:
+                item.setSelected(True)
+                selected += 1
+
+        self._set_status("Failed assets: {} (found in list: {})".format(len(self.last_failed_loads), selected))
+        self._log("SELECT FAILED [{}], found in current list [{}]".format(len(self.last_failed_loads), selected))
+        if self.last_failed_loads:
+            self.asset_name_edit.setText(", ".join(self.last_failed_loads))
+
+    def retry_failed_assets(self):
+        if not self.last_failed_loads:
+            cmds.warning("No failed assets to retry.")
+            return
+        category = self.category_edit.text().strip() or "Props"
+        self._run_load_batch(list(self.last_failed_loads), category, "Retry Failed Assets")
 
     def load_from_list(self):
         tree, data, kind = self.current_tree()
@@ -1084,12 +1179,17 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
             for mesh, _qds, _qdm, previous_sgs in converted
             if previous_sgs
         ]
+        if self.last_shader_assignments:
+            self.shader_assignment_history.append(list(self.last_shader_assignments))
+            if len(self.shader_assignment_history) > 20:
+                self.shader_assignment_history = self.shader_assignment_history[-20:]
         self.shader_revert_btn.setEnabled(bool(self.last_shader_assignments))
 
     def revert_last_auto_assign(self):
-        if not self.last_shader_assignments:
+        if not self.shader_assignment_history:
             cmds.warning("No previous auto-assign operation to revert.")
             return
+        self.last_shader_assignments = self.shader_assignment_history.pop()
 
         restored = 0
         failed = 0
@@ -1115,7 +1215,7 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
         self._log("=" * 80)
 
         self.last_shader_assignments = []
-        self.shader_revert_btn.setEnabled(False)
+        self.shader_revert_btn.setEnabled(bool(self.shader_assignment_history))
 
     def closeEvent(self, event):
         QtWidgets.QDialog.closeEvent(self, event)

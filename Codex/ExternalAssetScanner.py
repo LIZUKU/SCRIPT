@@ -1,146 +1,52 @@
 # -*- coding: utf-8 -*-
-"""
-External Asset Scanner  v8  -  Maya 2022  (PySide2 / Qt)
 
-Features:
-- Auto-detect current asset from scene path (e.g. RELIC_DENDO_TEMPLE_B)
-- Scan Reused Assets / KIT / Textures tabs
-- Reused tab contains recognized + unclassified assets
-- Load assets:  QDLoad.by_catalog(name, category).update_status(b_recursive=True)
-- Check texture existence in scene before load
-- Auto-assign shaders: QDS_* / Blinn / Phong / Lambert  ->  QDM_*
-  with namespace + numeric suffix support
-- Detailed logs: OK / SKIP / FAIL per operation
-"""
-
-import re
-import ast
 import os
+import re
+import traceback
 
 import maya.cmds as cmds
 import maya.OpenMayaUI as omui
 
-from PySide2 import QtWidgets, QtCore, QtGui
-from PySide2.QtCore import Qt
+from PySide2 import QtCore, QtGui, QtWidgets
 from shiboken2 import wrapInstance
 
 
-# ============================================================
-#  CONFIG
-# ============================================================
-
-WINDOW_TITLE  = "External Asset Scanner  v9"
-WINDOW_OBJ    = "ExtAssetScannerV9"
-
-CACHE_MAIN    = "extAssetScanner_main_v8"
-CACHE_KIT     = "extAssetScanner_kit_v8"
-CACHE_ORPHAN  = "extAssetScanner_orphan_v9"
+WINDOW_OBJECT_NAME = "qdExternalAssetScannerQt"
 
 DEFAULT_PREFIXES = ["ACC", "ARC", "QDD", "AGRA", "RELIC"]
 
-BLINN_PHONG_LAMBERT = {"blinn", "phong", "phongE", "lambert", "surfaceShader"}
+MAP_SUFFIXES = {
+    "ALB", "NOR", "OCC", "RGH", "RME", "MSK", "HGT", "THR",
+    "EMI", "MET", "AO", "COL", "COLOR", "ROUGH", "NORMAL"
+}
 
-# ============================================================
-#  STYLE
-# ============================================================
+SCENE_SUFFIXES_TO_STRIP = [
+    "_BAKETEXTURES",
+    "_BAKE_TEXTURES",
+    "_BAKE",
+    "_TEXTURES",
+    "_TEXTURE",
+    "_DELIVERY",
+    "_WORK",
+    "_WIP",
+    "_FINAL",
+]
 
-QSS = """
-QWidget {
-    background-color: #2b2b2b;
-    color: #d4d4d4;
-    font-family: 'Consolas', monospace;
-    font-size: 12px;
-}
-QLabel { color: #aaaaaa; }
-QLabel#title {
-    font-size: 14px;
-    font-weight: bold;
-    color: #e8e8e8;
-    padding: 4px 0;
-}
-QLabel#asset_badge {
-    font-size: 11px;
-    color: #7ec8e3;
-    padding: 2px 6px;
-    background: #1a3a4a;
-    border-radius: 3px;
-}
-QLineEdit, QTextEdit {
-    background-color: #1e1e1e;
-    border: 1px solid #444;
-    border-radius: 3px;
-    padding: 3px 6px;
-    color: #d4d4d4;
-}
-QTextEdit#log {
-    font-family: 'Consolas', monospace;
-    font-size: 11px;
-    background-color: #191919;
-    color: #c8c8c8;
-}
-QPushButton {
-    background-color: #3c3c3c;
-    border: 1px solid #555;
-    border-radius: 4px;
-    padding: 5px 14px;
-    color: #d4d4d4;
-}
-QPushButton:hover  { background-color: #4a4a4a; border-color: #888; }
-QPushButton:pressed { background-color: #282828; }
-QPushButton#scan   { background-color: #3a3a3a; border-color: #666; }
-QPushButton#load   { background-color: #1e3d1e; border-color: #3a7a3a; color: #88cc88; }
-QPushButton#load:hover { background-color: #265226; }
-QPushButton#loadmaya { background-color: #1a2e42; border-color: #2f6095; color: #7ab8e8; }
-QPushButton#loadmaya:hover { background-color: #1e3a55; }
-QPushButton#shader { background-color: #3d2510; border-color: #8a4d1a; color: #e8a060; }
-QPushButton#shader:hover { background-color: #512e14; }
-QPushButton#tex    { background-color: #2d1e3d; border-color: #6040a0; color: #b088e8; }
-QPushButton#tex:hover { background-color: #3a2655; }
-QTabWidget::pane  { border: 1px solid #444; background: #252525; }
-QTabBar::tab {
-    background: #333; color: #aaa;
-    padding: 5px 16px; border-radius: 3px 3px 0 0;
-    margin-right: 2px;
-}
-QTabBar::tab:selected { background: #252525; color: #e8e8e8; }
-QListWidget {
-    background-color: #1e1e1e;
-    border: 1px solid #444;
-    alternate-background-color: #222;
-    outline: none;
-}
-QListWidget::item { padding: 2px 6px; }
-QListWidget::item:selected { background-color: #2d4a6a; color: #ffffff; }
-QListWidget::item:hover { background-color: #2a2a2a; }
-QCheckBox { color: #aaaaaa; }
-QCheckBox::indicator { width: 14px; height: 14px; }
-QSplitter::handle { background: #444; }
-QGroupBox {
-    border: 1px solid #444;
-    border-radius: 4px;
-    margin-top: 10px;
-    padding-top: 8px;
-    font-size: 11px;
-    color: #888;
-}
-QGroupBox::title { subcontrol-origin: margin; left: 8px; color: #aaa; }
-QRadioButton { color: #aaaaaa; spacing: 6px; }
-QRadioButton::indicator { width: 13px; height: 13px; }
-QScrollBar:vertical {
-    background: #222; width: 10px; border-radius: 5px;
-}
-QScrollBar::handle:vertical {
-    background: #555; border-radius: 5px; min-height: 20px;
-}
-"""
+TEXTURE_ATTR_CANDIDATES = [
+    "fileTextureName",
+    "filename",
+    "fileName",
+    "source",
+    "s_source",
+    "path",
+    "texture",
+]
 
-
-# ============================================================
-#  UTILS
-# ============================================================
 
 def maya_main_window():
     ptr = omui.MQtUtil.mainWindow()
+    if ptr is None:
+        return None
     return wrapInstance(int(ptr), QtWidgets.QWidget)
 
 
@@ -152,49 +58,49 @@ def strip_ns(name):
     return name.split(":")[-1]
 
 
-def _safe_literal_eval(raw, fallback):
+def copy_to_clipboard(text):
+    if not text:
+        return
     try:
-        return ast.literal_eval(raw)
+        cmds.clipboard(text=text)
     except Exception:
-        return fallback
+        pass
+    QtWidgets.QApplication.clipboard().setText(text)
 
 
-def detect_scene_asset():
-    """
-    Reads the current Maya scene path and extracts the asset name.
-    Example: .../RELIC_DENDO_TEMPLE_B_BakeTextures... -> RELIC_DENDO_TEMPLE_B
-    """
-    path = cmds.file(q=True, sceneName=True) or ""
+def scene_path():
+    try:
+        return cmds.file(q=True, sn=True) or ""
+    except Exception:
+        return ""
+
+
+def basename_no_ext(path):
     if not path:
         return ""
-    basename = os.path.splitext(os.path.basename(path))[0]
-    parts = basename.split("_")
-    upper = []
-    for p in parts:
-        if re.match(r"^[A-Z0-9]+$", p):
-            upper.append(p)
-        else:
-            break
-    if len(upper) >= 3:
-        # stop after single-letter segment (e.g. _B)
-        result = []
-        for p in upper:
-            result.append(p)
-            if re.match(r"^[A-Z]$", p):
-                return "_".join(result)
-        return "_".join(upper)
-    return basename
+    return os.path.splitext(os.path.basename(path))[0]
 
 
-# ============================================================
-#  DETECTION
-# ============================================================
+def clean_scene_base_for_asset(base_name):
+    if not base_name:
+        return ""
+    name = base_name.upper()
+    changed = True
+    while changed:
+        changed = False
+        for suffix in SCENE_SUFFIXES_TO_STRIP:
+            if name.endswith(suffix):
+                name = name[:-len(suffix)]
+                changed = True
+    return name.strip("_")
 
-def extract_main_name(node_name):
-    name = strip_ns(short_name(node_name))
+
+def extract_main_name_from_string(name):
+    name = strip_ns(short_name(name)).upper()
     parts = name.split("_")
     if len(parts) < 3:
         return None
+
     collected = []
     for part in parts:
         if re.match(r"^[A-Z0-9]+$", part):
@@ -206,105 +112,178 @@ def extract_main_name(node_name):
     return None
 
 
-def extract_kit_name(node_name):
-    name = strip_ns(short_name(node_name))
+def extract_kit_name_from_string(name):
+    name = strip_ns(short_name(name)).upper()
     parts = name.split("_")
     upper = []
+
     for p in parts:
         if re.match(r"^[A-Z0-9]+$", p):
             upper.append(p)
         else:
             break
+
     if not upper or "KIT" not in upper or len(upper) < 3:
         return None
-    if extract_main_name(name):
+
+    if extract_main_name_from_string(name):
         return None
+
     return "_".join(upper)
 
 
-def find_external_assets(scan_all=True, include_kits=True, known_prefixes=None):
-    main    = {}
-    kit     = {}
-    orphan  = {}
+def current_asset_from_scene():
+    path = scene_path()
+    if not path:
+        return None
 
-    prefixes = [p.strip().upper() for p in (known_prefixes or DEFAULT_PREFIXES) if p.strip()]
+    base = clean_scene_base_for_asset(basename_no_ext(path))
 
-    nodes = (cmds.ls(type="transform", long=True) if scan_all
-             else cmds.ls(assemblies=True, long=True)) or []
+    direct = extract_main_name_from_string(base)
+    if direct:
+        return direct
+
+    matches = re.findall(r"([A-Z0-9]+(?:_[A-Z0-9]+)*_[A-Z])(?:_|$)", base)
+    if matches:
+        matches = sorted(matches, key=len, reverse=True)
+        return matches[0]
+
+    return None
+
+
+def current_asset_category_from_scene():
+    path = scene_path().replace("\\", "/").lower()
+    if "/graphics/props/" in path:
+        return "Props"
+    if "/graphics/environment/" in path:
+        return "Environment"
+    if "/graphics/characters/" in path or "/graphics/chara/" in path:
+        return "Characters"
+    return "Props"
+
+
+def read_first_existing_string_attr(node, attr_names):
+    for attr in attr_names:
+        plug = "{}.{}".format(node, attr)
+        try:
+            if cmds.objExists(plug):
+                val = cmds.getAttr(plug)
+                if isinstance(val, str) and val.strip():
+                    return val
+        except Exception:
+            pass
+    return ""
+
+
+def extract_texture_family_from_path(path):
+    if not path:
+        return None
+
+    base = os.path.splitext(os.path.basename(path))[0].upper()
+    parts = base.split("_")
+    if len(parts) < 2:
+        return None
+
+    if parts and parts[-1] in MAP_SUFFIXES:
+        parts = parts[:-1]
+
+    if parts and re.match(r"^\d+$", parts[-1]):
+        parts = parts[:-1]
+
+    if not parts or len(parts) < 2:
+        return None
+
+    return "_".join(parts)
+
+
+def list_texture_nodes():
+    nodes = []
+    for t in ["file", "qdNodeBitmap"]:
+        try:
+            nodes.extend(cmds.ls(type=t) or [])
+        except Exception:
+            pass
+    return list(set(nodes))
+
+
+def scan_textures():
+    data = {}
+
+    for node in list_texture_nodes():
+        tex_path = read_first_existing_string_attr(node, TEXTURE_ATTR_CANDIDATES)
+        family = extract_texture_family_from_path(tex_path)
+
+        if not family:
+            node_short = strip_ns(node).upper()
+            family = extract_texture_family_from_path(node_short)
+
+        if not family:
+            continue
+
+        data.setdefault(family, [])
+        data[family].append(node)
+
+    return data
+
+
+def scan_reused_assets(scan_all=True, include_kits=True, current_asset=None):
+    reused = {}
+    kits = {}
+
+    if scan_all:
+        nodes = cmds.ls(type="transform", long=True) or []
+    else:
+        nodes = cmds.ls(assemblies=True, long=True) or []
 
     for node in nodes:
-        main_name = extract_main_name(node)
+        main_name = extract_main_name_from_string(node)
         if main_name:
-            # check if it starts with a known prefix
-            has_prefix = any(main_name.upper().startswith(p + "_") for p in prefixes)
-            if has_prefix:
-                main.setdefault(main_name, []).append(node)
-            else:
-                orphan.setdefault(main_name, []).append(node)
+            if current_asset and main_name == current_asset:
+                continue
+            reused.setdefault(main_name, []).append(node)
             continue
 
         if include_kits:
-            kit_name = extract_kit_name(node)
+            kit_name = extract_kit_name_from_string(node)
             if kit_name:
-                kit.setdefault(kit_name, []).append(node)
+                if current_asset and kit_name == current_asset:
+                    continue
+                kits.setdefault(kit_name, []).append(node)
+                continue
 
-    return main, kit, orphan
-
-
-# ============================================================
-#  CACHE
-# ============================================================
-
-def set_cache(main, kit, orphan):
-    cmds.optionVar(sv=(CACHE_MAIN,   repr(main)))
-    cmds.optionVar(sv=(CACHE_KIT,    repr(kit)))
-    cmds.optionVar(sv=(CACHE_ORPHAN, repr(orphan)))
+    return reused, kits
 
 
-def get_cache_main():
-    return _safe_literal_eval(cmds.optionVar(q=CACHE_MAIN), {}) if cmds.optionVar(exists=CACHE_MAIN) else {}
-
-
-def get_cache_kit():
-    return _safe_literal_eval(cmds.optionVar(q=CACHE_KIT), {}) if cmds.optionVar(exists=CACHE_KIT) else {}
-
-
-def get_cache_orphan():
-    return _safe_literal_eval(cmds.optionVar(q=CACHE_ORPHAN), {}) if cmds.optionVar(exists=CACHE_ORPHAN) else {}
-
-
-# ============================================================
-#  SHADER UTILS
-# ============================================================
-
-def _meshes_under(nodes):
+def meshes_under(nodes):
     meshes = []
     for n in nodes:
-        meshes.extend(cmds.listRelatives(n, ad=True, type="mesh", fullPath=True) or [])
+        try:
+            meshes.extend(cmds.listRelatives(n, ad=True, type="mesh", fullPath=True) or [])
+        except Exception:
+            pass
     return list(set(meshes))
 
 
-def _ses_on_mesh(mesh):
-    return list(set(cmds.listConnections(mesh, type="shadingEngine") or []))
-
-
-def _surface_shader(se):
-    shaders = cmds.listConnections(se + ".surfaceShader", s=True, d=False) or []
-    return shaders[0] if shaders else None
-
-
-def _shader_type(shader):
+def shading_engines_on_mesh(mesh):
     try:
-        return cmds.nodeType(shader)
+        return list(set(cmds.listConnections(mesh, type="shadingEngine") or []))
     except Exception:
-        return ""
+        return []
 
 
-def _all_qdm_candidates():
+def surface_shader_from_sg(sg):
+    try:
+        shaders = cmds.listConnections(sg + ".surfaceShader", s=True, d=False) or []
+        return shaders[0] if shaders else None
+    except Exception:
+        return None
+
+
+def all_qdm_candidates():
     out = []
-    for n in (cmds.ls() or []):
-        s = strip_ns(n)
-        if s.startswith("QDM_"):
+    for n in cmds.ls() or []:
+        sn = strip_ns(n)
+        if sn.startswith("QDM_"):
             try:
                 if cmds.attributeQuery("outColor", node=n, exists=True):
                     out.append(n)
@@ -313,766 +292,766 @@ def _all_qdm_candidates():
     return sorted(out, key=lambda x: strip_ns(x).lower())
 
 
-def _strip_trailing_digits(name):
+def strip_trailing_digits(name):
     return re.sub(r"\d+$", "", name)
 
 
-def _find_qdm(qds_name):
+def find_qdm_from_qds(qds_name):
     short_qds = strip_ns(qds_name)
     if not short_qds.startswith("QDS_"):
         return None
-    target_short = "QDM_" + short_qds[4:]
-    target_low   = target_short.lower()
-    candidates   = _all_qdm_candidates()
+
+    target = "QDM_" + short_qds[4:]
+    target_low = target.lower()
+    candidates = all_qdm_candidates()
 
     for n in candidates:
-        if strip_ns(n) == target_short:
+        if strip_ns(n) == target:
             return n
+
     for n in candidates:
         if strip_ns(n).lower() == target_low:
             return n
 
     numbered = []
-    pattern = re.compile(r"^" + re.escape(target_short) + r"(\d+)$", re.IGNORECASE)
+    pattern = re.compile(r"^" + re.escape(target) + r"(\d+)$", re.IGNORECASE)
     for n in candidates:
-        m = pattern.match(strip_ns(n))
+        sn = strip_ns(n)
+        m = pattern.match(sn)
         if m:
             numbered.append((int(m.group(1)), n))
     if numbered:
-        return sorted(numbered)[0][1]
+        numbered.sort(key=lambda x: x[0])
+        return numbered[0][1]
 
-    stripped_target = _strip_trailing_digits(target_short).lower()
+    stripped_target = strip_trailing_digits(target).lower()
     soft = []
     for n in candidates:
-        short_n = strip_ns(n)
-        if _strip_trailing_digits(short_n).lower() == stripped_target:
-            m2 = re.search(r"(\d+)$", short_n)
-            soft.append((int(m2.group(1)) if m2 else 0, n))
+        sn = strip_ns(n)
+        if strip_trailing_digits(sn).lower() == stripped_target:
+            suffix = re.search(r"(\d+)$", sn)
+            idx = int(suffix.group(1)) if suffix else 0
+            soft.append((idx, n))
     if soft:
-        return sorted(soft)[0][1]
+        soft.sort(key=lambda x: x[0])
+        return soft[0][1]
 
     return None
 
 
-def _find_or_create_sg(shader):
+def find_or_create_sg(shader):
     connected = cmds.listConnections(shader, s=False, d=True, type="shadingEngine") or []
     if connected:
         return connected[0]
+
     base = strip_ns(shader) + "SG"
     sg = base
     i = 1
     while cmds.objExists(sg):
-        sg = "{}_{}".format(base, i); i += 1
+        sg = "{}_{}".format(base, i)
+        i += 1
+
     sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True, name=sg)
-    if cmds.attributeQuery("outColor", node=shader, exists=True):
-        cmds.connectAttr(shader + ".outColor", sg + ".surfaceShader", force=True)
-    else:
-        raise RuntimeError("No outColor on '{}'".format(shader))
+    cmds.connectAttr(shader + ".outColor", sg + ".surfaceShader", force=True)
     return sg
 
 
-def _assign_shader(mesh, shader):
-    sg = _find_or_create_sg(shader)
+def assign_shader(mesh, shader):
+    sg = find_or_create_sg(shader)
     cmds.sets(mesh, e=True, forceElement=sg)
 
 
-# ============================================================
-#  LOAD UTILS
-# ============================================================
-
 def build_catalog_candidates(asset_name, category, prefixes):
+    asset_name = asset_name.upper().strip()
     candidates = [asset_name]
-    if re.match(r"^[A-Z]{3,5}_", asset_name):
+
+    if re.match(r"^[A-Z]{3,4}_", asset_name):
         return candidates
-    ordered = (["ACC"] + [p for p in prefixes if p != "ACC"]
-               if category.lower() == "props" and "ACC" in prefixes
-               else prefixes)
-    seen = {asset_name}
+
+    ordered = list(prefixes)
+    if category.lower() == "props" and "ACC" in ordered:
+        ordered = ["ACC"] + [x for x in ordered if x != "ACC"]
+
     for prefix in ordered:
-        c = "{}_{}".format(prefix, asset_name)
+        candidates.append("{}_{}".format(prefix.upper(), asset_name))
+
+    out = []
+    seen = set()
+    for c in candidates:
         if c not in seen:
-            seen.add(c); candidates.append(c)
-    return candidates
+            seen.add(c)
+            out.append(c)
+    return out
 
 
-def _do_load(asset_name, category, prefixes, log_fn):
-    try:
-        from qdTools.qdAssembly.qdUtils.qdLoad import QDLoad
-    except ImportError:
-        log_fn("  [FAIL] Cannot import QDLoad")
-        return False
-    candidates = build_catalog_candidates(asset_name, category, prefixes)
-    last_error = None
-    for catalog_name in candidates:
-        try:
-            QDLoad.by_catalog(catalog_name, category).update_status(b_recursive=True)
-            log_fn("  [OK]   {} -> {}".format(asset_name, catalog_name))
-            return True
-        except Exception as e:
-            last_error = e
-            log_fn("  [SKIP] {} -> {} : {}".format(asset_name, catalog_name, e))
-    log_fn("  [FAIL] {} : {}".format(asset_name, last_error))
-    return False
+class AssetTree(QtWidgets.QTreeWidget):
+    doubleClickedSignal = QtCore.Signal(str)
+
+    def __init__(self, parent=None):
+        super(AssetTree, self).__init__(parent)
+        self.setColumnCount(2)
+        self.setHeaderLabels(["Name", "Count"])
+        self.setAlternatingRowColors(True)
+        self.setRootIsDecorated(False)
+        self.setSortingEnabled(True)
+        self.sortByColumn(0, QtCore.Qt.AscendingOrder)
+        self.itemDoubleClicked.connect(self._on_item_double_clicked)
+        self.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+
+    def _on_item_double_clicked(self, item, column):
+        self.doubleClickedSignal.emit(item.text(0))
+
+    def set_data(self, data_dict):
+        self.clear()
+        for name in sorted(data_dict.keys()):
+            count = len(data_dict[name])
+            item = QtWidgets.QTreeWidgetItem([name, str(count)])
+            item.setTextAlignment(1, QtCore.Qt.AlignCenter)
+            self.addTopLevelItem(item)
+        self.resizeColumnToContents(0)
+
+    def selected_names(self):
+        return [item.text(0) for item in self.selectedItems()]
 
 
-# ============================================================
-#  MAIN WINDOW
-# ============================================================
-
-class ExternalAssetScanner(QtWidgets.QDialog):
-
+class ExternalAssetScannerUI(QtWidgets.QDialog):
     def __init__(self, parent=maya_main_window()):
-        super(ExternalAssetScanner, self).__init__(parent)
-        self.setObjectName(WINDOW_OBJ)
-        self.setWindowTitle(WINDOW_TITLE)
-        self.setMinimumSize(760, 860)
-        self.setStyleSheet(QSS)
-        self.setWindowFlags(self.windowFlags() | Qt.Window)
+        super(ExternalAssetScannerUI, self).__init__(parent)
 
-        self._cache_main   = {}
-        self._cache_kit    = {}
-        self._cache_orphan = {}
-        self._scene_asset_name = ""
-        self._scene_asset_category = "Unknown"
+        self.setObjectName(WINDOW_OBJECT_NAME)
+        self.setWindowTitle("External Asset Scanner")
+        self.setMinimumSize(980, 760)
+
+        self.data_reused = {}
+        self.data_kits = {}
+        self.data_textures = {}
+
+        self.current_asset = current_asset_from_scene()
+        self.current_category = current_asset_category_from_scene()
 
         self._build_ui()
-        self._refresh()
+        self._apply_style()
+        self._scan()
 
-    # ----------------------------------------------------------
-    #  UI BUILD
-    # ----------------------------------------------------------
+    def _apply_style(self):
+        font = QtGui.QFont("Segoe UI", 9)
+        self.setFont(font)
+
+        self.setStyleSheet("""
+        QDialog {
+            background-color: #2b2b2b;
+            color: #d8d8d8;
+        }
+        QLabel {
+            color: #d8d8d8;
+        }
+        QLineEdit, QPlainTextEdit, QTreeWidget, QComboBox {
+            background-color: #202020;
+            color: #e6e6e6;
+            border: 1px solid #4a4a4a;
+            border-radius: 4px;
+            padding: 4px;
+        }
+        QPushButton {
+            background-color: #3a3a3a;
+            color: #f0f0f0;
+            border: 1px solid #555555;
+            border-radius: 4px;
+            padding: 6px 10px;
+            min-height: 24px;
+        }
+        QPushButton:hover {
+            background-color: #4a4a4a;
+        }
+        QPushButton:disabled {
+            color: #7c7c7c;
+            background-color: #2d2d2d;
+        }
+        QTabWidget::pane {
+            border: 1px solid #4a4a4a;
+            top: -1px;
+        }
+        QTabBar::tab {
+            background: #353535;
+            color: #d8d8d8;
+            padding: 8px 14px;
+            border: 1px solid #4a4a4a;
+            border-bottom: none;
+            min-width: 120px;
+        }
+        QTabBar::tab:selected {
+            background: #202020;
+        }
+        QHeaderView::section {
+            background-color: #353535;
+            color: #e0e0e0;
+            border: 1px solid #4a4a4a;
+            padding: 4px;
+        }
+        """)
 
     def _build_ui(self):
         root = QtWidgets.QVBoxLayout(self)
-        root.setContentsMargins(10, 10, 10, 10)
+        root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(6)
 
-        # --- Header ---
-        hdr = QtWidgets.QHBoxLayout()
-        title = QtWidgets.QLabel("External Asset Scanner")
-        title.setObjectName("title")
-        hdr.addWidget(title)
-        hdr.addStretch()
+        top = QtWidgets.QHBoxLayout()
 
-        self.lbl_scene_asset = QtWidgets.QLabel("")
-        self.lbl_scene_asset.setObjectName("asset_badge")
-        self.lbl_scene_asset.setVisible(False)
-        hdr.addWidget(self.lbl_scene_asset)
-        root.addLayout(hdr)
+        self.scene_edit = QtWidgets.QLineEdit()
+        self.scene_edit.setReadOnly(True)
 
-        self.lbl_summary = QtWidgets.QLabel("Reused: 0   KIT: 0   Textures: 0")
-        self.lbl_summary.setStyleSheet("color:#888; font-size:11px;")
-        root.addWidget(self.lbl_summary)
+        self.current_asset_edit = QtWidgets.QLineEdit()
+        self.current_asset_edit.setReadOnly(True)
 
-        info_grp = QtWidgets.QGroupBox("Scene Context")
-        info_lay = QtWidgets.QGridLayout(info_grp)
-        info_lay.setHorizontalSpacing(12)
-        info_lay.addWidget(QtWidgets.QLabel("Scene:"), 0, 0)
-        self.lbl_scene_path = QtWidgets.QLabel("-")
-        self.lbl_scene_path.setStyleSheet("color:#9d9d9d;")
-        info_lay.addWidget(self.lbl_scene_path, 0, 1, 1, 3)
-        info_lay.addWidget(QtWidgets.QLabel("Current Asset:"), 1, 0)
-        self.lbl_current_asset = QtWidgets.QLabel("-")
-        info_lay.addWidget(self.lbl_current_asset, 1, 1)
-        info_lay.addWidget(QtWidgets.QLabel("Category:"), 1, 2)
-        self.lbl_current_category = QtWidgets.QLabel("Unknown")
-        info_lay.addWidget(self.lbl_current_category, 1, 3)
-        self.btn_select_current = QtWidgets.QPushButton("Select Current Asset")
-        self.btn_select_current.setEnabled(False)
-        self.btn_select_current.clicked.connect(self._select_current_asset)
-        info_lay.addWidget(self.btn_select_current, 2, 3)
-        root.addWidget(info_grp)
+        self.category_edit = QtWidgets.QLineEdit()
+        self.category_edit.setText(self.current_category)
 
-        # --- Scan options ---
-        scan_grp = QtWidgets.QGroupBox("Scan Options")
-        scan_lay = QtWidgets.QHBoxLayout(scan_grp)
-        scan_lay.setSpacing(16)
-        self.cb_scan_all = QtWidgets.QCheckBox("All transforms")
-        self.cb_scan_all.setChecked(True)
-        self.cb_kits = QtWidgets.QCheckBox("Include KIT")
-        self.cb_kits.setChecked(True)
-        btn_scan = QtWidgets.QPushButton("⟳  Scan Scene")
-        btn_scan.setObjectName("scan")
-        btn_scan.clicked.connect(self._refresh)
-        btn_sel_all = QtWidgets.QPushButton("Select All")
-        btn_sel_all.clicked.connect(self._select_all)
-        scan_lay.addWidget(self.cb_scan_all)
-        scan_lay.addWidget(self.cb_kits)
-        scan_lay.addStretch()
-        scan_lay.addWidget(btn_scan)
-        scan_lay.addWidget(btn_sel_all)
-        root.addWidget(scan_grp)
+        self.scan_all_cb = QtWidgets.QCheckBox("All Scene")
+        self.scan_all_cb.setChecked(True)
 
-        # --- Asset name field ---
-        sel_lay = QtWidgets.QHBoxLayout()
-        sel_lay.addWidget(QtWidgets.QLabel("Asset Name:"))
-        self.field_asset_name = QtWidgets.QLineEdit()
-        self.field_asset_name.setPlaceholderText("Click list item or paste/type an asset name")
-        sel_lay.addWidget(self.field_asset_name)
-        btn_copy = QtWidgets.QPushButton("Copy")
-        btn_copy.clicked.connect(self._copy_name)
-        btn_import = QtWidgets.QPushButton("Import")
-        btn_import.setObjectName("load")
-        btn_import.clicked.connect(self._import_from_field)
-        btn_sel_nodes = QtWidgets.QPushButton("Select Nodes")
-        btn_sel_nodes.clicked.connect(self._select_nodes)
-        btn_detail = QtWidgets.QPushButton("Print Detail")
-        btn_detail.clicked.connect(self._print_detail)
-        sel_lay.addWidget(btn_copy)
-        sel_lay.addWidget(btn_import)
-        sel_lay.addWidget(btn_sel_nodes)
-        sel_lay.addWidget(btn_detail)
-        root.addLayout(sel_lay)
+        self.kit_cb = QtWidgets.QCheckBox("Include KIT")
+        self.kit_cb.setChecked(True)
 
-        # --- Tabs: Reused Assets / KIT / Textures ---
+        self.skip_existing_cb = QtWidgets.QCheckBox("Skip If In Scene")
+        self.skip_existing_cb.setChecked(True)
+
+        self.scan_btn = QtWidgets.QPushButton("Scan")
+        self.scan_btn.clicked.connect(self._scan)
+
+        top.addWidget(self.scene_edit, 5)
+        top.addWidget(self.current_asset_edit, 2)
+        top.addWidget(self.category_edit, 1)
+        top.addWidget(self.scan_all_cb)
+        top.addWidget(self.kit_cb)
+        top.addWidget(self.skip_existing_cb)
+        top.addWidget(self.scan_btn)
+
+        root.addLayout(top)
+
+        prefix_row = QtWidgets.QHBoxLayout()
+        prefix_row.addWidget(QtWidgets.QLabel("Prefixes"))
+        self.prefixes_edit = QtWidgets.QLineEdit("ACC, ARC, QDD, AGRA, RELIC")
+        prefix_row.addWidget(self.prefixes_edit)
+        root.addLayout(prefix_row)
+
         self.tabs = QtWidgets.QTabWidget()
-        self.tabs.setFixedHeight(220)
+        self.tree_reused = AssetTree()
+        self.tree_kit = AssetTree()
+        self.tree_texture = AssetTree()
 
-        self.list_reused = self._make_list()
-        self.list_kit    = self._make_list()
-        self.list_tex    = self._make_list()
+        self.tree_reused.doubleClickedSignal.connect(self._copy_name)
+        self.tree_kit.doubleClickedSignal.connect(self._copy_name)
+        self.tree_texture.doubleClickedSignal.connect(self._copy_name)
 
-        self.tabs.addTab(self._wrap(self.list_reused), "Reused Assets")
-        self.tabs.addTab(self._wrap(self.list_kit),    "KIT")
-        self.tabs.addTab(self._wrap(self.list_tex),    "Textures")
-        root.addWidget(self.tabs)
+        self.tabs.addTab(self.tree_reused, "Reused Assets")
+        self.tabs.addTab(self.tree_kit, "KIT")
+        self.tabs.addTab(self.tree_texture, "Textures")
 
-        # --- Load section ---
-        load_grp = QtWidgets.QGroupBox("Load Assets  (QDLoad.by_catalog)")
-        load_lay = QtWidgets.QVBoxLayout(load_grp)
-        load_lay.setSpacing(4)
+        root.addWidget(self.tabs, 1)
 
-        r1 = QtWidgets.QHBoxLayout()
-        r1.addWidget(QtWidgets.QLabel("Category:"))
-        self.field_cat = QtWidgets.QLineEdit("Props")
-        self.field_cat.setFixedWidth(130)
-        r1.addWidget(self.field_cat)
-        r1.addWidget(QtWidgets.QLabel("  Prefixes:"))
-        self.field_prefixes = QtWidgets.QLineEdit("ACC, ARC, QDD, AGRA, RELIC")
-        r1.addWidget(self.field_prefixes)
-        load_lay.addLayout(r1)
+        row_a = QtWidgets.QHBoxLayout()
 
-        r2 = QtWidgets.QHBoxLayout()
-        btn_load_list = QtWidgets.QPushButton("Load List Selection  (all if empty)")
-        btn_load_list.setObjectName("load")
-        btn_load_list.clicked.connect(self._load_list)
-        btn_load_maya = QtWidgets.QPushButton("Load Maya Selection")
-        btn_load_maya.setObjectName("loadmaya")
-        btn_load_maya.clicked.connect(self._load_maya)
+        self.copy_btn = QtWidgets.QPushButton("Copy")
+        self.select_btn = QtWidgets.QPushButton("Select Nodes")
+        self.detail_btn = QtWidgets.QPushButton("Details")
+        self.select_current_btn = QtWidgets.QPushButton("Select Current Asset")
+        self.select_current_btn.setEnabled(False)
 
-        # Textures load
-        btn_load_tex = QtWidgets.QPushButton("Load Textures (check scene first)")
-        btn_load_tex.setObjectName("tex")
-        btn_load_tex.clicked.connect(self._load_textures)
-        r2.addWidget(btn_load_list)
-        r2.addWidget(btn_load_maya)
-        r2.addWidget(btn_load_tex)
-        load_lay.addLayout(r2)
-        root.addWidget(load_grp)
+        self.copy_btn.clicked.connect(self.copy_selected_name)
+        self.select_btn.clicked.connect(self.select_selected_nodes)
+        self.detail_btn.clicked.connect(self.print_details)
+        self.select_current_btn.clicked.connect(self.select_current_asset_nodes)
 
-        # --- Shader section ---
-        shader_grp = QtWidgets.QGroupBox("Auto-Assign Shaders  (QDS_ / Blinn / Phong / Lambert  ->  QDM_)")
-        shader_lay = QtWidgets.QVBoxLayout(shader_grp)
-        shader_lay.setSpacing(4)
+        row_a.addWidget(self.copy_btn)
+        row_a.addWidget(self.select_btn)
+        row_a.addWidget(self.detail_btn)
+        row_a.addWidget(self.select_current_btn)
 
-        mode_row = QtWidgets.QHBoxLayout()
-        self.rb_shader_maya = QtWidgets.QRadioButton("Maya Selection")
-        self.rb_shader_maya.setChecked(True)
-        self.rb_shader_list = QtWidgets.QRadioButton("List Selection")
-        self.rb_shader_all  = QtWidgets.QRadioButton("All Scanned")
-        mode_row.addWidget(self.rb_shader_maya)
-        mode_row.addWidget(self.rb_shader_list)
-        mode_row.addWidget(self.rb_shader_all)
-        mode_row.addStretch()
-        shader_lay.addLayout(mode_row)
+        root.addLayout(row_a)
 
-        btn_row = QtWidgets.QHBoxLayout()
-        btn_assign = QtWidgets.QPushButton("Auto-Assign Shaders")
-        btn_assign.setObjectName("shader")
-        btn_assign.clicked.connect(self._auto_assign_shaders)
-        btn_preview = QtWidgets.QPushButton("Preview QDM_ candidates")
-        btn_preview.clicked.connect(self._preview_shaders)
-        btn_row.addWidget(btn_assign)
-        btn_row.addWidget(btn_preview)
-        shader_lay.addLayout(btn_row)
-        root.addWidget(shader_grp)
+        row_b = QtWidgets.QHBoxLayout()
 
-        # --- Log ---
-        log_grp = QtWidgets.QGroupBox("Log")
-        log_lay = QtWidgets.QVBoxLayout(log_grp)
-        self.log_box = QtWidgets.QTextEdit()
-        self.log_box.setObjectName("log")
-        self.log_box.setReadOnly(True)
-        self.log_box.setFixedHeight(170)
-        log_btn_row = QtWidgets.QHBoxLayout()
-        btn_clear = QtWidgets.QPushButton("Clear Log")
-        btn_clear.clicked.connect(self.log_box.clear)
-        log_btn_row.addStretch()
-        log_btn_row.addWidget(btn_clear)
-        log_lay.addWidget(self.log_box)
-        log_lay.addLayout(log_btn_row)
-        root.addWidget(log_grp)
+        self.load_list_btn = QtWidgets.QPushButton("Load From List")
+        self.load_sel_btn = QtWidgets.QPushButton("Load From Maya Selection")
+        self.load_current_btn = QtWidgets.QPushButton("Load Current Asset")
+        self.load_current_btn.setEnabled(False)
 
-    def _make_list(self):
-        lst = QtWidgets.QListWidget()
-        lst.setAlternatingRowColors(True)
-        lst.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
-        lst.itemSelectionChanged.connect(self._on_select)
-        lst.itemDoubleClicked.connect(self._on_double_click)
-        return lst
+        self.load_list_btn.clicked.connect(self.load_from_list)
+        self.load_sel_btn.clicked.connect(self.load_from_maya_selection)
+        self.load_current_btn.clicked.connect(self.load_current_asset)
 
-    def _wrap(self, widget):
-        w = QtWidgets.QWidget()
-        lay = QtWidgets.QVBoxLayout(w)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.addWidget(widget)
-        return w
+        row_b.addWidget(self.load_list_btn)
+        row_b.addWidget(self.load_sel_btn)
+        row_b.addWidget(self.load_current_btn)
 
-    # ----------------------------------------------------------
-    #  HELPERS
-    # ----------------------------------------------------------
+        root.addLayout(row_b)
 
-    def _log(self, msg):
-        self.log_box.append(msg)
-        self.log_box.verticalScrollBar().setValue(
-            self.log_box.verticalScrollBar().maximum()
-        )
-        print(msg)
+        row_c = QtWidgets.QHBoxLayout()
 
-    def _active_list(self):
+        row_c.addWidget(QtWidgets.QLabel("Shader Scope"))
+        self.shader_scope = QtWidgets.QComboBox()
+        self.shader_scope.addItems([
+            "Auto",
+            "Current Asset",
+            "List Selection",
+            "All Reused Assets",
+            "Maya Selection",
+        ])
+
+        self.shader_preview_btn = QtWidgets.QPushButton("Preview QDM")
+        self.shader_assign_btn = QtWidgets.QPushButton("Auto Assign Shaders")
+
+        self.shader_preview_btn.clicked.connect(self.preview_qdm)
+        self.shader_assign_btn.clicked.connect(self.auto_assign_shaders)
+
+        row_c.addWidget(self.shader_scope, 1)
+        row_c.addWidget(self.shader_preview_btn)
+        row_c.addWidget(self.shader_assign_btn)
+
+        root.addLayout(row_c)
+
+        self.report = QtWidgets.QPlainTextEdit()
+        self.report.setReadOnly(True)
+        root.addWidget(self.report, 1)
+
+        self.status_label = QtWidgets.QLabel("")
+        root.addWidget(self.status_label)
+
+    def _log(self, text=""):
+        self.report.appendPlainText(text)
+        sb = self.report.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+    def _set_status(self, text):
+        self.status_label.setText(text)
+
+    def _prefixes(self):
+        raw = self.prefixes_edit.text().strip()
+        if not raw:
+            return list(DEFAULT_PREFIXES)
+        vals = [x.strip().upper() for x in raw.split(",") if x.strip()]
+        return vals or list(DEFAULT_PREFIXES)
+
+    def current_tree(self):
         idx = self.tabs.currentIndex()
-        return [self.list_reused, self.list_kit, self.list_tex][idx]
+        if idx == 0:
+            return self.tree_reused, self.data_reused, "reused"
+        if idx == 1:
+            return self.tree_kit, self.data_kits, "kit"
+        return self.tree_texture, self.data_textures, "texture"
 
-    def _selected_assets(self):
-        items = self._active_list().selectedItems()
-        return [i.data(Qt.UserRole) for i in items]
+    def selected_names(self):
+        tree, data, kind = self.current_tree()
+        return tree.selected_names()
 
-    def _selected_data(self):
-        idx = self.tabs.currentIndex()
-        return [dict(self._cache_main, **self._cache_orphan), self._cache_kit, {}][idx]
+    def _copy_name(self, name):
+        copy_to_clipboard(name)
+        self._set_status("Copied: {}".format(name))
 
-    def _get_prefixes(self):
-        raw = self.field_prefixes.text()
-        vals = [x.strip() for x in raw.split(",") if x.strip()]
-        return vals if vals else list(DEFAULT_PREFIXES)
+    def copy_selected_name(self):
+        names = self.selected_names()
+        if not names:
+            cmds.warning("Nothing selected.")
+            return
+        self._copy_name(names[0])
 
-    def _get_category(self):
-        return self.field_cat.text().strip() or "Props"
+    def _scan(self):
+        self.current_asset = current_asset_from_scene()
+        self.current_category = current_asset_category_from_scene()
 
-    # ----------------------------------------------------------
-    #  SCAN
-    # ----------------------------------------------------------
+        self.scene_edit.setText(scene_path())
+        self.current_asset_edit.setText(self.current_asset or "")
+        self.category_edit.setText(self.current_category)
 
-    def _refresh(self):
-        self.list_reused.clear()
-        self.list_kit.clear()
-        self.list_tex.clear()
-
-        # Auto-detect scene asset
-        scene_asset = detect_scene_asset()
-        scene_path = cmds.file(q=True, sceneName=True) or "(unsaved scene)"
-        self.lbl_scene_path.setText(scene_path)
-        self._scene_asset_name = scene_asset
-        if scene_asset:
-            self.lbl_scene_asset.setText("Scene asset: {}".format(scene_asset))
-            self.lbl_scene_asset.setVisible(True)
-        else:
-            self.lbl_scene_asset.setVisible(False)
-
-        prefixes = self._get_prefixes()
-        main, kit, orphan = find_external_assets(
-            scan_all=self.cb_scan_all.isChecked(),
-            include_kits=self.cb_kits.isChecked(),
-            known_prefixes=prefixes
+        self.data_reused, self.data_kits = scan_reused_assets(
+            scan_all=self.scan_all_cb.isChecked(),
+            include_kits=self.kit_cb.isChecked(),
+            current_asset=self.current_asset
         )
+        self.data_textures = scan_textures()
 
-        self._cache_main   = main
-        self._cache_kit    = kit
-        self._cache_orphan = orphan
-        set_cache(main, kit, orphan)
+        self.tree_reused.set_data(self.data_reused)
+        self.tree_kit.set_data(self.data_kits)
+        self.tree_texture.set_data(self.data_textures)
 
-        merged_main = dict(main)
-        merged_main.update(orphan)
+        current_in_scene = bool(self.current_asset and self._find_nodes_for_asset_name(self.current_asset))
+        self.select_current_btn.setEnabled(current_in_scene)
+        self.load_current_btn.setEnabled(bool(self.current_asset))
 
-        def _fill(lst, data):
-            for name in sorted(data.keys()):
-                item = QtWidgets.QListWidgetItem("{:<52} [{}]".format(name, len(data[name])))
-                item.setData(Qt.UserRole, name)
-                lst.addItem(item)
-
-        _fill(self.list_reused, merged_main)
-        _fill(self.list_kit,    kit)
-
-        # Texture nodes (file nodes in scene)
-        tex_nodes = cmds.ls(type="file") or []
-        for t in sorted(tex_nodes):
-            item = QtWidgets.QListWidgetItem(t)
-            item.setData(Qt.UserRole, t)
-            self.list_tex.addItem(item)
-
-        occ_m = sum(len(v) for v in main.values())
-        occ_k = sum(len(v) for v in kit.values())
-        occ_o = sum(len(v) for v in orphan.values())
-        self.lbl_summary.setText(
-            "Reused: {} ({} occ)   KIT: {} ({} occ)   Textures: {}".format(
-                len(merged_main), occ_m + occ_o, len(kit), occ_k, len(tex_nodes)
+        self._set_status(
+            "Reused:{} | KIT:{} | Tex:{} | Current:{} | InScene:{}".format(
+                len(self.data_reused),
+                len(self.data_kits),
+                len(self.data_textures),
+                self.current_asset or "-",
+                "Yes" if current_in_scene else "No"
             )
         )
-        self.setWindowTitle("{} | {} assets".format(WINDOW_TITLE, len(main)))
-        self._update_current_asset_ui()
 
-        self._log("=" * 60)
-        self._log("[Scan] Reused: {}  KIT: {}  Orphans: {}  Textures: {}".format(
-            len(main), len(kit), len(orphan), len(tex_nodes)))
-        if orphan:
-            self._log("[Scan] Orphan assets (no known prefix):")
-            for name in sorted(orphan.keys()):
-                self._log("  !! {}  [{}]".format(name, len(orphan[name])))
-        self._log("=" * 60)
+        self._log("=" * 80)
+        self._log("SCAN")
+        self._log("Scene   : {}".format(scene_path()))
+        self._log("Current : {}".format(self.current_asset or "-"))
+        self._log("Category: {}".format(self.current_category))
+        self._log("Reused  : {}".format(len(self.data_reused)))
+        self._log("KIT     : {}".format(len(self.data_kits)))
+        self._log("Texture : {}".format(len(self.data_textures)))
+        self._log("=" * 80)
 
-    # ----------------------------------------------------------
-    #  SELECTION
-    # ----------------------------------------------------------
-
-    def _on_select(self):
-        assets = self._selected_assets()
-        self.field_asset_name.setText(assets[0] if assets else "")
-
-    def _on_double_click(self, item):
-        name = item.data(Qt.UserRole)
-        if name:
-            clipboard = QtWidgets.QApplication.clipboard()
-            clipboard.setText(name)
-            self.field_asset_name.setText(name)
-            self._log("[Copy] {}".format(name))
-
-    def _copy_name(self):
-        name = self.field_asset_name.text().strip()
-        if not name:
-            assets = self._selected_assets()
-            name = assets[0] if assets else ""
-        if name:
-            clipboard = QtWidgets.QApplication.clipboard()
-            clipboard.setText(name)
-            self._log("[Copy] {}".format(name))
-
-    def _import_from_field(self):
-        name = self.field_asset_name.text().strip()
-        if not name:
-            cmds.warning("[Import] Asset Name is empty.")
-            return
-        category = self._get_category()
-        prefixes = self._get_prefixes()
-        self._log("[Import] {}  cat={}".format(name, category))
-        _do_load(name, category, prefixes, self._log)
-        try:
-            cmds.refresh(force=True)
-        except Exception:
-            pass
-
-    def _update_current_asset_ui(self):
-        if not self._scene_asset_name:
-            self.lbl_current_asset.setText("-")
-            self.lbl_current_category.setText("Unknown")
-            self.btn_select_current.setEnabled(False)
-            return
-
-        merged_main = dict(self._cache_main, **self._cache_orphan)
-        if self._scene_asset_name in merged_main:
-            self._scene_asset_category = "Reused Assets"
-            detected = True
-        elif self._scene_asset_name in self._cache_kit:
-            self._scene_asset_category = "KIT"
-            detected = True
-        else:
-            self._scene_asset_category = "Unknown"
-            detected = False
-
-        self.lbl_current_asset.setText(self._scene_asset_name)
-        self.lbl_current_category.setText(self._scene_asset_category)
-        self.btn_select_current.setEnabled(detected)
-        if detected and not self.field_asset_name.text().strip():
-            self.field_asset_name.setText(self._scene_asset_name)
-
-    def _select_current_asset(self):
-        name = self._scene_asset_name
-        if not name:
-            cmds.warning("[Current] No scene asset detected.")
-            return
-        merged_main = dict(self._cache_main, **self._cache_orphan)
-        if name in merged_main:
-            self.tabs.setCurrentIndex(0)
-            lst = self.list_reused
-            data = merged_main
-        elif name in self._cache_kit:
-            self.tabs.setCurrentIndex(1)
-            lst = self.list_kit
-            data = self._cache_kit
-        else:
-            cmds.warning("[Current] Scene asset not found in scanned results.")
-            return
-
-        lst.clearSelection()
-        for i in range(lst.count()):
-            item = lst.item(i)
-            if item.data(Qt.UserRole) == name:
-                item.setSelected(True)
-                lst.scrollToItem(item, QtWidgets.QAbstractItemView.PositionAtCenter)
-                break
-        self.field_asset_name.setText(name)
-        self._log("[Current] {} [{}]".format(name, self._scene_asset_category))
-
-    def _select_nodes(self):
-        data   = self._selected_data()
-        assets = self._selected_assets()
-        nodes  = []
-        for a in assets:
-            nodes.extend(data.get(a, []))
-        if not nodes:
-            cmds.warning("[Scanner] No asset selected.")
-            return
-        cmds.select(nodes, r=True)
-        self._log("[Select] {} node(s)".format(len(nodes)))
-
-    def _select_all(self):
+    def _find_nodes_for_asset_name(self, asset_name):
         nodes = []
-        for vals in self._cache_main.values():   nodes.extend(vals)
-        for vals in self._cache_kit.values():    nodes.extend(vals)
-        for vals in self._cache_orphan.values(): nodes.extend(vals)
+        asset_name = (asset_name or "").upper()
+
+        for k, vals in self.data_reused.items():
+            if k == asset_name:
+                nodes.extend(vals)
+
+        for k, vals in self.data_kits.items():
+            if k == asset_name:
+                nodes.extend(vals)
+
         if not nodes:
-            cmds.warning("[Scanner] Nothing cached — run scan first.")
+            raw_nodes = cmds.ls(type="transform", long=True) or []
+            for node in raw_nodes:
+                detected = extract_main_name_from_string(node) or extract_kit_name_from_string(node)
+                if detected == asset_name:
+                    nodes.append(node)
+
+        return list(set(nodes))
+
+    def select_current_asset_nodes(self):
+        if not self.current_asset:
+            cmds.warning("No current asset found from scene path.")
             return
+
+        nodes = self._find_nodes_for_asset_name(self.current_asset)
+        if not nodes:
+            cmds.warning("Current asset not found in scene.")
+            return
+
         cmds.select(nodes, r=True)
-        self._log("[Select All] {} node(s)".format(len(nodes)))
+        self._set_status("Selected current asset: {} [{} node(s)]".format(self.current_asset, len(nodes)))
+        self._log("SELECT CURRENT {} [{} node(s)]".format(self.current_asset, len(nodes)))
 
-    def _print_detail(self):
-        data   = self._selected_data()
-        assets = self._selected_assets()
-        if not assets:
-            cmds.warning("[Scanner] No asset selected.")
-            return
-        self._log("-" * 60)
-        for a in assets:
-            nodes = data.get(a, [])
-            self._log("{}  [{} occurrence(s)]".format(a, len(nodes)))
-            for n in nodes:
-                self._log("   {}".format(n))
-        self._log("-" * 60)
+    def _selected_scene_nodes_from_current_tab(self):
+        tree, data, kind = self.current_tree()
+        names = tree.selected_names()
+        nodes = []
+        for name in names:
+            nodes.extend(data.get(name, []))
+        return list(set(nodes))
 
-    # ----------------------------------------------------------
-    #  LOAD
-    # ----------------------------------------------------------
-
-    def _iter_assets_to_load(self):
-        assets = self._selected_assets()
-        if assets:
-            return assets
-        return sorted(list(self._cache_main.keys()) + list(self._cache_orphan.keys()) + list(self._cache_kit.keys()))
-
-    def _load_list(self):
-        assets   = self._iter_assets_to_load()
-        category = self._get_category()
-        prefixes = self._get_prefixes()
-        if not assets:
-            cmds.warning("[Load] No assets. Run scan first.")
-            return
-        self._log("=" * 60)
-        self._log("[Load] {} asset(s)  cat={}".format(len(assets), category))
-        ok = err = 0
-        for asset in assets:
-            if _do_load(asset, category, prefixes, self._log):
-                ok += 1
-            else:
-                err += 1
-            try:
-                cmds.refresh(force=True)
-            except Exception:
-                pass
-        self._log("[Load] Done -> {} OK  {} FAIL".format(ok, err))
-        self._log("=" * 60)
-
-    def _load_maya(self):
-        category = self._get_category()
-        prefixes = self._get_prefixes()
-        sel = cmds.ls(selection=True, long=True) or []
-        if not sel:
-            cmds.warning("[Load] Nothing selected in Maya.")
-            return
-        found = set()
-        for node in sel:
-            n = extract_main_name(node) or extract_kit_name(node)
-            if n:
-                found.add(n)
-        if not found:
-            cmds.warning("[Load] No recognizable names in Maya selection.")
-            return
-        assets = sorted(found)
-        self._log("=" * 60)
-        self._log("[Load Maya] {} asset(s)  cat={}".format(len(assets), category))
-        ok = err = 0
-        for asset in assets:
-            if _do_load(asset, category, prefixes, self._log):
-                ok += 1
-            else:
-                err += 1
-            try:
-                cmds.refresh(force=True)
-            except Exception:
-                pass
-        self._log("[Load Maya] Done -> {} OK  {} FAIL".format(ok, err))
-        self._log("=" * 60)
-
-    def _load_textures(self):
-        """Load texture assets from list selection — skip if file node already exists in scene."""
-        assets   = self._selected_assets()
-        category = self._get_category()
-        prefixes = self._get_prefixes()
-        if not assets:
-            cmds.warning("[Textures] No texture selected in Textures tab.")
-            return
-        existing_files = set(cmds.ls(type="file") or [])
-        self._log("=" * 60)
-        self._log("[Textures] {} selected  ({} file nodes in scene)".format(len(assets), len(existing_files)))
-        ok = skip = err = 0
-        for asset in assets:
-            if asset in existing_files:
-                self._log("  [SKIP] {} already in scene".format(asset))
-                skip += 1
-                continue
-            if _do_load(asset, category, prefixes, self._log):
-                ok += 1
-            else:
-                err += 1
-        self._log("[Textures] Done -> {} loaded  {} skipped  {} failed".format(ok, skip, err))
-        self._log("=" * 60)
-
-    # ----------------------------------------------------------
-    #  SHADERS
-    # ----------------------------------------------------------
-
-    def _get_shader_nodes(self):
-        if self.rb_shader_list.isChecked():
-            data   = self._selected_data()
-            assets = self._selected_assets()
-            nodes  = []
-            for a in assets:
-                nodes.extend(data.get(a, []))
-            if not nodes:
-                cmds.warning("[Shader] No asset selected in list.")
-            return nodes
-        if self.rb_shader_all.isChecked():
+    def select_selected_nodes(self):
+        tree, data, kind = self.current_tree()
+        if kind == "texture":
+            names = tree.selected_names()
             nodes = []
-            for vals in self._cache_main.values():   nodes.extend(vals)
-            for vals in self._cache_kit.values():    nodes.extend(vals)
-            for vals in self._cache_orphan.values(): nodes.extend(vals)
+            for name in names:
+                nodes.extend(data.get(name, []))
+            nodes = list(set(nodes))
             if not nodes:
-                cmds.warning("[Shader] No scanned assets.")
-            return nodes
+                cmds.warning("No texture nodes found.")
+                return
+            cmds.select(nodes, r=True)
+            self._set_status("{} texture node(s) selected".format(len(nodes)))
+            self._log("SELECT {} texture node(s)".format(len(nodes)))
+            return
 
-        # Maya Selection mode fallback logic:
-        # current scene asset -> all scanned -> maya selection
-        merged_main = dict(self._cache_main, **self._cache_orphan)
-        if self._scene_asset_name in merged_main:
-            return merged_main[self._scene_asset_name]
-        if self._scene_asset_name in self._cache_kit:
-            return self._cache_kit[self._scene_asset_name]
+        nodes = self._selected_scene_nodes_from_current_tab()
+        if not nodes:
+            cmds.warning("No nodes found from current selection.")
+            return
+
+        cmds.select(nodes, r=True)
+        self._set_status("{} node(s) selected".format(len(nodes)))
+        self._log("SELECT {} node(s)".format(len(nodes)))
+
+    def print_details(self):
+        tree, data, kind = self.current_tree()
+        names = tree.selected_names()
+        if not names:
+            cmds.warning("Nothing selected.")
+            return
+
+        self._log("-" * 80)
+        self._log("DETAILS [{}]".format(kind.upper()))
+        for name in names:
+            vals = data.get(name, [])
+            self._log("{}  [{}]".format(name, len(vals)))
+            for v in vals:
+                self._log("    {}".format(v))
+        self._log("-" * 80)
+
+    def _scene_known_asset_names(self):
+        out = set(self.data_reused.keys())
+        out.update(self.data_kits.keys())
+        if self.current_asset:
+            out.add(self.current_asset)
+        return out
+
+    def _is_asset_already_in_scene(self, asset_name):
+        asset_name = asset_name.upper()
+        existing = self._scene_known_asset_names()
+
+        if asset_name in existing:
+            return True
+
+        for e in existing:
+            if e == asset_name:
+                return True
+            if e.endswith("_" + asset_name):
+                return True
+            if asset_name.endswith("_" + e):
+                return True
+        return False
+
+    def _do_load_one(self, asset_name, category):
+        try:
+            from qdTools.qdAssembly.qdUtils.qdLoad import QDLoad
+        except Exception:
+            raise RuntimeError("Cannot import QDLoad")
+
+        candidates = build_catalog_candidates(asset_name, category, self._prefixes())
+
+        self._log("LOAD {}".format(asset_name))
+        for candidate in candidates:
+            try:
+                self._log("    try by_catalog({}, {})".format(repr(candidate), repr(category)))
+                obj = QDLoad.by_catalog(candidate, category)
+                if obj is None:
+                    raise RuntimeError("QDLoad.by_catalog returned None")
+                obj.update_status(b_recursive=True)
+                self._log("    OK {}".format(candidate))
+                return True, candidate
+            except Exception as e:
+                self._log("    FAIL {} -> {}".format(candidate, e))
+
+        return False, None
+
+    def _run_load_batch(self, names, category, title):
+        if not names:
+            cmds.warning("Nothing to load.")
+            return
+
+        ok = []
+        skipped = []
+        failed = []
+
+        progress = QtWidgets.QProgressDialog("Loading...", "Cancel", 0, len(names), self)
+        progress.setWindowTitle(title)
+        progress.setWindowModality(QtCore.Qt.WindowModal)
+        progress.setMinimumDuration(0)
+
+        for i, name in enumerate(names):
+            progress.setValue(i)
+            progress.setLabelText("Loading {}".format(name))
+            QtWidgets.QApplication.processEvents()
+
+            if progress.wasCanceled():
+                break
+
+            if self.skip_existing_cb.isChecked() and self._is_asset_already_in_scene(name):
+                skipped.append(name)
+                self._log("SKIP {} (already in scene)".format(name))
+                continue
+
+            try:
+                result, used = self._do_load_one(name, category)
+                if result:
+                    ok.append((name, used))
+                else:
+                    failed.append((name, "No candidate worked"))
+            except Exception as e:
+                failed.append((name, str(e)))
+                self._log("CRASH-PROTECT {} -> {}".format(name, e))
+
+            try:
+                cmds.refresh(force=True)
+            except Exception:
+                pass
+
+        progress.setValue(len(names))
+
+        self._log("=" * 80)
+        self._log(title.upper())
+        self._log("OK [{}]".format(len(ok)))
+        for src, used in ok:
+            self._log("    {} -> {}".format(src, used))
+        self._log("SKIP [{}]".format(len(skipped)))
+        for s in skipped:
+            self._log("    {}".format(s))
+        self._log("FAIL [{}]".format(len(failed)))
+        for src, err in failed:
+            self._log("    {} -> {}".format(src, err))
+        self._log("=" * 80)
+
+        self._scan()
+
+    def load_from_list(self):
+        tree, data, kind = self.current_tree()
+        category = self.category_edit.text().strip() or "Props"
+
+        if kind == "texture":
+            cmds.warning("Texture tab is scan only.")
+            return
+
+        names = tree.selected_names()
+        if not names:
+            names = sorted(data.keys())
+
+        self._run_load_batch(names, category, "Load From List")
+
+    def load_from_maya_selection(self):
+        sel = cmds.ls(selection=True, long=True) or []
+        category = self.category_edit.text().strip() or "Props"
+
+        if not sel:
+            cmds.warning("Nothing selected in Maya.")
+            return
+
+        found = []
+        seen = set()
+
+        for node in sel:
+            detected = extract_main_name_from_string(node) or extract_kit_name_from_string(node)
+            if detected and detected not in seen:
+                seen.add(detected)
+                found.append(detected)
+
+        if not found:
+            cmds.warning("No recognizable asset found in Maya selection.")
+            return
+
+        self._run_load_batch(found, category, "Load From Maya Selection")
+
+    def load_current_asset(self):
+        if not self.current_asset:
+            cmds.warning("No current asset found from scene path.")
+            return
+        category = self.category_edit.text().strip() or "Props"
+        self._run_load_batch([self.current_asset], category, "Load Current Asset")
+
+    def preview_qdm(self):
+        qdms = all_qdm_candidates()
+        self._log("=" * 80)
+        self._log("QDM CANDIDATES [{}]".format(len(qdms)))
+        for q in qdms:
+            self._log("    {}".format(q))
+        self._log("=" * 80)
+
+    def _shader_target_nodes(self):
+        mode = self.shader_scope.currentText()
+
+        if mode == "Current Asset":
+            if self.current_asset:
+                return self._find_nodes_for_asset_name(self.current_asset)
+            return []
+
+        if mode == "List Selection":
+            return self._selected_scene_nodes_from_current_tab()
+
+        if mode == "All Reused Assets":
+            nodes = []
+            for vals in self.data_reused.values():
+                nodes.extend(vals)
+            for vals in self.data_kits.values():
+                nodes.extend(vals)
+            return list(set(nodes))
+
+        if mode == "Maya Selection":
+            return cmds.ls(selection=True, long=True) or []
+
+        # Auto
+        if self.current_asset:
+            cur_nodes = self._find_nodes_for_asset_name(self.current_asset)
+            if cur_nodes:
+                return cur_nodes
 
         nodes = []
-        for vals in self._cache_main.values():
+        for vals in self.data_reused.values():
             nodes.extend(vals)
-        for vals in self._cache_kit.values():
-            nodes.extend(vals)
-        for vals in self._cache_orphan.values():
+        for vals in self.data_kits.values():
             nodes.extend(vals)
         if nodes:
-            return nodes
+            return list(set(nodes))
 
-        nodes = cmds.ls(selection=True, long=True) or []
-        if not nodes:
-            cmds.warning("[Shader] Nothing available (no current asset, no scanned assets, no Maya selection).")
-        return nodes
+        return cmds.ls(selection=True, long=True) or []
 
-    def _auto_assign_shaders(self):
-        nodes = self._get_shader_nodes()
+    def auto_assign_shaders(self):
+        nodes = self._shader_target_nodes()
         if not nodes:
+            cmds.warning("No target nodes found for shader auto-assign.")
+            self._log("[Shader] No target nodes found.")
             return
 
-        meshes = _meshes_under(nodes)
-        assigned = 0
-        skipped  = []
-        not_found = set()
+        meshes = meshes_under(nodes)
+        converted = []
+        missing = []
+        seen_missing = set()
 
-        self._log("=" * 60)
-        self._log("[Shader] Auto-Assign  mode={}  {} mesh(es)".format(
-            "maya" if self.rb_shader_maya.isChecked()
-            else "list" if self.rb_shader_list.isChecked() else "all",
-            len(meshes)
-        ))
+        self._log("=" * 80)
+        self._log("AUTO ASSIGN SHADERS")
+        self._log("Target nodes : {}".format(len(nodes)))
+        self._log("Meshes       : {}".format(len(meshes)))
 
         for mesh in meshes:
-            ses = _ses_on_mesh(mesh)
-            if not ses:
-                continue
-            for se in ses:
-                shader = _surface_shader(se)
+            for sg in shading_engines_on_mesh(mesh):
+                shader = surface_shader_from_sg(sg)
                 if not shader:
                     continue
-                short_sh  = strip_ns(shader)
-                sh_type   = _shader_type(shader)
-                is_qds    = short_sh.startswith("QDS_")
-                is_basic  = sh_type in BLINN_PHONG_LAMBERT
 
-                if not (is_qds or is_basic):
+                short_shader = strip_ns(shader)
+                if not short_shader.startswith("QDS_"):
                     continue
 
-                qdm = _find_qdm(shader) if is_qds else None
+                qdm = find_qdm_from_qds(shader)
 
                 if qdm:
                     try:
-                        _assign_shader(mesh, qdm)
-                        self._log("  [OK]   {} : {} ({}) -> {}".format(
-                            short_name(mesh), short_sh, sh_type, strip_ns(qdm)))
-                        assigned += 1
+                        assign_shader(mesh, qdm)
+                        converted.append((mesh, shader, qdm))
                     except Exception as e:
-                        self._log("  [FAIL] {} -> {} : {}".format(short_name(mesh), qdm, e))
-                        not_found.add(short_sh)
+                        key = "{} -> ASSIGN FAIL {}".format(shader, e)
+                        if key not in seen_missing:
+                            seen_missing.add(key)
+                            missing.append((shader, "ASSIGN FAIL: {}".format(e)))
                 else:
-                    reason = "no QDM_ found" if is_qds else "basic shader ({}) — no QDM_ target".format(sh_type)
-                    self._log("  [SKIP] {} : {} -> {}".format(short_name(mesh), short_sh, reason))
-                    skipped.append(short_sh)
-                    if is_qds:
-                        not_found.add(short_sh)
+                    if short_shader not in seen_missing:
+                        seen_missing.add(short_shader)
+                        missing.append((shader, "QDM not found"))
 
-        self._log("")
-        self._log("  Assigned : {}".format(assigned))
-        self._log("  Skipped  : {}".format(len(skipped)))
-        if not_found:
-            self._log("  QDM_ NOT FOUND for:")
-            for s in sorted(not_found):
-                self._log("    {} -> QDM_{} : MISSING".format(s, s[4:] if s.startswith("QDS_") else s))
-        self._log("=" * 60)
+        self._log("CONVERTED [{}]".format(len(converted)))
+        for mesh, qds, qdm in converted:
+            self._log("    {} : {} -> {}".format(short_name(mesh), qds, qdm))
 
-    def _preview_shaders(self):
-        all_qdm = _all_qdm_candidates()
-        self._log("[Shader] QDM_ candidates ({}) :".format(len(all_qdm)))
-        for n in all_qdm:
-            self._log("  {}".format(n))
+        self._log("MISSING [{}]".format(len(missing)))
+        for qds, msg in missing:
+            self._log("    {} -> {}".format(qds, msg))
 
+        self._log("=" * 80)
 
-# ============================================================
-#  LAUNCH
-# ============================================================
+        if not converted and not missing:
+            cmds.warning("No QDS shader found on target meshes.")
 
-def launch():
-    # Close existing instance
-    for w in QtWidgets.QApplication.topLevelWidgets():
-        if w.objectName() == WINDOW_OBJ:
-            w.close()
-            w.deleteLater()
-
-    win = ExternalAssetScanner()
-    win.show()
-    return win
+    def closeEvent(self, event):
+        super(ExternalAssetScannerUI, self).closeEvent(event)
 
 
-launch()
+def show_external_asset_scanner():
+    parent = maya_main_window()
+    if parent:
+        for w in parent.findChildren(QtWidgets.QDialog, WINDOW_OBJECT_NAME):
+            try:
+                w.close()
+                w.deleteLater()
+            except Exception:
+                pass
+
+    ui = ExternalAssetScannerUI(parent=parent)
+    ui.show()
+    ui.raise_()
+    ui.activateWindow()
+    return ui
+
+
+scanner_ui = show_external_asset_scanner()

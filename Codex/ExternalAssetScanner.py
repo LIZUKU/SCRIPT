@@ -4,8 +4,8 @@ External Asset Scanner  v8  -  Maya 2022  (PySide2 / Qt)
 
 Features:
 - Auto-detect current asset from scene path (e.g. RELIC_DENDO_TEMPLE_B)
-- Scan Standard / KIT / Orphan / Textures tabs
-- Orphan tab: Standard assets with no known prefix (likely unclassified)
+- Scan Reused Assets / KIT / Textures tabs
+- Reused tab contains recognized + unclassified assets
 - Load assets:  QDLoad.by_catalog(name, category).update_status(b_recursive=True)
 - Check texture existence in scene before load
 - Auto-assign shaders: QDS_* / Blinn / Phong / Lambert  ->  QDM_*
@@ -29,12 +29,12 @@ from shiboken2 import wrapInstance
 #  CONFIG
 # ============================================================
 
-WINDOW_TITLE  = "External Asset Scanner  v8"
-WINDOW_OBJ    = "ExtAssetScannerV8"
+WINDOW_TITLE  = "External Asset Scanner  v9"
+WINDOW_OBJ    = "ExtAssetScannerV9"
 
 CACHE_MAIN    = "extAssetScanner_main_v8"
 CACHE_KIT     = "extAssetScanner_kit_v8"
-CACHE_ORPHAN  = "extAssetScanner_orphan_v8"
+CACHE_ORPHAN  = "extAssetScanner_orphan_v9"
 
 DEFAULT_PREFIXES = ["ACC", "ARC", "QDD", "AGRA", "RELIC"]
 
@@ -432,6 +432,8 @@ class ExternalAssetScanner(QtWidgets.QDialog):
         self._cache_main   = {}
         self._cache_kit    = {}
         self._cache_orphan = {}
+        self._scene_asset_name = ""
+        self._scene_asset_category = "Unknown"
 
         self._build_ui()
         self._refresh()
@@ -458,9 +460,28 @@ class ExternalAssetScanner(QtWidgets.QDialog):
         hdr.addWidget(self.lbl_scene_asset)
         root.addLayout(hdr)
 
-        self.lbl_summary = QtWidgets.QLabel("Standard: 0   KIT: 0   Orphans: 0")
+        self.lbl_summary = QtWidgets.QLabel("Reused: 0   KIT: 0   Textures: 0")
         self.lbl_summary.setStyleSheet("color:#888; font-size:11px;")
         root.addWidget(self.lbl_summary)
+
+        info_grp = QtWidgets.QGroupBox("Scene Context")
+        info_lay = QtWidgets.QGridLayout(info_grp)
+        info_lay.setHorizontalSpacing(12)
+        info_lay.addWidget(QtWidgets.QLabel("Scene:"), 0, 0)
+        self.lbl_scene_path = QtWidgets.QLabel("-")
+        self.lbl_scene_path.setStyleSheet("color:#9d9d9d;")
+        info_lay.addWidget(self.lbl_scene_path, 0, 1, 1, 3)
+        info_lay.addWidget(QtWidgets.QLabel("Current Asset:"), 1, 0)
+        self.lbl_current_asset = QtWidgets.QLabel("-")
+        info_lay.addWidget(self.lbl_current_asset, 1, 1)
+        info_lay.addWidget(QtWidgets.QLabel("Category:"), 1, 2)
+        self.lbl_current_category = QtWidgets.QLabel("Unknown")
+        info_lay.addWidget(self.lbl_current_category, 1, 3)
+        self.btn_select_current = QtWidgets.QPushButton("Select Current Asset")
+        self.btn_select_current.setEnabled(False)
+        self.btn_select_current.clicked.connect(self._select_current_asset)
+        info_lay.addWidget(self.btn_select_current, 2, 3)
+        root.addWidget(info_grp)
 
         # --- Scan options ---
         scan_grp = QtWidgets.QGroupBox("Scan Options")
@@ -482,35 +503,37 @@ class ExternalAssetScanner(QtWidgets.QDialog):
         scan_lay.addWidget(btn_sel_all)
         root.addWidget(scan_grp)
 
-        # --- Selected field ---
+        # --- Asset name field ---
         sel_lay = QtWidgets.QHBoxLayout()
-        sel_lay.addWidget(QtWidgets.QLabel("Selected:"))
-        self.field_selected = QtWidgets.QLineEdit()
-        self.field_selected.setReadOnly(True)
-        sel_lay.addWidget(self.field_selected)
+        sel_lay.addWidget(QtWidgets.QLabel("Asset Name:"))
+        self.field_asset_name = QtWidgets.QLineEdit()
+        self.field_asset_name.setPlaceholderText("Click list item or paste/type an asset name")
+        sel_lay.addWidget(self.field_asset_name)
         btn_copy = QtWidgets.QPushButton("Copy")
         btn_copy.clicked.connect(self._copy_name)
+        btn_import = QtWidgets.QPushButton("Import")
+        btn_import.setObjectName("load")
+        btn_import.clicked.connect(self._import_from_field)
         btn_sel_nodes = QtWidgets.QPushButton("Select Nodes")
         btn_sel_nodes.clicked.connect(self._select_nodes)
         btn_detail = QtWidgets.QPushButton("Print Detail")
         btn_detail.clicked.connect(self._print_detail)
         sel_lay.addWidget(btn_copy)
+        sel_lay.addWidget(btn_import)
         sel_lay.addWidget(btn_sel_nodes)
         sel_lay.addWidget(btn_detail)
         root.addLayout(sel_lay)
 
-        # --- Tabs: Standard / KIT / Orphans / Textures ---
+        # --- Tabs: Reused Assets / KIT / Textures ---
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.setFixedHeight(220)
 
-        self.list_std    = self._make_list()
+        self.list_reused = self._make_list()
         self.list_kit    = self._make_list()
-        self.list_orphan = self._make_list()
         self.list_tex    = self._make_list()
 
-        self.tabs.addTab(self._wrap(self.list_std),    "Standard")
+        self.tabs.addTab(self._wrap(self.list_reused), "Reused Assets")
         self.tabs.addTab(self._wrap(self.list_kit),    "KIT")
-        self.tabs.addTab(self._wrap(self.list_orphan), "Orphans ⚠")
         self.tabs.addTab(self._wrap(self.list_tex),    "Textures")
         root.addWidget(self.tabs)
 
@@ -618,7 +641,7 @@ class ExternalAssetScanner(QtWidgets.QDialog):
 
     def _active_list(self):
         idx = self.tabs.currentIndex()
-        return [self.list_std, self.list_kit, self.list_orphan, self.list_tex][idx]
+        return [self.list_reused, self.list_kit, self.list_tex][idx]
 
     def _selected_assets(self):
         items = self._active_list().selectedItems()
@@ -626,7 +649,7 @@ class ExternalAssetScanner(QtWidgets.QDialog):
 
     def _selected_data(self):
         idx = self.tabs.currentIndex()
-        return [self._cache_main, self._cache_kit, self._cache_orphan, {}][idx]
+        return [dict(self._cache_main, **self._cache_orphan), self._cache_kit, {}][idx]
 
     def _get_prefixes(self):
         raw = self.field_prefixes.text()
@@ -641,13 +664,15 @@ class ExternalAssetScanner(QtWidgets.QDialog):
     # ----------------------------------------------------------
 
     def _refresh(self):
-        self.list_std.clear()
+        self.list_reused.clear()
         self.list_kit.clear()
-        self.list_orphan.clear()
         self.list_tex.clear()
 
         # Auto-detect scene asset
         scene_asset = detect_scene_asset()
+        scene_path = cmds.file(q=True, sceneName=True) or "(unsaved scene)"
+        self.lbl_scene_path.setText(scene_path)
+        self._scene_asset_name = scene_asset
         if scene_asset:
             self.lbl_scene_asset.setText("Scene asset: {}".format(scene_asset))
             self.lbl_scene_asset.setVisible(True)
@@ -666,15 +691,17 @@ class ExternalAssetScanner(QtWidgets.QDialog):
         self._cache_orphan = orphan
         set_cache(main, kit, orphan)
 
+        merged_main = dict(main)
+        merged_main.update(orphan)
+
         def _fill(lst, data):
             for name in sorted(data.keys()):
                 item = QtWidgets.QListWidgetItem("{:<52} [{}]".format(name, len(data[name])))
                 item.setData(Qt.UserRole, name)
                 lst.addItem(item)
 
-        _fill(self.list_std,    main)
+        _fill(self.list_reused, merged_main)
         _fill(self.list_kit,    kit)
-        _fill(self.list_orphan, orphan)
 
         # Texture nodes (file nodes in scene)
         tex_nodes = cmds.ls(type="file") or []
@@ -687,15 +714,15 @@ class ExternalAssetScanner(QtWidgets.QDialog):
         occ_k = sum(len(v) for v in kit.values())
         occ_o = sum(len(v) for v in orphan.values())
         self.lbl_summary.setText(
-            "Standard: {} ({} occ)   KIT: {} ({} occ)   Orphans: {} ({} occ)   Textures: {}".format(
-                len(main), occ_m, len(kit), occ_k, len(orphan), occ_o, len(tex_nodes)
+            "Reused: {} ({} occ)   KIT: {} ({} occ)   Textures: {}".format(
+                len(merged_main), occ_m + occ_o, len(kit), occ_k, len(tex_nodes)
             )
         )
         self.setWindowTitle("{} | {} assets".format(WINDOW_TITLE, len(main)))
-        self.field_selected.clear()
+        self._update_current_asset_ui()
 
         self._log("=" * 60)
-        self._log("[Scan] Standard: {}  KIT: {}  Orphans: {}  Textures: {}".format(
+        self._log("[Scan] Reused: {}  KIT: {}  Orphans: {}  Textures: {}".format(
             len(main), len(kit), len(orphan), len(tex_nodes)))
         if orphan:
             self._log("[Scan] Orphan assets (no known prefix):")
@@ -709,22 +736,91 @@ class ExternalAssetScanner(QtWidgets.QDialog):
 
     def _on_select(self):
         assets = self._selected_assets()
-        self.field_selected.setText(assets[0] if assets else "")
+        self.field_asset_name.setText(assets[0] if assets else "")
 
     def _on_double_click(self, item):
         name = item.data(Qt.UserRole)
         if name:
             clipboard = QtWidgets.QApplication.clipboard()
             clipboard.setText(name)
-            self.field_selected.setText(name)
+            self.field_asset_name.setText(name)
             self._log("[Copy] {}".format(name))
 
     def _copy_name(self):
-        assets = self._selected_assets()
-        if assets:
+        name = self.field_asset_name.text().strip()
+        if not name:
+            assets = self._selected_assets()
+            name = assets[0] if assets else ""
+        if name:
             clipboard = QtWidgets.QApplication.clipboard()
-            clipboard.setText(assets[0])
-            self._log("[Copy] {}".format(assets[0]))
+            clipboard.setText(name)
+            self._log("[Copy] {}".format(name))
+
+    def _import_from_field(self):
+        name = self.field_asset_name.text().strip()
+        if not name:
+            cmds.warning("[Import] Asset Name is empty.")
+            return
+        category = self._get_category()
+        prefixes = self._get_prefixes()
+        self._log("[Import] {}  cat={}".format(name, category))
+        _do_load(name, category, prefixes, self._log)
+        try:
+            cmds.refresh(force=True)
+        except Exception:
+            pass
+
+    def _update_current_asset_ui(self):
+        if not self._scene_asset_name:
+            self.lbl_current_asset.setText("-")
+            self.lbl_current_category.setText("Unknown")
+            self.btn_select_current.setEnabled(False)
+            return
+
+        merged_main = dict(self._cache_main, **self._cache_orphan)
+        if self._scene_asset_name in merged_main:
+            self._scene_asset_category = "Reused Assets"
+            detected = True
+        elif self._scene_asset_name in self._cache_kit:
+            self._scene_asset_category = "KIT"
+            detected = True
+        else:
+            self._scene_asset_category = "Unknown"
+            detected = False
+
+        self.lbl_current_asset.setText(self._scene_asset_name)
+        self.lbl_current_category.setText(self._scene_asset_category)
+        self.btn_select_current.setEnabled(detected)
+        if detected and not self.field_asset_name.text().strip():
+            self.field_asset_name.setText(self._scene_asset_name)
+
+    def _select_current_asset(self):
+        name = self._scene_asset_name
+        if not name:
+            cmds.warning("[Current] No scene asset detected.")
+            return
+        merged_main = dict(self._cache_main, **self._cache_orphan)
+        if name in merged_main:
+            self.tabs.setCurrentIndex(0)
+            lst = self.list_reused
+            data = merged_main
+        elif name in self._cache_kit:
+            self.tabs.setCurrentIndex(1)
+            lst = self.list_kit
+            data = self._cache_kit
+        else:
+            cmds.warning("[Current] Scene asset not found in scanned results.")
+            return
+
+        lst.clearSelection()
+        for i in range(lst.count()):
+            item = lst.item(i)
+            if item.data(Qt.UserRole) == name:
+                item.setSelected(True)
+                lst.scrollToItem(item, QtWidgets.QAbstractItemView.PositionAtCenter)
+                break
+        self.field_asset_name.setText(name)
+        self._log("[Current] {} [{}]".format(name, self._scene_asset_category))
 
     def _select_nodes(self):
         data   = self._selected_data()
@@ -771,7 +867,7 @@ class ExternalAssetScanner(QtWidgets.QDialog):
         assets = self._selected_assets()
         if assets:
             return assets
-        return sorted(list(self._cache_main.keys()) + list(self._cache_kit.keys()))
+        return sorted(list(self._cache_main.keys()) + list(self._cache_orphan.keys()) + list(self._cache_kit.keys()))
 
     def _load_list(self):
         assets   = self._iter_assets_to_load()
@@ -855,12 +951,7 @@ class ExternalAssetScanner(QtWidgets.QDialog):
     # ----------------------------------------------------------
 
     def _get_shader_nodes(self):
-        if self.rb_shader_maya.isChecked():
-            nodes = cmds.ls(selection=True, long=True) or []
-            if not nodes:
-                cmds.warning("[Shader] Nothing selected in Maya.")
-            return nodes
-        elif self.rb_shader_list.isChecked():
+        if self.rb_shader_list.isChecked():
             data   = self._selected_data()
             assets = self._selected_assets()
             nodes  = []
@@ -869,7 +960,7 @@ class ExternalAssetScanner(QtWidgets.QDialog):
             if not nodes:
                 cmds.warning("[Shader] No asset selected in list.")
             return nodes
-        else:
+        if self.rb_shader_all.isChecked():
             nodes = []
             for vals in self._cache_main.values():   nodes.extend(vals)
             for vals in self._cache_kit.values():    nodes.extend(vals)
@@ -877,6 +968,29 @@ class ExternalAssetScanner(QtWidgets.QDialog):
             if not nodes:
                 cmds.warning("[Shader] No scanned assets.")
             return nodes
+
+        # Maya Selection mode fallback logic:
+        # current scene asset -> all scanned -> maya selection
+        merged_main = dict(self._cache_main, **self._cache_orphan)
+        if self._scene_asset_name in merged_main:
+            return merged_main[self._scene_asset_name]
+        if self._scene_asset_name in self._cache_kit:
+            return self._cache_kit[self._scene_asset_name]
+
+        nodes = []
+        for vals in self._cache_main.values():
+            nodes.extend(vals)
+        for vals in self._cache_kit.values():
+            nodes.extend(vals)
+        for vals in self._cache_orphan.values():
+            nodes.extend(vals)
+        if nodes:
+            return nodes
+
+        nodes = cmds.ls(selection=True, long=True) or []
+        if not nodes:
+            cmds.warning("[Shader] Nothing available (no current asset, no scanned assets, no Maya selection).")
+        return nodes
 
     def _auto_assign_shaders(self):
         nodes = self._get_shader_nodes()

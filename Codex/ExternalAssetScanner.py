@@ -198,7 +198,15 @@ def extract_texture_family_from_path(path):
 
 def list_texture_nodes():
     nodes = []
+    available_types = set()
+    try:
+        available_types = set(cmds.allNodeTypes() or [])
+    except Exception:
+        pass
+
     for t in ["file", "qdNodeBitmap"]:
+        if available_types and t not in available_types:
+            continue
         try:
             nodes.extend(cmds.ls(type=t) or [])
         except Exception:
@@ -1071,7 +1079,7 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
             cmds.warning("No QDS shader found on target meshes.")
 
     def closeEvent(self, event):
-        super(ExternalAssetScannerUI, self).closeEvent(event)
+        QtWidgets.QDialog.closeEvent(self, event)
 
 
 def show_external_asset_scanner():

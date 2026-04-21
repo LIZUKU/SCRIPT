@@ -424,13 +424,15 @@ class AssetTree(QtWidgets.QTreeWidget):
     def __init__(self, parent=None):
         super(AssetTree, self).__init__(parent)
         self.setColumnCount(2)
-        self.setHeaderLabels(["Name", "Count"])
+        self.setHeaderLabels(["Name", "Items"])
         self.setAlternatingRowColors(True)
         self.setRootIsDecorated(False)
         self.setSortingEnabled(True)
         self.sortByColumn(0, QtCore.Qt.AscendingOrder)
         self.itemDoubleClicked.connect(self._on_item_double_clicked)
         self.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self.setColumnWidth(1, 70)
+        self.headerItem().setToolTip(1, "Number of Maya nodes detected for this entry.")
 
     def _on_item_double_clicked(self, item, column):
         self.doubleClickedSignal.emit(item.text(0))
@@ -454,7 +456,8 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
 
         self.setObjectName(WINDOW_OBJECT_NAME)
         self.setWindowTitle("External Asset Scanner")
-        self.setMinimumSize(980, 760)
+        self.setMinimumSize(760, 620)
+        self.resize(820, 680)
 
         self.data_reused = {}
         self.data_kits = {}
@@ -468,7 +471,7 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
 
         self._build_ui()
         self._apply_style()
-        self._scan()
+        self._reset_ui_before_first_scan()
 
     def _apply_style(self):
         font = QtGui.QFont("Segoe UI", 9)
@@ -574,6 +577,12 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
         prefix_row.addWidget(self.prefixes_edit)
         root.addLayout(prefix_row)
 
+        self.hint_label = QtWidgets.QLabel(
+            "Click Scan to populate lists. Texture tab is diagnostic: it groups texture nodes by detected texture family."
+        )
+        self.hint_label.setWordWrap(True)
+        root.addWidget(self.hint_label)
+
         self.tabs = QtWidgets.QTabWidget()
         self.tree_reused = AssetTree()
         self.tree_kit = AssetTree()
@@ -658,17 +667,17 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
             "Maya Selection",
         ])
 
-        self.shader_preview_btn = QtWidgets.QPushButton("Preview QDM")
+        self.shader_maya_sel_btn = QtWidgets.QPushButton("Assign From Maya Selection")
         self.shader_assign_btn = QtWidgets.QPushButton("Auto Assign Shaders")
         self.shader_revert_btn = QtWidgets.QPushButton("Revert Last Assign")
         self.shader_revert_btn.setEnabled(False)
 
-        self.shader_preview_btn.clicked.connect(self.preview_qdm)
+        self.shader_maya_sel_btn.clicked.connect(self.assign_shaders_from_maya_selection)
         self.shader_assign_btn.clicked.connect(self.auto_assign_shaders)
         self.shader_revert_btn.clicked.connect(self.revert_last_auto_assign)
 
         row_c.addWidget(self.shader_scope, 1)
-        row_c.addWidget(self.shader_preview_btn)
+        row_c.addWidget(self.shader_maya_sel_btn)
         row_c.addWidget(self.shader_assign_btn)
         row_c.addWidget(self.shader_revert_btn)
 
@@ -689,6 +698,20 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
         self.status_label = QtWidgets.QLabel("")
         root.addWidget(self.status_label)
         self._on_log_toggled(self.log_box.isChecked())
+
+    def _reset_ui_before_first_scan(self):
+        self.current_asset = current_asset_from_scene()
+        self.current_category = current_asset_category_from_scene()
+        self.scene_edit.setText(scene_path())
+        self.current_asset_edit.setText(self.current_asset or "")
+        self.category_edit.setText(self.current_category)
+        self.tree_reused.clear()
+        self.tree_kit.clear()
+        self.tree_texture.clear()
+        self.tabs.setTabText(0, "Reused Assets (0)")
+        self.tabs.setTabText(1, "KIT (0)")
+        self.tabs.setTabText(2, "Textures (0)")
+        self._set_status("Ready. Click Scan to analyze scene.")
 
     def _log(self, text=""):
         self.report.appendPlainText(text)
@@ -1070,13 +1093,11 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
         category = self.category_edit.text().strip() or "Props"
         self._run_load_batch([self.current_asset], category, "Load Current Asset")
 
-    def preview_qdm(self):
-        qdms = all_qdm_candidates()
-        self._log("=" * 80)
-        self._log("QDM CANDIDATES [{}]".format(len(qdms)))
-        for q in qdms:
-            self._log("    {}".format(q))
-        self._log("=" * 80)
+    def assign_shaders_from_maya_selection(self):
+        prev = self.shader_scope.currentText()
+        self.shader_scope.setCurrentText("Maya Selection")
+        self._log("[Shader] Scope switched: {} -> Maya Selection".format(prev))
+        self.auto_assign_shaders()
 
     def _shader_target_nodes(self):
         mode = self.shader_scope.currentText()
@@ -1134,6 +1155,7 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
         self._log("Meshes       : {}".format(len(meshes)))
 
         for mesh in meshes:
+            mesh_assigned = False
             for sg in shading_engines_on_mesh(mesh):
                 shader = surface_shader_from_sg(sg)
                 if not shader:
@@ -1150,6 +1172,8 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
                         previous_sgs = shading_engines_on_mesh(mesh)
                         assign_shader(mesh, qdm)
                         converted.append((mesh, shader, qdm, previous_sgs))
+                        mesh_assigned = True
+                        break
                     except Exception as e:
                         key = "{} -> ASSIGN FAIL {}".format(shader, e)
                         if key not in seen_missing:
@@ -1159,6 +1183,8 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
                     if short_shader not in seen_missing:
                         seen_missing.add(short_shader)
                         missing.append((shader, "QDM not found"))
+            if mesh_assigned:
+                continue
 
         self._log("CONVERTED [{}]".format(len(converted)))
         for mesh, qds, qdm, _previous_sgs in converted:

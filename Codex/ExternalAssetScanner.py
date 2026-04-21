@@ -542,27 +542,39 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
         self.tree_reused.doubleClickedSignal.connect(self._copy_name)
         self.tree_kit.doubleClickedSignal.connect(self._copy_name)
         self.tree_texture.doubleClickedSignal.connect(self._copy_name)
+        self.tree_reused.itemSelectionChanged.connect(self._on_tree_selection_changed)
+        self.tree_kit.itemSelectionChanged.connect(self._on_tree_selection_changed)
+        self.tree_texture.itemSelectionChanged.connect(self._on_tree_selection_changed)
 
         self.tabs.addTab(self.tree_reused, "Reused Assets")
         self.tabs.addTab(self.tree_kit, "KIT")
         self.tabs.addTab(self.tree_texture, "Textures")
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
         root.addWidget(self.tabs, 1)
 
         row_a = QtWidgets.QHBoxLayout()
 
+        row_a.addWidget(QtWidgets.QLabel("Asset Name"))
+        self.asset_name_edit = QtWidgets.QLineEdit()
+        self.asset_name_edit.setPlaceholderText("Click from list or paste/type an asset name")
+
         self.copy_btn = QtWidgets.QPushButton("Copy")
+        self.import_btn = QtWidgets.QPushButton("Import")
         self.select_btn = QtWidgets.QPushButton("Select Nodes")
         self.detail_btn = QtWidgets.QPushButton("Details")
         self.select_current_btn = QtWidgets.QPushButton("Select Current Asset")
         self.select_current_btn.setEnabled(False)
 
-        self.copy_btn.clicked.connect(self.copy_selected_name)
+        self.copy_btn.clicked.connect(self.copy_asset_name_field)
+        self.import_btn.clicked.connect(self.import_from_asset_name_field)
         self.select_btn.clicked.connect(self.select_selected_nodes)
         self.detail_btn.clicked.connect(self.print_details)
         self.select_current_btn.clicked.connect(self.select_current_asset_nodes)
 
+        row_a.addWidget(self.asset_name_edit, 1)
         row_a.addWidget(self.copy_btn)
+        row_a.addWidget(self.import_btn)
         row_a.addWidget(self.select_btn)
         row_a.addWidget(self.detail_btn)
         row_a.addWidget(self.select_current_btn)
@@ -644,16 +656,41 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
         tree, data, kind = self.current_tree()
         return tree.selected_names()
 
+    def _normalized_asset_name_from_field(self):
+        return self.asset_name_edit.text().strip().upper()
+
+    def _set_asset_name_field(self, name):
+        if not name:
+            return
+        self.asset_name_edit.setText(name)
+
+    def _on_tree_selection_changed(self):
+        names = self.selected_names()
+        if names:
+            self._set_asset_name_field(names[0])
+
+    def _on_tab_changed(self, index):
+        self._on_tree_selection_changed()
+
     def _copy_name(self, name):
         copy_to_clipboard(name)
+        self._set_asset_name_field(name)
         self._set_status("Copied: {}".format(name))
 
-    def copy_selected_name(self):
-        names = self.selected_names()
-        if not names:
-            cmds.warning("Nothing selected.")
+    def copy_asset_name_field(self):
+        name = self._normalized_asset_name_from_field()
+        if not name:
+            cmds.warning("Asset Name field is empty.")
             return
-        self._copy_name(names[0])
+        self._copy_name(name)
+
+    def import_from_asset_name_field(self):
+        name = self._normalized_asset_name_from_field()
+        if not name:
+            cmds.warning("Asset Name field is empty.")
+            return
+        category = self.category_edit.text().strip() or "Props"
+        self._run_load_batch([name], category, "Import From Asset Name")
 
     def _scan(self):
         self.current_asset = current_asset_from_scene()
@@ -1052,6 +1089,14 @@ def show_external_asset_scanner():
     ui.raise_()
     ui.activateWindow()
     return ui
+
+
+class ExternalAssetScanner(ExternalAssetScannerUI):
+    pass
+
+
+def launch():
+    return show_external_asset_scanner()
 
 
 scanner_ui = show_external_asset_scanner()

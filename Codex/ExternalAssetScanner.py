@@ -433,6 +433,7 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
         self.data_reused = {}
         self.data_kits = {}
         self.data_textures = {}
+        self.last_shader_assignments = []
 
         self.current_asset = current_asset_from_scene()
         self.current_category = current_asset_category_from_scene()
@@ -521,7 +522,10 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
         self.kit_cb.setChecked(True)
 
         self.skip_existing_cb = QtWidgets.QCheckBox("Skip If In Scene")
-        self.skip_existing_cb.setChecked(True)
+        self.skip_existing_cb.setChecked(False)
+        self.skip_existing_cb.setToolTip(
+            "When enabled, loading is skipped only for exact asset names already detected in scene."
+        )
 
         self.scan_btn = QtWidgets.QPushButton("Scan")
         self.scan_btn.clicked.connect(self._scan)
@@ -620,13 +624,17 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
 
         self.shader_preview_btn = QtWidgets.QPushButton("Preview QDM")
         self.shader_assign_btn = QtWidgets.QPushButton("Auto Assign Shaders")
+        self.shader_revert_btn = QtWidgets.QPushButton("Revert Last Assign")
+        self.shader_revert_btn.setEnabled(False)
 
         self.shader_preview_btn.clicked.connect(self.preview_qdm)
         self.shader_assign_btn.clicked.connect(self.auto_assign_shaders)
+        self.shader_revert_btn.clicked.connect(self.revert_last_auto_assign)
 
         row_c.addWidget(self.shader_scope, 1)
         row_c.addWidget(self.shader_preview_btn)
         row_c.addWidget(self.shader_assign_btn)
+        row_c.addWidget(self.shader_revert_btn)
 
         root.addLayout(row_c)
 
@@ -836,19 +844,8 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
 
     def _is_asset_already_in_scene(self, asset_name):
         asset_name = asset_name.upper()
-        existing = self._scene_known_asset_names()
-
-        if asset_name in existing:
-            return True
-
-        for e in existing:
-            if e == asset_name:
-                return True
-            if e.endswith("_" + asset_name):
-                return True
-            if asset_name.endswith("_" + e):
-                return True
-        return False
+        existing = {x.upper() for x in self._scene_known_asset_names()}
+        return asset_name in existing
 
     def _do_load_one(self, asset_name, category):
         try:
@@ -886,6 +883,8 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
         progress.setWindowTitle(title)
         progress.setWindowModality(QtCore.Qt.WindowModal)
         progress.setMinimumDuration(0)
+        progress.setMinimumWidth(380)
+        progress.setMaximumWidth(460)
 
         for i, name in enumerate(names):
             progress.setValue(i)
@@ -1053,8 +1052,9 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
 
                 if qdm:
                     try:
+                        previous_sgs = shading_engines_on_mesh(mesh)
                         assign_shader(mesh, qdm)
-                        converted.append((mesh, shader, qdm))
+                        converted.append((mesh, shader, qdm, previous_sgs))
                     except Exception as e:
                         key = "{} -> ASSIGN FAIL {}".format(shader, e)
                         if key not in seen_missing:
@@ -1066,7 +1066,7 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
                         missing.append((shader, "QDM not found"))
 
         self._log("CONVERTED [{}]".format(len(converted)))
-        for mesh, qds, qdm in converted:
+        for mesh, qds, qdm, _previous_sgs in converted:
             self._log("    {} : {} -> {}".format(short_name(mesh), qds, qdm))
 
         self._log("MISSING [{}]".format(len(missing)))
@@ -1077,6 +1077,45 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
 
         if not converted and not missing:
             cmds.warning("No QDS shader found on target meshes.")
+            return
+
+        self.last_shader_assignments = [
+            {"mesh": mesh, "sgs": list(previous_sgs)}
+            for mesh, _qds, _qdm, previous_sgs in converted
+            if previous_sgs
+        ]
+        self.shader_revert_btn.setEnabled(bool(self.last_shader_assignments))
+
+    def revert_last_auto_assign(self):
+        if not self.last_shader_assignments:
+            cmds.warning("No previous auto-assign operation to revert.")
+            return
+
+        restored = 0
+        failed = 0
+        self._log("=" * 80)
+        self._log("REVERT LAST AUTO ASSIGN")
+
+        for entry in self.last_shader_assignments:
+            mesh = entry.get("mesh")
+            sgs = entry.get("sgs") or []
+            if not mesh or not sgs:
+                continue
+
+            try:
+                cmds.sets(mesh, e=True, forceElement=sgs[0])
+                restored += 1
+                self._log("    RESTORE {} -> {}".format(short_name(mesh), sgs[0]))
+            except Exception as e:
+                failed += 1
+                self._log("    FAIL {} -> {}".format(mesh, e))
+
+        self._log("RESTORED [{}]".format(restored))
+        self._log("FAILED   [{}]".format(failed))
+        self._log("=" * 80)
+
+        self.last_shader_assignments = []
+        self.shader_revert_btn.setEnabled(False)
 
     def closeEvent(self, event):
         QtWidgets.QDialog.closeEvent(self, event)

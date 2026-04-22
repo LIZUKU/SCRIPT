@@ -1,12 +1,13 @@
+# -*- coding: utf-8 -*-
+import math
 import maya.cmds as cmds
 import maya.mel as mel
 import maya.api.OpenMaya as om
-import math
 
 
 class WeightedNormalsTool:
     def __init__(self):
-        self.window_name = "WeightedNormalsUI"
+        self.window_name = "WeightedNormalsUI_PowerSnap"
         self.build_ui()
 
     # =========================================================
@@ -18,12 +19,12 @@ class WeightedNormalsTool:
 
         self.window = cmds.window(
             self.window_name,
-            title="Weighted Normals",
-            widthHeight=(340, 620),
+            title="Weighted Normals Pro",
+            widthHeight=(360, 700),
             sizeable=True
         )
 
-        cmds.columnLayout(adjustableColumn=True, rowSpacing=6)
+        main_col = cmds.columnLayout(adjustableColumn=True, rowSpacing=8)
 
         # -------------------------
         # WEIGHTING
@@ -36,15 +37,23 @@ class WeightedNormalsTool:
             marginHeight=6,
             bgc=(0.2, 0.2, 0.2)
         )
+        cmds.columnLayout(adjustableColumn=True, rowSpacing=4)
 
-        cmds.rowLayout(numberOfColumns=2, adjustableColumn=1, columnWidth2=(150, 150))
         self.weight_radio = cmds.radioCollection()
-        self.rb_area = cmds.radioButton(label="Area", align='center')
-        self.rb_angle = cmds.radioButton(label="Angle", align='center', select=True)
-        cmds.setParent('..')
+        self.rb_area = cmds.radioButton(label="Area", select=True)
+        self.rb_angle = cmds.radioButton(label="Angle")
+        self.rb_both = cmds.radioButton(label="Area & Angle")
 
-        self.chk_convex = cmds.checkBox(label="Use Convex Corner Angle", value=True)
-        self.chk_snap = cmds.checkBox(label="Snap To Largest Face", value=True, cc=self.update_ui_states)
+        self.chk_convex = cmds.checkBox(
+            label="Use Convex Corner Angle",
+            value=True
+        )
+
+        self.chk_snap = cmds.checkBox(
+            label="Snap To Largest Face",
+            value=True,
+            cc=self.update_ui_states
+        )
 
         self.flt_snap_strength = cmds.floatSliderGrp(
             label="Snap Strength",
@@ -53,7 +62,18 @@ class WeightedNormalsTool:
             maxValue=1.0,
             fieldMinValue=0.0,
             fieldMaxValue=1.0,
-            value=0.85,
+            value=0.9,
+            columnWidth3=(110, 50, 140)
+        )
+
+        self.int_snap_power = cmds.intSliderGrp(
+            label="Snap Power",
+            field=True,
+            minValue=1,
+            maxValue=32,
+            fieldMinValue=1,
+            fieldMaxValue=128,
+            value=15,
             columnWidth3=(110, 50, 140)
         )
 
@@ -68,7 +88,7 @@ class WeightedNormalsTool:
             columnWidth3=(110, 50, 140)
         )
 
-        cmds.setParent('..')
+        cmds.setParent(main_col)
 
         # -------------------------
         # HARD EDGE DETECTION
@@ -81,48 +101,26 @@ class WeightedNormalsTool:
             marginHeight=6,
             bgc=(0.2, 0.2, 0.2)
         )
+        cmds.columnLayout(adjustableColumn=True, rowSpacing=4)
 
-        self.chk_smooth_grp = cmds.checkBox(
-            label="Use Smoothing Groups",
-            value=False,
-            enable=False
-        )
-
-        cmds.rowLayout(numberOfColumns=2, adjustableColumn=2, columnWidth2=(120, 160))
-        self.chk_uv_map = cmds.checkBox(
-            label="Use UV Map",
-            value=False,
-            cc=self.update_ui_states
-        )
-        self.int_uv = cmds.intSliderGrp(
-            field=True,
-            minValue=1,
-            maxValue=8,
-            fieldMinValue=1,
-            fieldMaxValue=99,
-            value=1,
-            enable=False
-        )
-        cmds.setParent('..')
-
-        cmds.rowLayout(numberOfColumns=2, adjustableColumn=2, columnWidth2=(120, 160))
         self.chk_edge_angle = cmds.checkBox(
             label="By Edge Angle",
             value=True,
             cc=self.update_ui_states
         )
+
         self.flt_edge_angle = cmds.floatSliderGrp(
+            label="Edge Angle",
             field=True,
             minValue=0.0,
             maxValue=180.0,
             fieldMinValue=0.0,
             fieldMaxValue=180.0,
             value=30.0,
-            enable=True
+            columnWidth3=(110, 50, 140)
         )
-        cmds.setParent('..')
 
-        cmds.setParent('..')
+        cmds.setParent(main_col)
 
         # -------------------------
         # SMOOTHING
@@ -135,6 +133,7 @@ class WeightedNormalsTool:
             marginHeight=6,
             bgc=(0.2, 0.2, 0.2)
         )
+        cmds.columnLayout(adjustableColumn=True, rowSpacing=4)
 
         self.flt_smooth = cmds.floatSliderGrp(
             label="Smoothing",
@@ -143,18 +142,7 @@ class WeightedNormalsTool:
             maxValue=1.0,
             fieldMinValue=0.0,
             fieldMaxValue=1.0,
-            value=0.15,
-            columnWidth3=(110, 50, 140)
-        )
-
-        self.flt_hard_blend = cmds.floatSliderGrp(
-            label="Hard Edge Blend",
-            field=True,
-            minValue=0.0,
-            maxValue=1.0,
-            fieldMinValue=0.0,
-            fieldMaxValue=1.0,
-            value=0.5,
+            value=0.0,
             columnWidth3=(110, 50, 140)
         )
 
@@ -162,17 +150,17 @@ class WeightedNormalsTool:
             label="Iterations",
             field=True,
             minValue=1,
-            maxValue=50,
+            maxValue=20,
             fieldMinValue=1,
-            fieldMaxValue=999,
-            value=10,
+            fieldMaxValue=100,
+            value=1,
             columnWidth3=(110, 50, 140)
         )
 
-        cmds.setParent('..')
+        cmds.setParent(main_col)
 
         # -------------------------
-        # DISPLAY NORMALS
+        # DISPLAY
         # -------------------------
         cmds.frameLayout(
             label="Display Normals",
@@ -182,6 +170,7 @@ class WeightedNormalsTool:
             marginHeight=6,
             bgc=(0.2, 0.2, 0.2)
         )
+        cmds.columnLayout(adjustableColumn=True, rowSpacing=4)
 
         self.chk_display = cmds.checkBox(
             label="Display Normals",
@@ -201,9 +190,9 @@ class WeightedNormalsTool:
             columnWidth3=(110, 50, 140)
         )
 
-        cmds.setParent('..')
+        cmds.setParent(main_col)
 
-        cmds.separator(height=10, style='none')
+        cmds.separator(height=8, style='none')
 
         cmds.button(
             label="APPLY WEIGHTED NORMALS",
@@ -224,15 +213,14 @@ class WeightedNormalsTool:
         self.update_ui_states()
 
     def update_ui_states(self, *args):
-        use_uv = cmds.checkBox(self.chk_uv_map, q=True, v=True)
+        use_snap = cmds.checkBox(self.chk_snap, q=True, v=True)
         use_edge = cmds.checkBox(self.chk_edge_angle, q=True, v=True)
         show_normals = cmds.checkBox(self.chk_display, q=True, v=True)
-        use_snap = cmds.checkBox(self.chk_snap, q=True, v=True)
 
-        cmds.intSliderGrp(self.int_uv, e=True, enable=use_uv)
+        cmds.floatSliderGrp(self.flt_snap_strength, e=True, enable=use_snap)
+        cmds.intSliderGrp(self.int_snap_power, e=True, enable=use_snap)
         cmds.floatSliderGrp(self.flt_edge_angle, e=True, enable=use_edge)
         cmds.floatSliderGrp(self.flt_display_len, e=True, enable=show_normals)
-        cmds.floatSliderGrp(self.flt_snap_strength, e=True, enable=use_snap)
 
     # =========================================================
     # HELPERS
@@ -253,11 +241,28 @@ class WeightedNormalsTool:
 
                 if dag_path.hasFn(om.MFn.kMesh):
                     meshes.append(dag_path)
-
             except Exception:
                 continue
 
         return meshes
+
+    def safe_normalize(self, vec):
+        out_vec = om.MVector(vec)
+        if out_vec.length() > 1e-8:
+            out_vec.normalize()
+            return out_vec
+        return om.MVector(0.0, 1.0, 0.0)
+
+    def nlerp(self, a, b, t):
+        t = max(0.0, min(1.0, t))
+        out_vec = (a * (1.0 - t)) + (b * t)
+        return self.safe_normalize(out_vec)
+
+    def angle_between_normals_deg(self, a, b):
+        na = self.safe_normalize(a)
+        nb = self.safe_normalize(b)
+        dotv = max(-1.0, min(1.0, na * nb))
+        return math.degrees(math.acos(dotv))
 
     def get_polygon_area(self, mesh_fn, face_id):
         verts = mesh_fn.getPolygonVertices(face_id)
@@ -275,12 +280,12 @@ class WeightedNormalsTool:
         return area
 
     def get_corner_angle(self, mesh_fn, face_id, vertex_id, use_convex=True):
-        verts = mesh_fn.getPolygonVertices(face_id)
+        verts = list(mesh_fn.getPolygonVertices(face_id))
         if vertex_id not in verts:
             return 0.0
 
         count = len(verts)
-        local_idx = list(verts).index(vertex_id)
+        local_idx = verts.index(vertex_id)
 
         prev_id = verts[(local_idx - 1) % count]
         next_id = verts[(local_idx + 1) % count]
@@ -289,39 +294,132 @@ class WeightedNormalsTool:
         p_prev = om.MVector(mesh_fn.getPoint(prev_id, om.MSpace.kWorld))
         p_next = om.MVector(mesh_fn.getPoint(next_id, om.MSpace.kWorld))
 
-        vec_a = p_next - p_current
-        vec_b = p_prev - p_current
+        vec_a = p_prev - p_current
+        vec_b = p_next - p_current
 
         if vec_a.length() < 1e-8 or vec_b.length() < 1e-8:
             return 0.0
 
-        vec_a.normalize()
-        vec_b.normalize()
+        vec_a = self.safe_normalize(vec_a)
+        vec_b = self.safe_normalize(vec_b)
 
-        dot_prod = max(-1.0, min(1.0, vec_a * vec_b))
-        angle = math.acos(dot_prod)
+        dotv = max(-1.0, min(1.0, vec_a * vec_b))
+        angle = math.acos(dotv)
 
         if use_convex:
             try:
-                face_normal = om.MVector(mesh_fn.getPolygonNormal(face_id, om.MSpace.kWorld))
-                cross = vec_a ^ vec_b
-                if (cross * face_normal) < 0.0:
-                    angle *= 0.25
+                face_normal = self.safe_normalize(
+                    om.MVector(mesh_fn.getPolygonNormal(face_id, om.MSpace.kWorld))
+                )
+                cross_vec = vec_a ^ vec_b
+                if (cross_vec * face_normal) < 0.0:
+                    angle = max(0.0, (2.0 * math.pi) - angle)
+                    if angle > math.pi:
+                        angle = (2.0 * math.pi) - angle
             except Exception:
                 pass
 
-        return angle
+        return max(0.0, angle)
 
-    def get_face_weight(self, mesh_fn, face_id, vertex_id, use_angle, use_convex):
-        if use_angle:
-            return self.get_corner_angle(mesh_fn, face_id, vertex_id, use_convex=use_convex)
-        return self.get_polygon_area(mesh_fn, face_id)
+    def get_weight_mode(self):
+        if cmds.radioButton(self.rb_area, q=True, select=True):
+            return "area"
+        elif cmds.radioButton(self.rb_angle, q=True, select=True):
+            return "angle"
+        return "both"
 
+    def get_face_weight(self, mesh_fn, face_id, vertex_id, weight_mode, use_convex):
+        area = self.get_polygon_area(mesh_fn, face_id)
+        angle = self.get_corner_angle(mesh_fn, face_id, vertex_id, use_convex=use_convex)
+
+        if weight_mode == "area":
+            return area
+        elif weight_mode == "angle":
+            return angle
+        else:
+            return area * angle
+
+    def build_face_cache(self, mesh_fn):
+        face_count = mesh_fn.numPolygons
+        face_normals = {}
+        face_vertices = {}
+
+        for f_id in range(face_count):
+            try:
+                face_normals[f_id] = self.safe_normalize(
+                    om.MVector(mesh_fn.getPolygonNormal(f_id, om.MSpace.kWorld))
+                )
+                face_vertices[f_id] = list(mesh_fn.getPolygonVertices(f_id))
+            except Exception:
+                continue
+
+        return face_normals, face_vertices
+
+    def apply_power_snap_weight(self, weight, max_weight, snap_strength, snap_power):
+        if max_weight <= 1e-8:
+            return weight
+
+        ratio = max(0.0, min(1.0, weight / max_weight))
+
+        # snap_strength = 0 => comportement presque normal
+        # snap_strength = 1 => comportement très agressif
+        exponent = 1.0 + (max(0.0, min(1.0, snap_strength)) * float(snap_power))
+
+        boosted = weight * math.pow(ratio, exponent)
+        return boosted
+
+    def get_filtered_neighbor_faces(
+        self,
+        target_face_id,
+        connected_faces,
+        face_normals,
+        use_edge_angle,
+        edge_angle_limit
+    ):
+        if not use_edge_angle:
+            return list(connected_faces)
+
+        target_normal = face_normals.get(target_face_id)
+        if target_normal is None:
+            return [target_face_id]
+
+        valid_faces = []
+        for other_face_id in connected_faces:
+            other_normal = face_normals.get(other_face_id)
+            if other_normal is None:
+                continue
+
+            ang = self.angle_between_normals_deg(target_normal, other_normal)
+            if ang <= edge_angle_limit:
+                valid_faces.append(other_face_id)
+
+        if not valid_faces:
+            valid_faces = [target_face_id]
+
+        return valid_faces
+
+    def apply_soft_smoothing(self, result_normal, ref_normal, smoothing, iterations):
+        if smoothing <= 0.0 or iterations <= 1:
+            return self.safe_normalize(result_normal)
+
+        out_vec = om.MVector(result_normal)
+        blend_step = max(0.0, min(1.0, smoothing)) * 0.15
+
+        for _ in range(iterations - 1):
+            out_vec = self.nlerp(out_vec, ref_normal, blend_step)
+
+        return self.safe_normalize(out_vec)
+
+    # =========================================================
+    # ACTIONS
+    # =========================================================
     def unfreeze_normals(self, *args):
         meshes = self.get_selected_meshes()
         if not meshes:
             om.MGlobal.displayWarning("Sélectionne un mesh.")
             return
+
+        current_sel = cmds.ls(sl=True, long=True) or []
 
         for dag_path in meshes:
             try:
@@ -330,17 +428,19 @@ class WeightedNormalsTool:
             except Exception:
                 pass
 
+        if current_sel:
+            try:
+                cmds.select(current_sel, r=True)
+            except Exception:
+                pass
+
         om.MGlobal.displayInfo("Normals déverrouillées.")
 
-    # =========================================================
-    # DISPLAY
-    # =========================================================
     def toggle_display(self, *args):
         val = cmds.checkBox(self.chk_display, q=True, v=True)
         cmds.floatSliderGrp(self.flt_display_len, e=True, enable=val)
 
         length = cmds.floatSliderGrp(self.flt_display_len, q=True, v=True)
-
         meshes = self.get_selected_meshes()
         if not meshes:
             return
@@ -365,40 +465,42 @@ class WeightedNormalsTool:
             except Exception:
                 pass
 
-    # =========================================================
-    # APPLY
-    # =========================================================
     def apply_normals(self, *args):
-        use_angle = cmds.radioButton(self.rb_angle, q=True, select=True)
-        use_convex = cmds.checkBox(self.chk_convex, q=True, v=True)
-        use_snap = cmds.checkBox(self.chk_snap, q=True, v=True)
-
-        snap_strength = cmds.floatSliderGrp(self.flt_snap_strength, q=True, v=True)
-        blending = cmds.floatSliderGrp(self.flt_blending, q=True, v=True)
-
-        smoothing = cmds.floatSliderGrp(self.flt_smooth, q=True, v=True)
-        hard_blend = cmds.floatSliderGrp(self.flt_hard_blend, q=True, v=True)
-        iterations = cmds.intSliderGrp(self.int_iterations, q=True, v=True)
-
-        use_edge_angle = cmds.checkBox(self.chk_edge_angle, q=True, v=True)
-        edge_angle_limit = cmds.floatSliderGrp(self.flt_edge_angle, q=True, v=True)
-
         meshes = self.get_selected_meshes()
         if not meshes:
             om.MGlobal.displayWarning("Sélectionne un maillage polygonal d'abord !")
             return
 
+        weight_mode = self.get_weight_mode()
+        use_convex = cmds.checkBox(self.chk_convex, q=True, v=True)
+        use_snap = cmds.checkBox(self.chk_snap, q=True, v=True)
+        snap_strength = cmds.floatSliderGrp(self.flt_snap_strength, q=True, v=True)
+        snap_power = cmds.intSliderGrp(self.int_snap_power, q=True, v=True)
+        blending = cmds.floatSliderGrp(self.flt_blending, q=True, v=True)
+
+        use_edge_angle = cmds.checkBox(self.chk_edge_angle, q=True, v=True)
+        edge_angle_limit = cmds.floatSliderGrp(self.flt_edge_angle, q=True, v=True)
+
+        smoothing = cmds.floatSliderGrp(self.flt_smooth, q=True, v=True)
+        iterations = cmds.intSliderGrp(self.int_iterations, q=True, v=True)
+
         current_sel = cmds.ls(sl=True, long=True) or []
 
+        # Déverrouillage
         for dag_path in meshes:
             try:
                 cmds.select(dag_path.fullPathName(), r=True)
                 cmds.polyNormalPerVertex(unFreezeNormal=True)
             except Exception as e:
-                om.MGlobal.displayWarning("Erreur lors du déverrouillage des normales : {}".format(e))
+                om.MGlobal.displayWarning(
+                    "Erreur lors du déverrouillage des normales : {}".format(e)
+                )
 
+        # Calcul
         for dag_path in meshes:
             mesh_fn = om.MFnMesh(dag_path)
+            face_normals, face_vertices = self.build_face_cache(mesh_fn)
+
             vert_iter = om.MItMeshVertex(dag_path)
 
             new_normals = []
@@ -407,135 +509,115 @@ class WeightedNormalsTool:
 
             while not vert_iter.isDone():
                 v_id = vert_iter.index()
-                connected_faces = vert_iter.getConnectedFaces()
+                connected_faces = list(vert_iter.getConnectedFaces())
 
                 if not connected_faces:
                     vert_iter.next()
                     continue
 
-                accumulated_normal = om.MVector(0.0, 0.0, 0.0)
-                best_weight = -1.0
-                best_face_normal = None
-                total_weight = 0.0
-
+                # Poids de base pour toutes les faces autour du vertex
+                base_weights = {}
                 for f_id in connected_faces:
                     try:
-                        face_normal = om.MVector(mesh_fn.getPolygonNormal(f_id, om.MSpace.kWorld))
+                        base_weights[f_id] = self.get_face_weight(
+                            mesh_fn=mesh_fn,
+                            face_id=f_id,
+                            vertex_id=v_id,
+                            weight_mode=weight_mode,
+                            use_convex=use_convex
+                        )
                     except Exception:
+                        base_weights[f_id] = 0.0
+
+                # Calcul par face-vertex
+                for current_face_id in connected_faces:
+                    current_face_normal = face_normals.get(current_face_id)
+                    if current_face_normal is None:
                         continue
 
-                    weight = self.get_face_weight(
-                        mesh_fn=mesh_fn,
-                        face_id=f_id,
-                        vertex_id=v_id,
-                        use_angle=use_angle,
-                        use_convex=use_convex
+                    valid_faces = self.get_filtered_neighbor_faces(
+                        target_face_id=current_face_id,
+                        connected_faces=connected_faces,
+                        face_normals=face_normals,
+                        use_edge_angle=use_edge_angle,
+                        edge_angle_limit=edge_angle_limit
                     )
 
-                    if weight <= 1e-8:
-                        continue
+                    if not valid_faces:
+                        valid_faces = [current_face_id]
 
-                    total_weight += weight
-                    accumulated_normal += (face_normal * weight)
+                    max_weight = max([base_weights.get(fid, 0.0) for fid in valid_faces] or [0.0])
 
-                    if weight > best_weight:
-                        best_weight = weight
-                        best_face_normal = om.MVector(face_normal)
+                    weighted_sum = om.MVector(0.0, 0.0, 0.0)
+                    ref_sum = om.MVector(0.0, 0.0, 0.0)
 
-                if accumulated_normal.length() < 1e-8:
-                    vert_iter.next()
-                    continue
+                    for other_face_id in valid_faces:
+                        other_normal = face_normals.get(other_face_id)
+                        if other_normal is None:
+                            continue
 
-                accumulated_normal.normalize()
+                        base_w = base_weights.get(other_face_id, 0.0)
+                        if base_w <= 1e-8:
+                            continue
 
-                # -----------------------------------
-                # SNAP TO LARGEST FACE
-                # -----------------------------------
-                if use_snap and best_face_normal is not None:
-                    best_face_normal.normalize()
+                        final_w = base_w
 
-                    dominance = 0.0
-                    if total_weight > 1e-8 and best_weight > 0.0:
-                        dominance = best_weight / total_weight
+                        if use_snap:
+                            final_w = self.apply_power_snap_weight(
+                                weight=base_w,
+                                max_weight=max_weight,
+                                snap_strength=snap_strength,
+                                snap_power=snap_power
+                            )
 
-                    # Si la face dominante pèse très fort, on snap plus agressivement
-                    if dominance >= 0.6:
-                        mixed_snap = ((accumulated_normal * (1.0 - snap_strength)) +
-                                      (best_face_normal * snap_strength))
-                        if mixed_snap.length() > 1e-8:
-                            mixed_snap.normalize()
-                        accumulated_normal = mixed_snap
+                        weighted_sum += (other_normal * final_w)
+                        ref_sum += other_normal
+
+                    if weighted_sum.length() <= 1e-8:
+                        result_normal = om.MVector(current_face_normal)
                     else:
-                        reduced_strength = snap_strength * 0.75
-                        mixed_snap = ((accumulated_normal * (1.0 - reduced_strength)) +
-                                      (best_face_normal * reduced_strength))
-                        if mixed_snap.length() > 1e-8:
-                            mixed_snap.normalize()
-                        accumulated_normal = mixed_snap
+                        result_normal = self.safe_normalize(weighted_sum)
 
-                # -----------------------------------
-                # SMOOTHING / STABILISATION
-                # -----------------------------------
-                final_normal = om.MVector(accumulated_normal)
+                    # petite stabilisation optionnelle
+                    if ref_sum.length() > 1e-8:
+                        ref_normal = self.safe_normalize(ref_sum)
+                        result_normal = self.apply_soft_smoothing(
+                            result_normal=result_normal,
+                            ref_normal=ref_normal,
+                            smoothing=smoothing,
+                            iterations=iterations
+                        )
 
-                # Ici ce n'est pas un "vrai" smoothing topologique :
-                # c'est une stabilisation progressive du résultat
-                # pour éviter certains écarts trop secs.
-                if iterations > 1 and smoothing > 0.0:
-                    base_normal = om.MVector(accumulated_normal)
-
-                    for _ in range(iterations - 1):
-                        final_normal = (final_normal * (1.0 - smoothing * 0.2)) + (base_normal * (smoothing * 0.2))
-                        if final_normal.length() > 1e-8:
-                            final_normal.normalize()
-
-                # -----------------------------------
-                # APPLICATION PAR FACE-VERTEX
-                # -----------------------------------
-                for f_id in connected_faces:
+                    # blending final avec la normale actuelle
                     try:
-                        current_normal = om.MVector(mesh_fn.getFaceVertexNormal(f_id, v_id, om.MSpace.kWorld))
+                        current_fv_normal = om.MVector(
+                            mesh_fn.getFaceVertexNormal(current_face_id, v_id, om.MSpace.kWorld)
+                        )
                     except Exception:
-                        current_normal = om.MVector(final_normal)
+                        current_fv_normal = om.MVector(result_normal)
 
-                    out_normal = (current_normal * (1.0 - blending)) + (final_normal * blending)
+                    out_normal = self.nlerp(current_fv_normal, result_normal, blending)
 
-                    # Hard edge blend :
-                    # si l'écart avec la face est fort, on peut ré-attirer
-                    # un peu vers la normale de face.
-                    if use_edge_angle:
-                        try:
-                            face_normal = om.MVector(mesh_fn.getPolygonNormal(f_id, om.MSpace.kWorld))
-
-                            if face_normal.length() > 1e-8:
-                                face_normal.normalize()
-
-                            tmp = om.MVector(final_normal)
-                            if tmp.length() > 1e-8:
-                                tmp.normalize()
-
-                            dotv = max(-1.0, min(1.0, face_normal * tmp))
-                            ang = math.degrees(math.acos(dotv))
-
-                            if ang > edge_angle_limit:
-                                out_normal = ((out_normal * (1.0 - hard_blend)) +
-                                              (face_normal * hard_blend))
-                        except Exception:
-                            pass
-
-                    if out_normal.length() > 1e-8:
-                        out_normal.normalize()
-                    else:
-                        out_normal = om.MVector(final_normal)
-
-                    new_normals.append(out_normal)
-                    face_ids.append(f_id)
+                    new_normals.append(self.safe_normalize(out_normal))
+                    face_ids.append(current_face_id)
                     vert_ids.append(v_id)
 
                 vert_iter.next()
 
             if new_normals:
-                mesh_fn.setFaceVertexNormals(new_normals, face_ids, vert_ids, om.MSpace.kWorld)
+                try:
+                    mesh_fn.setFaceVertexNormals(
+                        new_normals,
+                        face_ids,
+                        vert_ids,
+                        om.MSpace.kWorld
+                    )
+                except Exception as e:
+                    om.MGlobal.displayWarning(
+                        "Impossible d'appliquer les normales sur {} : {}".format(
+                            dag_path.fullPathName(), e
+                        )
+                    )
 
         if current_sel:
             try:
@@ -543,7 +625,7 @@ class WeightedNormalsTool:
             except Exception:
                 pass
 
-        om.MGlobal.displayInfo("Weighted Normals appliquées.")
+        om.MGlobal.displayInfo("Weighted Normals Pro appliquées.")
 
         if cmds.checkBox(self.chk_display, q=True, v=True):
             self.toggle_display()

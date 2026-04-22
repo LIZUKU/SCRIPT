@@ -1,1414 +1,533 @@
 # -*- coding: utf-8 -*-
-
-import math
-
-
+"""
+=============================================================================
+MESH TOOLS PRO v2.0 - Séparation & Combinaison optimisées
+=============================================================================
+UI moderne inspirée de ProArray
+Bug de séparation corrigé - plus de perte de meshes
+Compatible: Maya 2022 - 2025
+=============================================================================
+"""
 
 import maya.cmds as cmds
-
 import maya.mel as mel
 
-import maya.api.OpenMaya as om
+# Qt imports - Maya 2022-2024 use PySide2, Maya 2025+ uses PySide6
+try:
+    from PySide2 import QtWidgets, QtCore, QtGui
+    PYSIDE_VERSION = 2
+except ImportError:
+    from PySide6 import QtWidgets, QtCore, QtGui
+    PYSIDE_VERSION = 6
+
+try:
+    from shiboken2 import wrapInstance
+except ImportError:
+    from shiboken6 import wrapInstance
 
 import maya.OpenMayaUI as omui
 
 
-
-try:
-
-    from PySide6 import QtCore, QtWidgets
-
-    from shiboken6 import wrapInstance
-
-except ImportError:
-
-    from PySide2 import QtCore, QtWidgets
-
-    from shiboken2 import wrapInstance
-
-
-
-
-
-class CollapsibleSection(QtWidgets.QWidget):
-
-    toggled = QtCore.Signal(bool)
-
-    def __init__(self, title, parent=None, expanded=False):
-
-        super(CollapsibleSection, self).__init__(parent)
-
-        self.toggle_button = QtWidgets.QToolButton()
-
-        self.toggle_button.setText(title)
-
-        self.toggle_button.setCheckable(True)
-
-        self.toggle_button.setChecked(expanded)
-
-        self.toggle_button.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
-
-        self.toggle_button.setArrowType(
-
-            QtCore.Qt.DownArrow if expanded else QtCore.Qt.RightArrow
-
-        )
-
-
-
-        self.content = QtWidgets.QWidget()
-
-        self.content_layout = QtWidgets.QVBoxLayout(self.content)
-
-        self.content_layout.setContentsMargins(8, 8, 8, 8)
-
-        self.content.setVisible(expanded)
-
-
-
-        layout = QtWidgets.QVBoxLayout(self)
-
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        layout.setSpacing(4)
-
-        layout.addWidget(self.toggle_button)
-
-        layout.addWidget(self.content)
-
-
-
-        self.toggle_button.toggled.connect(self._on_toggled)
-
-
-
-    def _on_toggled(self, checked):
-
-        self.content.setVisible(checked)
-
-        self.toggle_button.setArrowType(QtCore.Qt.DownArrow if checked else QtCore.Qt.RightArrow)
-
-        self.toggled.emit(checked)
-
-
-
-
-
-class WeightedNormalsTool(QtWidgets.QDialog):
-
-    WINDOW_NAME = "WeightedNormalsUI_LinearBlend"
-
-
-
-    def __init__(self, parent=None):
-
-        super(WeightedNormalsTool, self).__init__(parent)
-
-        self.setObjectName(self.WINDOW_NAME)
-
-        self.setWindowTitle("Weighted Normals Pro")
-
-        self.resize(380, 300)
-
-        self.setMinimumWidth(360)
-
-        self.setMinimumHeight(220)
-
-        self._ui_scale = 1.0
-
-        self._base_font_size = max(float(self.font().pointSizeF()), 10.0)
-
-        self._section_widgets = []
-
-
-
-        self._build_ui()
-
-        self.update_ui_states()
-
-
-
-    # =========================================================
-
-    # UI
-
-    # =========================================================
-
-    def _build_ui(self):
-
-        root = QtWidgets.QVBoxLayout(self)
-
-        root.setContentsMargins(8, 8, 8, 8)
-
-        root.setSpacing(6)
-
-        root.setSizeConstraint(QtWidgets.QLayout.SetMinimumSize)
-
-        self._build_header_controls(root)
-
-        self._build_weighting_section(root)
-
-        self._build_hard_edges_section(root)
-
-        self._build_smoothing_section(root)
-
-        self._build_display_section(root)
-
-
-
-        root.addSpacing(4)
-
-
-
-        self.btn_apply = QtWidgets.QPushButton("APPLY WEIGHTED NORMALS")
-
-        self.btn_apply.setMinimumHeight(34)
-
-        self.btn_apply.clicked.connect(self.apply_normals)
-
-
-
-        self.btn_unfreeze = QtWidgets.QPushButton("UNFREEZE NORMALS")
-
-        self.btn_unfreeze.setMinimumHeight(28)
-
-        self.btn_unfreeze.clicked.connect(self.unfreeze_normals)
-
-
-
-        root.addWidget(self.btn_apply)
-
-        root.addWidget(self.btn_unfreeze)
-
-        root.addStretch(1)
-
-
-
-        self.setStyleSheet(
-
-            """
-
-            QDialog { background: #1f1f1f; color: #ececec; }
-
-            QToolButton {
-
-                background: #2c2c2c;
-
-                border: 1px solid #434343;
-
-                border-radius: 6px;
-
-                padding: 5px;
-
-                font-weight: 600;
-
-                text-align: left;
-
-            }
-
-            QGroupBox {
-
-                border: 1px solid #3f3f3f;
-
-                border-radius: 8px;
-
-                margin-top: 10px;
-
-                padding-top: 12px;
-
-                background: #242424;
-
-            }
-
-            QLabel { color: #d2d2d2; }
-
-            QCheckBox, QRadioButton, QPushButton { font-size: 11px; }
-
-            QDoubleSpinBox, QSpinBox {
-
-                background: #202020;
-
-                border: 1px solid #4a4a4a;
-
-                border-radius: 4px;
-
-                min-height: 20px;
-
-                padding: 0px 4px;
-
-            }
-
-            QSlider::groove:horizontal { height: 6px; background: #808080; border-radius: 3px; }
-
-            QSlider::handle:horizontal {
-
-                background: #c7c7c7;
-
-                border: 1px solid #9b9b9b;
-
-                width: 12px;
-
-                margin: -4px 0;
-
-                border-radius: 6px;
-
-            }
-
-            QPushButton {
-
-                background: #353535;
-
-                border: 1px solid #505050;
-
-                border-radius: 6px;
-
-                padding: 5px;
-
-            }
-
-            QPushButton:hover { background: #424242; }
-
-            QPushButton#apply_btn { background: #8f2f2f; border-color: #b44a4a; font-weight: 700; }
-
-            QPushButton#apply_btn:hover { background: #9c3737; }
-
-            QPushButton[stepBtn="true"] {
-
-                min-width: 22px;
-
-                max-width: 22px;
-
-                padding: 0px;
-
-                font-weight: 700;
-
-                background: #3b3b3b;
-
-                border: 1px solid #5b5b5b;
-
-            }
-
-            QPushButton[stepBtn="true"]:hover { background: #4a4a4a; }
-
-            QPushButton[modeBtn="true"] { background: #3c3c3c; border: 1px solid #606060; }
-
-            QPushButton[modeBtn="true"]:checked {
-
-                background: #8b2c2c;
-
-                border: 1px solid #b34949;
-
-                color: #ffffff;
-
-                font-weight: 700;
-
-            }
-
-            """
-
-        )
-
-        self.btn_apply.setObjectName("apply_btn")
-
-        self._apply_ui_scale(1.0)
-
-
-
-    def _build_header_controls(self, parent_layout):
-
-        header = QtWidgets.QHBoxLayout()
-
-        header.setContentsMargins(0, 0, 0, 0)
-
-        header.addStretch(1)
-
-        scale_label = QtWidgets.QLabel("UI Scale")
-
-        header.addWidget(scale_label)
-
-        self.scale_combo = QtWidgets.QComboBox()
-
-        for pct in (100, 90, 80, 50):
-
-            self.scale_combo.addItem("{}%".format(pct), pct / 100.0)
-
-        self.scale_combo.setCurrentIndex(0)
-
-        self.scale_combo.currentIndexChanged.connect(self._on_ui_scale_changed)
-
-        header.addWidget(self.scale_combo)
-
-        parent_layout.addLayout(header)
-
-
-
-    def _build_weighting_section(self, parent_layout):
-
-        section = CollapsibleSection("Weighting", expanded=True)
-
-        section.toggled.connect(self._refresh_dialog_size)
-
-        self._section_widgets.append(section)
-
-        parent_layout.addWidget(section)
-
-        layout = section.content_layout
-
-
-
-        mode_row = QtWidgets.QHBoxLayout()
-
-        mode_row.setSpacing(5)
-
-        self.mode_group = QtWidgets.QButtonGroup(self)
-
-        self.mode_group.setExclusive(True)
-
-
-
-        self.rb_area = QtWidgets.QPushButton("Area")
-
-        self.rb_angle = QtWidgets.QPushButton("Angle")
-
-        self.rb_both = QtWidgets.QPushButton("Area + Angle")
-
-
-
-        for btn, mode in [(self.rb_area, "area"), (self.rb_angle, "angle"), (self.rb_both, "both")]:
-
-            btn.setCheckable(True)
-
-            btn.setProperty("modeBtn", True)
-
-            btn.setProperty("mode", mode)
-
-            self.mode_group.addButton(btn)
-
-            mode_row.addWidget(btn)
-
-
-
-        self.rb_area.setChecked(True)
-
-        layout.addLayout(mode_row)
-
-
-
-        self.angle_bias = self._add_slider_row(layout, "Area/Angle Bias", 0.0, 1.0, 0.5, decimals=2)
-
-        self.blending = self._add_slider_row(layout, "Blending", 0.0, 1.0, 1.0, decimals=2)
-
-
-
-    def _build_hard_edges_section(self, parent_layout):
-
-        section = CollapsibleSection("Hard Edge Detection", expanded=False)
-
-        section.toggled.connect(self._refresh_dialog_size)
-
-        self._section_widgets.append(section)
-
-        parent_layout.addWidget(section)
-
-        layout = section.content_layout
-
-
-
-        self.chk_soft_edges = QtWidgets.QCheckBox("Respect Hard/Soft Edges")
-
-        self.chk_soft_edges.setChecked(True)
-
-        layout.addWidget(self.chk_soft_edges)
-
-
-
-        self.chk_edge_angle = QtWidgets.QCheckBox("By Edge Angle (Optional)")
-
-        self.chk_edge_angle.setChecked(False)
-
-        self.chk_edge_angle.toggled.connect(self.update_ui_states)
-
-        layout.addWidget(self.chk_edge_angle)
-
-
-
-        self.edge_angle = self._add_slider_row(layout, "Edge Angle", 0.0, 180.0, 30.0, decimals=1)
-
-
-
-    def _build_smoothing_section(self, parent_layout):
-
-        section = CollapsibleSection("Smoothing", expanded=False)
-
-        section.toggled.connect(self._refresh_dialog_size)
-
-        self._section_widgets.append(section)
-
-        parent_layout.addWidget(section)
-
-        layout = section.content_layout
-
-
-
-        self.smoothing = self._add_slider_row(layout, "Smoothing", 0.0, 1.0, 0.0, decimals=2)
-
-        self.iterations = self._add_slider_row(layout, "Iterations", 1, 100, 1, is_int=True)
-
-
-
-    def _build_display_section(self, parent_layout):
-
-        section = CollapsibleSection("Display Normals", expanded=False)
-
-        section.toggled.connect(self._refresh_dialog_size)
-
-        self._section_widgets.append(section)
-
-        parent_layout.addWidget(section)
-
-        layout = section.content_layout
-
-
-
-        self.chk_display = QtWidgets.QCheckBox("Display Normals")
-
-        self.chk_display.setChecked(False)
-
-        self.chk_display.toggled.connect(self.toggle_display)
-
-        layout.addWidget(self.chk_display)
-
-
-
-        self.display_length = self._add_slider_row(layout, "Display Length", 0.1, 50.0, 10.0, decimals=2)
-
-
-
-    def _add_slider_row(self, parent_layout, label, minimum, maximum, value, is_int=False, decimals=2):
-
-        row = QtWidgets.QHBoxLayout()
-
-        row.setSpacing(6)
-
-
-
-        text = QtWidgets.QLabel(label)
-
-        text.setMinimumWidth(96)
-
-        row.addWidget(text)
-
-
-
-        slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-
-        slider.setMinimum(0)
-
-        slider.setMaximum(1000)
-
-        row.addWidget(slider, 1)
-
-
-
-        if is_int:
-
-            spin = QtWidgets.QSpinBox()
-
-            spin.setRange(int(minimum), int(maximum))
-
-            spin.setValue(int(value))
-
-        else:
-
-            spin = QtWidgets.QDoubleSpinBox()
-
-            spin.setDecimals(decimals)
-
-            spin.setRange(float(minimum), float(maximum))
-
-            spin.setValue(float(value))
-
-
-
-        minus_btn = QtWidgets.QPushButton("-")
-
-        minus_btn.setProperty("stepBtn", True)
-
-        plus_btn = QtWidgets.QPushButton("+")
-
-        plus_btn.setProperty("stepBtn", True)
-
-
-
-        spin.setMinimumWidth(70)
-
-        row.addWidget(minus_btn)
-
-        row.addWidget(spin)
-
-        row.addWidget(plus_btn)
-
-
-
-        parent_layout.addLayout(row)
-
-
-
-        widget = {
-
-            "slider": slider,
-
-            "spin": spin,
-
-            "min": float(minimum),
-
-            "max": float(maximum),
-
-            "is_int": is_int,
-
-        }
-
-
-
-        def spin_to_slider(v):
-
-            ratio = 0.0 if widget["max"] <= widget["min"] else (float(v) - widget["min"]) / (widget["max"] - widget["min"])
-
-            slider.blockSignals(True)
-
-            slider.setValue(int(max(0.0, min(1.0, ratio)) * 1000.0))
-
-            slider.blockSignals(False)
-
-
-
-        def slider_to_spin(v):
-
-            ratio = float(v) / 1000.0
-
-            out = widget["min"] + ((widget["max"] - widget["min"]) * ratio)
-
-            spin.blockSignals(True)
-
-            if widget["is_int"]:
-
-                spin.setValue(int(round(out)))
-
-            else:
-
-                spin.setValue(float(out))
-
-            spin.blockSignals(False)
-
-
-
-        spin.valueChanged.connect(spin_to_slider)
-
-        slider.valueChanged.connect(slider_to_spin)
-
-
-
-        def step_spin(delta):
-
-            step = 1 if widget["is_int"] else (10 ** (-spin.decimals()))
-
-            spin.setValue(spin.value() + (step * delta))
-
-
-
-        minus_btn.clicked.connect(lambda: step_spin(-1))
-
-        plus_btn.clicked.connect(lambda: step_spin(1))
-
-        spin_to_slider(spin.value())
-
-
-
-        return widget
-
-
-
-    def _value(self, control):
-
-        return control["spin"].value()
-
-
-
-    def _set_enabled(self, control, enabled):
-
-        control["slider"].setEnabled(enabled)
-
-        control["spin"].setEnabled(enabled)
-
-
-
-    def update_ui_states(self, *args):
-
-        use_edge = self.chk_edge_angle.isChecked()
-
-        show_normals = self.chk_display.isChecked()
-
-
-
-        self._set_enabled(self.edge_angle, use_edge)
-
-        self._set_enabled(self.display_length, show_normals)
-
-    def _on_ui_scale_changed(self, index):
-
-        if index < 0:
-
-            return
-
-        factor = self.scale_combo.itemData(index)
-
-        self._apply_ui_scale(float(factor))
-
-
-
-    def _apply_ui_scale(self, factor):
-
-        self._ui_scale = max(0.5, min(2.0, float(factor)))
-
-        font = self.font()
-
-        font.setPointSizeF(self._base_font_size * self._ui_scale)
-
-        self.setFont(font)
-
-        self.btn_apply.setMinimumHeight(max(24, int(round(34 * self._ui_scale))))
-
-        self.btn_unfreeze.setMinimumHeight(max(20, int(round(28 * self._ui_scale))))
-
-        self._refresh_dialog_size()
-
-
-
-    def _refresh_dialog_size(self, *args):
-
-        self.layout().activate()
-
-        self.adjustSize()
-
-
-
-    # =========================================================
-
-    # HELPERS
-
-    # =========================================================
-
-    def get_selected_meshes(self):
-
-        sel = om.MGlobal.getActiveSelectionList()
-
-        meshes = []
-
-
-
-        for i in range(sel.length()):
-
-            try:
-
-                dag_path = sel.getDagPath(i)
-
-
-
-                if dag_path.hasFn(om.MFn.kTransform):
-
-                    try:
-
-                        dag_path.extendToShape()
-
-                    except Exception:
-
-                        pass
-
-
-
-                if dag_path.hasFn(om.MFn.kMesh):
-
-                    meshes.append(dag_path)
-
-            except Exception:
-
-                continue
-
-
-
-        return meshes
-
-
-
-    def safe_normalize(self, vec):
-
-        out_vec = om.MVector(vec)
-
-        if out_vec.length() > 1e-8:
-
-            out_vec.normalize()
-
-            return out_vec
-
-        return om.MVector(0.0, 1.0, 0.0)
-
-
-
-    def nlerp(self, a, b, t):
-
-        t = max(0.0, min(1.0, t))
-
-        out_vec = (a * (1.0 - t)) + (b * t)
-
-        return self.safe_normalize(out_vec)
-
-
-
-    def angle_between_normals_deg(self, a, b):
-
-        na = self.safe_normalize(a)
-
-        nb = self.safe_normalize(b)
-
-        dotv = max(-1.0, min(1.0, na * nb))
-
-        return math.degrees(math.acos(dotv))
-
-
-
-    def get_polygon_area(self, mesh_fn, face_id):
-
-        verts = mesh_fn.getPolygonVertices(face_id)
-
-        if len(verts) < 3:
-
-            return 0.0
-
-
-
-        p0 = om.MVector(mesh_fn.getPoint(verts[0], om.MSpace.kWorld))
-
-        area = 0.0
-
-
-
-        for i in range(1, len(verts) - 1):
-
-            p1 = om.MVector(mesh_fn.getPoint(verts[i], om.MSpace.kWorld))
-
-            p2 = om.MVector(mesh_fn.getPoint(verts[i + 1], om.MSpace.kWorld))
-
-            area += ((p1 - p0) ^ (p2 - p0)).length() * 0.5
-
-
-
-        return area
-
-
-
-    def get_weight_mode(self):
-
-        checked = self.mode_group.checkedButton()
-
-        if checked is None:
-
-            return "area"
-
-        return checked.property("mode")
-
-
-
-    def get_incidence_weight(self, source_normal, target_normal):
-
-        dotv = max(-1.0, min(1.0, self.safe_normalize(source_normal) * self.safe_normalize(target_normal)))
-
-        return max(0.0, dotv)
-
-
-
-    def build_face_cache(self, mesh_fn):
-
-        face_count = mesh_fn.numPolygons
-
-        face_normals = {}
-
-
-
-        for f_id in range(face_count):
-
-            try:
-
-                face_normals[f_id] = self.safe_normalize(
-
-                    om.MVector(mesh_fn.getPolygonNormal(f_id, om.MSpace.kWorld))
-
-                )
-
-            except Exception:
-
-                continue
-
-
-
-        return face_normals
-
-
-
-    def build_smooth_face_adjacency(self, dag_path):
-
-        adjacency = {}
-
-        edge_iter = om.MItMeshEdge(dag_path)
-
-        while not edge_iter.isDone():
-
-            smooth_attr = edge_iter.isSmooth
-            is_smooth = smooth_attr() if callable(smooth_attr) else bool(smooth_attr)
-            if is_smooth:
-
-                linked_faces = edge_iter.getConnectedFaces()
-                if len(linked_faces) == 2:
-                    f0, f1 = linked_faces[0], linked_faces[1]
-                    adjacency.setdefault(f0, set()).add(f1)
-                    adjacency.setdefault(f1, set()).add(f0)
-
-            edge_iter.next()
-
-        return adjacency
-
-
-
-    def get_filtered_neighbor_faces(
-
-        self,
-
-        target_face_id,
-
-        connected_faces,
-
-        face_normals,
-
-        smooth_face_adjacency,
-
-        use_soft_edges,
-
-        use_edge_angle,
-
-        edge_angle_limit,
-
-    ):
-
-        valid_faces = list(connected_faces)
-
-        if use_soft_edges:
-            soft_neighbors = smooth_face_adjacency.get(target_face_id, set())
-            valid_faces = [f for f in valid_faces if (f == target_face_id or f in soft_neighbors)]
-
-        if not use_edge_angle:
-            return valid_faces or [target_face_id]
-
-
-
-        target_normal = face_normals.get(target_face_id)
-
-        if target_normal is None:
-
-            return [target_face_id]
-
-
-
-        angle_filtered_faces = []
-
-        for other_face_id in valid_faces:
-
-            other_normal = face_normals.get(other_face_id)
-
-            if other_normal is None:
-
-                continue
-
-
-
-            ang = self.angle_between_normals_deg(target_normal, other_normal)
-
-            if ang <= edge_angle_limit:
-
-                angle_filtered_faces.append(other_face_id)
-
-
-
-        if not angle_filtered_faces:
-
-            angle_filtered_faces = [target_face_id]
-
-        return angle_filtered_faces
-
-
-
-    def apply_soft_smoothing(self, result_normal, ref_normal, smoothing, iterations):
-
-        if smoothing <= 0.0 or iterations <= 1:
-
-            return self.safe_normalize(result_normal)
-
-
-
-        out_vec = om.MVector(result_normal)
-
-        blend_step = max(0.0, min(1.0, smoothing)) * 0.15
-
-
-
-        for _ in range(iterations - 1):
-
-            out_vec = self.nlerp(out_vec, ref_normal, blend_step)
-
-
-
-        return self.safe_normalize(out_vec)
-
-
-
-    # =========================================================
-
-    # ACTIONS
-
-    # =========================================================
-
-    def unfreeze_normals(self, *args):
-
-        meshes = self.get_selected_meshes()
-
-        if not meshes:
-
-            om.MGlobal.displayWarning("Sélectionne un mesh.")
-
-            return
-
-
-
-        current_sel = cmds.ls(sl=True, long=True) or []
-
-
-
-        for dag_path in meshes:
-
-            try:
-
-                cmds.select(dag_path.fullPathName(), r=True)
-
-                cmds.polyNormalPerVertex(unFreezeNormal=True)
-
-            except Exception:
-
-                pass
-
-
-
-        if current_sel:
-
-            try:
-
-                cmds.select(current_sel, r=True)
-
-            except Exception:
-
-                pass
-
-
-
-        om.MGlobal.displayInfo("Normals déverrouillées.")
-
-
-
-    def toggle_display(self, *args):
-
-        self.update_ui_states()
-
-        val = self.chk_display.isChecked()
-
-
-
-        length = self._value(self.display_length)
-
-        meshes = self.get_selected_meshes()
-
-        if not meshes:
-
-            return
-
-
-
-        current_sel = cmds.ls(sl=True, long=True) or []
-
-
-
-        for dag_path in meshes:
-
-            try:
-
-                mesh_name = dag_path.fullPathName()
-
-                cmds.select(mesh_name, r=True)
-
-
-
-                if val:
-
-                    mel.eval("polyOptions -displayNormal true -sizeNormal {};".format(length))
-
-                else:
-
-                    mel.eval("polyOptions -displayNormal false;")
-
-            except Exception:
-
-                pass
-
-
-
-        if current_sel:
-
-            try:
-
-                cmds.select(current_sel, r=True)
-
-            except Exception:
-
-                pass
-
-
-
-    def apply_normals(self, *args):
-
-        meshes = self.get_selected_meshes()
-
-        if not meshes:
-
-            om.MGlobal.displayWarning("Sélectionne un maillage polygonal d'abord !")
-
-            return
-
-
-
-        weight_mode = self.get_weight_mode()
-
-        angle_bias = self._value(self.angle_bias)
-
-        blending = self._value(self.blending)
-
-
-
-        use_soft_edges = self.chk_soft_edges.isChecked()
-
-        use_edge_angle = self.chk_edge_angle.isChecked()
-
-        edge_angle_limit = self._value(self.edge_angle)
-
-
-
-        smoothing = self._value(self.smoothing)
-
-        iterations = self._value(self.iterations)
-
-
-
-        current_sel = cmds.ls(sl=True, long=True) or []
-
-
-
-        for dag_path in meshes:
-
-            try:
-
-                cmds.select(dag_path.fullPathName(), r=True)
-
-                cmds.polyNormalPerVertex(unFreezeNormal=True)
-
-            except Exception as e:
-
-                om.MGlobal.displayWarning(
-
-                    "Erreur lors du déverrouillage des normales : {}".format(e)
-
-                )
-
-
-
-        for dag_path in meshes:
-
-            mesh_fn = om.MFnMesh(dag_path)
-
-            face_normals = self.build_face_cache(mesh_fn)
-            smooth_face_adjacency = self.build_smooth_face_adjacency(dag_path)
-
-
-
-            vert_iter = om.MItMeshVertex(dag_path)
-
-            new_normals = []
-
-            face_ids = []
-
-            vert_ids = []
-
-
-
-            while not vert_iter.isDone():
-
-                v_id = vert_iter.index()
-
-                connected_faces = list(vert_iter.getConnectedFaces())
-
-
-
-                if not connected_faces:
-
-                    vert_iter.next()
-
-                    continue
-
-
-
-                area_weights = {}
-
-                for f_id in connected_faces:
-                    try:
-                        area_weights[f_id] = self.get_polygon_area(mesh_fn, f_id)
-                    except Exception:
-                        area_weights[f_id] = 0.0
-
-
-
-                for current_face_id in connected_faces:
-
-                    current_face_normal = face_normals.get(current_face_id)
-
-                    if current_face_normal is None:
-
-                        continue
-
-
-
-                    valid_faces = self.get_filtered_neighbor_faces(
-
-                        target_face_id=current_face_id,
-
-                        connected_faces=connected_faces,
-
-                        face_normals=face_normals,
-
-                        smooth_face_adjacency=smooth_face_adjacency,
-
-                        use_soft_edges=use_soft_edges,
-
-                        use_edge_angle=use_edge_angle,
-
-                        edge_angle_limit=edge_angle_limit,
-
-                    )
-
-
-
-                    if not valid_faces:
-
-                        valid_faces = [current_face_id]
-
-
-
-                    max_area = max([area_weights.get(fid, 0.0) for fid in valid_faces] or [0.0])
-
-
-
-                    weighted_sum = om.MVector(0.0, 0.0, 0.0)
-
-                    ref_sum = om.MVector(0.0, 0.0, 0.0)
-
-
-
-                    for other_face_id in valid_faces:
-
-                        other_normal = face_normals.get(other_face_id)
-
-                        if other_normal is None:
-
-                            continue
-
-
-
-                        area_w = area_weights.get(other_face_id, 0.0)
-                        if area_w <= 1e-8:
-                            continue
-
-                        incidence_w = self.get_incidence_weight(current_face_normal, other_normal)
-                        area_norm = 0.0 if max_area <= 1e-8 else (area_w / max_area)
-
-                        if weight_mode == "area":
-                            final_w = area_w
-                        elif weight_mode == "angle":
-                            final_w = incidence_w
-                        else:
-                            final_w = ((1.0 - angle_bias) * area_norm) + (angle_bias * incidence_w)
-
-                        if final_w <= 1e-8:
-                            continue
-
-
-
-                        weighted_sum += (other_normal * final_w)
-
-                        ref_sum += other_normal
-
-
-
-                    if weighted_sum.length() <= 1e-8:
-
-                        result_normal = om.MVector(current_face_normal)
-
-                    else:
-
-                        result_normal = self.safe_normalize(weighted_sum)
-
-
-
-                    if ref_sum.length() > 1e-8:
-
-                        ref_normal = self.safe_normalize(ref_sum)
-
-                        result_normal = self.apply_soft_smoothing(
-
-                            result_normal=result_normal,
-
-                            ref_normal=ref_normal,
-
-                            smoothing=smoothing,
-
-                            iterations=iterations,
-
-                        )
-
-
-
-                    try:
-
-                        current_fv_normal = om.MVector(
-
-                            mesh_fn.getFaceVertexNormal(current_face_id, v_id, om.MSpace.kWorld)
-
-                        )
-
-                    except Exception:
-
-                        current_fv_normal = om.MVector(result_normal)
-
-
-
-                    out_normal = self.nlerp(current_fv_normal, result_normal, blending)
-
-
-
-                    new_normals.append(self.safe_normalize(out_normal))
-
-                    face_ids.append(current_face_id)
-
-                    vert_ids.append(v_id)
-
-
-
-                vert_iter.next()
-
-
-
-            if new_normals:
-
-                try:
-
-                    mesh_fn.setFaceVertexNormals(
-
-                        new_normals,
-
-                        face_ids,
-
-                        vert_ids,
-
-                        om.MSpace.kWorld,
-
-                    )
-
-                except Exception as e:
-
-                    om.MGlobal.displayWarning(
-
-                        "Impossible d'appliquer les normales sur {} : {}".format(
-
-                            dag_path.fullPathName(), e
-
-                        )
-
-                    )
-
-
-
-        if current_sel:
-
-            try:
-
-                cmds.select(current_sel, r=True)
-
-            except Exception:
-
-                pass
-
-
-
-        om.MGlobal.displayInfo("Weighted Normals Pro appliquées.")
-
-
-
-        if self.chk_display.isChecked():
-
-            self.toggle_display()
-
-
-
-
-
-def maya_main_window():
-
-    ptr = omui.MQtUtil.mainWindow()
-
-    if ptr is None:
-
+# ============================================================
+# MAYA MAIN WINDOW
+# ============================================================
+def get_maya_main_window():
+    try:
+        main_window_ptr = omui.MQtUtil.mainWindow()
+        return wrapInstance(int(main_window_ptr), QtWidgets.QWidget)
+    except:
         return None
 
-    return wrapInstance(int(ptr), QtWidgets.QWidget)
+
+# ============================================================
+# CORE FUNCTIONS
+# ============================================================
+def separate_all_meshes_optimized(batch_size=200, progress_callback=None):
+    """
+    Separate all meshes in scene in optimized way.
+    Uses polySeparate with proper settings to avoid deletion.
+    """
+    # Get all mesh transforms
+    all_meshes = cmds.ls(type='mesh', long=True)
+    
+    if not all_meshes:
+        return {"total": 0, "separated": 0, "skipped": 0, "errors": 0}
+    
+    # Filter to get unique transforms
+    mesh_transforms = []
+    seen = set()
+    for mesh in all_meshes:
+        parent = cmds.listRelatives(mesh, parent=True, fullPath=True)
+        if parent and parent[0] not in seen:
+            mesh_transforms.append(parent[0])
+            seen.add(parent[0])
+    
+    total_meshes = len(mesh_transforms)
+    separated_count = 0
+    skipped_count = 0
+    error_count = 0
+    
+    # Process by batch for optimization
+    for batch_start in range(0, total_meshes, batch_size):
+        batch_end = min(batch_start + batch_size, total_meshes)
+        batch = mesh_transforms[batch_start:batch_end]
+        
+        if progress_callback:
+            progress_callback(batch_start, total_meshes, 
+                            f"Batch {batch_start//batch_size + 1}: {batch_start}-{batch_end}/{total_meshes}")
+        
+        for mesh_transform in batch:
+            try:
+                # Check if object still exists
+                if not cmds.objExists(mesh_transform):
+                    skipped_count += 1
+                    continue
+                
+                # Check number of shells
+                try:
+                    num_shells = cmds.polyEvaluate(mesh_transform, shell=True)
+                except:
+                    skipped_count += 1
+                    continue
+                
+                # Only separate if multiple shells
+                if num_shells and num_shells > 1:
+                    try:
+                        # EXACT syntax from original working script
+                        separated = cmds.polySeparate(
+                            mesh_transform,
+                            constructionHistory=False,
+                            removeShells=False
+                        )
+                        
+                        if separated and len(separated) > 1:
+                            separated_count += 1
+                        else:
+                            skipped_count += 1
+                            
+                    except Exception as e:
+                        error_count += 1
+                        print(f"Separation error {mesh_transform}: {str(e)}")
+                else:
+                    skipped_count += 1
+                    
+            except Exception as e:
+                error_count += 1
+                print(f"Processing error {mesh_transform}: {str(e)}")
+    
+    cmds.select(clear=True)
+    
+    return {
+        "total": total_meshes,
+        "separated": separated_count,
+        "skipped": skipped_count,
+        "errors": error_count
+    }
 
 
+def separate_selected_meshes():
+    """Separate only selected meshes."""
+    selection = cmds.ls(selection=True, type='transform')
+    
+    if not selection:
+        return {"success": False, "message": "No selection"}
+    
+    separated_count = 0
+    results = []
+    
+    for obj in selection:
+        try:
+            num_shells = cmds.polyEvaluate(obj, shell=True)
+            
+            if num_shells and num_shells > 1:
+                # EXACT syntax from original working script
+                separated = cmds.polySeparate(
+                    obj, 
+                    constructionHistory=False, 
+                    removeShells=False
+                )
+                
+                if separated and len(separated) > 1:
+                    separated_count += 1
+                    results.append(f"'{obj}' -> {len(separated)} objects")
+                    
+        except Exception as e:
+            results.append(f"Error: {obj}")
+    
+    cmds.select(clear=True)
+    
+    return {
+        "success": True,
+        "count": separated_count,
+        "results": results
+    }
 
 
-
-def show_weighted_normals_tool():
-
-    for widget in QtWidgets.QApplication.allWidgets():
-
-        object_name = widget.objectName if isinstance(widget.objectName, str) else widget.objectName()
-
-        if object_name == WeightedNormalsTool.WINDOW_NAME:
-
-            widget.close()
-
-            widget.deleteLater()
-
-
-
-    tool = WeightedNormalsTool(parent=maya_main_window())
-
-    tool.show()
-
-    return tool
-
-
-
+def combine_selection(keep_history=False):
+    """Combine selection into a single mesh."""
+    selection = cmds.ls(selection=True, type='transform')
+    
+    if not selection or len(selection) < 2:
+        return {"success": False, "message": "Select at least 2 meshes"}
+    
+    try:
+        combined = cmds.polyUnite(selection, constructionHistory=keep_history, mergeUVSets=1)
+        
+        if combined:
+            cmds.xform(combined[0], centerPivots=True)
+            cmds.select(combined[0], replace=True)
+            
+            return {
+                "success": True,
+                "object": combined[0],
+                "count": len(selection)
+            }
+    except Exception as e:
+        return {"success": False, "message": str(e)}
 
 
-show_weighted_normals_tool()
+def get_scene_stats():
+    """Obtient les statistiques de la scène."""
+    all_meshes = cmds.ls(type='mesh')
+    mesh_transforms = []
+    
+    for mesh in all_meshes:
+        parent = cmds.listRelatives(mesh, parent=True)
+        if parent and parent[0] not in mesh_transforms:
+            mesh_transforms.append(parent[0])
+    
+    combined_count = 0
+    for mesh in mesh_transforms:
+        try:
+            num_shells = cmds.polyEvaluate(mesh, shell=True)
+            if num_shells and num_shells > 1:
+                combined_count += 1
+        except:
+            pass
+    
+    selection = cmds.ls(selection=True)
+    
+    return {
+        "total_meshes": len(mesh_transforms),
+        "combined_meshes": combined_count,
+        "simple_meshes": len(mesh_transforms) - combined_count,
+        "selection_count": len(selection)
+    }
+
+
+# ============================================================
+# UI
+# ============================================================
+class MeshToolsUI(QtWidgets.QDialog):
+    _instance = None
+
+    def __init__(self, parent=get_maya_main_window()):
+        super(MeshToolsUI, self).__init__(parent)
+
+        self.setWindowTitle("Mesh Tools Pro")
+        self.setFixedWidth(300)
+        self.setWindowFlags(
+            QtCore.Qt.Window |
+            QtCore.Qt.WindowCloseButtonHint
+        )
+
+        self._build_ui()
+        self._apply_style()
+        self._update_stats()
+
+    def _build_ui(self):
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(4)
+
+        # =========================
+        # STATS
+        # =========================
+        self.stats_label = QtWidgets.QLabel("Loading...")
+        self.stats_label.setObjectName("statsLabel")
+        self.stats_label.setAlignment(QtCore.Qt.AlignCenter)
+        layout.addWidget(self.stats_label)
+
+        # =========================
+        # SEPARATE
+        # =========================
+        sep_label = QtWidgets.QLabel("SEPARATE")
+        sep_label.setObjectName("sectionLabel")
+        layout.addWidget(sep_label)
+
+        # Batch size
+        batch_layout = QtWidgets.QHBoxLayout()
+        batch_layout.setSpacing(6)
+        
+        batch_lbl = QtWidgets.QLabel("Batch:")
+        batch_lbl.setFixedWidth(45)
+        batch_layout.addWidget(batch_lbl)
+        
+        self.batch_spin = QtWidgets.QSpinBox()
+        self.batch_spin.setMinimum(50)
+        self.batch_spin.setMaximum(1000)
+        self.batch_spin.setValue(200)
+        self.batch_spin.setSingleStep(50)
+        self.batch_spin.setFixedWidth(70)
+        batch_layout.addWidget(self.batch_spin)
+        
+        batch_layout.addStretch()
+        layout.addLayout(batch_layout)
+
+        # Buttons
+        btn_layout1 = QtWidgets.QHBoxLayout()
+        btn_layout1.setSpacing(6)
+
+        self.btn_sep_all = QtWidgets.QPushButton("Separate All")
+        self.btn_sep_all.setFixedHeight(26)
+        self.btn_sep_all.clicked.connect(self._on_separate_all)
+        btn_layout1.addWidget(self.btn_sep_all)
+
+        self.btn_sep_sel = QtWidgets.QPushButton("Separate Selection")
+        self.btn_sep_sel.setFixedHeight(26)
+        self.btn_sep_sel.clicked.connect(self._on_separate_selected)
+        btn_layout1.addWidget(self.btn_sep_sel)
+
+        layout.addLayout(btn_layout1)
+
+        # =========================
+        # COMBINE
+        # =========================
+        comb_label = QtWidgets.QLabel("COMBINE")
+        comb_label.setObjectName("sectionLabel")
+        layout.addWidget(comb_label)
+
+        self.chk_keep_history = QtWidgets.QCheckBox("Keep History")
+        self.chk_keep_history.setChecked(False)
+        layout.addWidget(self.chk_keep_history)
+
+        self.btn_combine = QtWidgets.QPushButton("Combine Selection")
+        self.btn_combine.setFixedHeight(26)
+        self.btn_combine.clicked.connect(self._on_combine)
+        layout.addWidget(self.btn_combine)
+
+        # =========================
+        # LOG
+        # =========================
+        log_label = QtWidgets.QLabel("LOG")
+        log_label.setObjectName("sectionLabel")
+        layout.addWidget(log_label)
+
+        self.log_text = QtWidgets.QTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setFixedHeight(100)
+        self.log_text.setObjectName("logConsole")
+        layout.addWidget(self.log_text)
+
+        layout.addStretch()
+
+        self._log("? Ready")
+
+    def _apply_style(self):
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #2d2d2d;
+                border: 1px solid #3d3d3d;
+                border-radius: 4px;
+            }
+            
+            QLabel { 
+                color: #b0b0b0; 
+                font-size: 11px; 
+            }
+            
+            QLabel#sectionLabel {
+                color: #707070;
+                font-size: 9px;
+                font-weight: bold;
+                padding-top: 6px;
+                padding-bottom: 2px;
+                border-top: 1px solid #3a3a3a;
+                margin-top: 4px;
+            }
+            
+            QLabel#statsLabel {
+                color: #808080;
+                font-size: 10px;
+                padding: 4px;
+            }
+            
+            QPushButton {
+                background-color: #353535;
+                color: #b0b0b0;
+                border: 1px solid #4a4a4a;
+                border-radius: 2px;
+                font-size: 11px;
+                padding: 4px 8px;
+            }
+            QPushButton:hover { 
+                background-color: #404040; 
+                border: 1px solid #5a5a5a;
+            }
+            QPushButton:pressed { 
+                background-color: #2a2a2a; 
+            }
+            
+            QSpinBox {
+                background-color: #252525;
+                color: #b0b0b0;
+                border: 1px solid #3a3a3a;
+                border-radius: 2px;
+                padding: 3px;
+                font-size: 11px;
+            }
+            
+            QCheckBox { 
+                color: #b0b0b0; 
+                font-size: 11px; 
+                spacing: 6px; 
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+                border: 1px solid #4a4a4a;
+                background-color: #252525;
+                border-radius: 3px;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #5a2a2a;
+                border-color: #e84d4d;
+            }
+            
+            QTextEdit#logConsole {
+                background-color: #1a1a1a;
+                color: #909090;
+                border: 1px solid #2a2a2a;
+                border-radius: 2px;
+                font-family: 'Courier New', monospace;
+                font-size: 9px;
+                padding: 4px;
+            }
+            
+            QProgressBar {
+                border: 1px solid #3a3a3a;
+                border-radius: 2px;
+                background-color: #252525;
+                text-align: center;
+                color: #b0b0b0;
+                font-size: 10px;
+                height: 18px;
+            }
+            QProgressBar::chunk {
+                background-color: #4a4a4a;
+                border-radius: 1px;
+            }
+        """)
+
+    def _log(self, message):
+        """Ajoute un message au log."""
+        self.log_text.append(message)
+        print(message)
+
+    def _update_stats(self):
+        """Update displayed statistics."""
+        stats = get_scene_stats()
+        text = f"Scene: {stats['total_meshes']} | Combined: {stats['combined_meshes']} | Selected: {stats['selection_count']}"
+        self.stats_label.setText(text)
+
+    def _on_separate_all(self):
+        """Launch separation of all meshes."""
+        self._log("\n" + "="*50)
+        self._log("SEPARATE ALL MESHES - OPTIMIZED")
+        self._log("="*50)
+        
+        batch_size = self.batch_spin.value()
+        self._log(f"Batch size: {batch_size}")
+        
+        # Create progress dialog
+        progress_dialog = QtWidgets.QProgressDialog(
+            "Processing meshes...", 
+            "Cancel", 
+            0, 100, 
+            self
+        )
+        progress_dialog.setWindowTitle("Separating")
+        progress_dialog.setWindowModality(QtCore.Qt.WindowModal)
+        progress_dialog.setMinimumDuration(0)
+        progress_dialog.setValue(0)
+        
+        def progress_callback(current, total, message):
+            if progress_dialog.wasCanceled():
+                return
+            percent = int((current / total) * 100)
+            progress_dialog.setValue(percent)
+            progress_dialog.setLabelText(message)
+            QtWidgets.QApplication.processEvents()
+        
+        # Execute separation
+        result = separate_all_meshes_optimized(batch_size, progress_callback)
+        
+        progress_dialog.setValue(100)
+        progress_dialog.close()
+        
+        # Display results
+        self._log(f"\nDONE")
+        self._log(f"  Processed: {result['total']}")
+        self._log(f"  Separated: {result['separated']}")
+        self._log(f"  Skipped: {result['skipped']}")
+        self._log(f"  Errors: {result['errors']}")
+        self._log("="*50)
+        
+        self._update_stats()
+
+    def _on_separate_selected(self):
+        """Launch separation of selection."""
+        self._log(f"\nSeparating selection...")
+        
+        result = separate_selected_meshes()
+        
+        if not result["success"]:
+            self._log(f"! {result['message']}")
+            cmds.warning(result['message'])
+            return
+        
+        for line in result["results"]:
+            self._log(f"  {line}")
+        
+        self._log(f"Done: {result['count']} separated")
+        self._update_stats()
+
+    def _on_combine(self):
+        """Launch combination of selection."""
+        self._log(f"\nCombining selection...")
+        
+        keep_history = self.chk_keep_history.isChecked()
+        result = combine_selection(keep_history)
+        
+        if not result["success"]:
+            self._log(f"! {result['message']}")
+            cmds.warning(result['message'])
+            return
+        
+        self._log(f"Done: {result['count']} meshes -> '{result['object']}'")
+        self._update_stats()
+
+    def closeEvent(self, event):
+        MeshToolsUI._instance = None
+        super(MeshToolsUI, self).closeEvent(event)
+
+    @classmethod
+    def show_ui(cls):
+        if cls._instance:
+            try:
+                cls._instance.close()
+                cls._instance.deleteLater()
+            except:
+                pass
+        cls._instance = cls()
+        cls._instance.show()
+        return cls._instance
+
+
+def show_ui():
+    return MeshToolsUI.show_ui()
+
+
+# Run
+if __name__ == "__main__":
+    show_ui()

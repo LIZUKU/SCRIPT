@@ -1,226 +1,280 @@
 # -*- coding: utf-8 -*-
 import math
+
 import maya.cmds as cmds
 import maya.mel as mel
 import maya.api.OpenMaya as om
+import maya.OpenMayaUI as omui
+
+try:
+    from PySide6 import QtCore, QtWidgets
+    from shiboken6 import wrapInstance
+except ImportError:
+    from PySide2 import QtCore, QtWidgets
+    from shiboken2 import wrapInstance
 
 
-class WeightedNormalsTool:
-    def __init__(self):
-        self.window_name = "WeightedNormalsUI_PowerSnap"
-        self.build_ui()
+class CollapsibleSection(QtWidgets.QWidget):
+    def __init__(self, title, parent=None, expanded=False):
+        super(CollapsibleSection, self).__init__(parent)
+        self.toggle_button = QtWidgets.QToolButton()
+        self.toggle_button.setText(title)
+        self.toggle_button.setCheckable(True)
+        self.toggle_button.setChecked(expanded)
+        self.toggle_button.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+        self.toggle_button.setArrowType(
+            QtCore.Qt.DownArrow if expanded else QtCore.Qt.RightArrow
+        )
+
+        self.content = QtWidgets.QWidget()
+        self.content_layout = QtWidgets.QVBoxLayout(self.content)
+        self.content_layout.setContentsMargins(8, 8, 8, 8)
+        self.content.setVisible(expanded)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        layout.addWidget(self.toggle_button)
+        layout.addWidget(self.content)
+
+        self.toggle_button.toggled.connect(self._on_toggled)
+
+    def _on_toggled(self, checked):
+        self.content.setVisible(checked)
+        self.toggle_button.setArrowType(QtCore.Qt.DownArrow if checked else QtCore.Qt.RightArrow)
+
+
+class WeightedNormalsTool(QtWidgets.QDialog):
+    WINDOW_NAME = "WeightedNormalsUI_PowerSnap"
+
+    def __init__(self, parent=None):
+        super(WeightedNormalsTool, self).__init__(parent)
+        self.setObjectName(self.WINDOW_NAME)
+        self.setWindowTitle("Weighted Normals Pro")
+        self.resize(420, 760)
+
+        self._build_ui()
+        self.update_ui_states()
 
     # =========================================================
     # UI
     # =========================================================
-    def build_ui(self):
-        if cmds.window(self.window_name, exists=True):
-            cmds.deleteUI(self.window_name)
+    def _build_ui(self):
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(8)
 
-        self.window = cmds.window(
-            self.window_name,
-            title="Weighted Normals Pro",
-            widthHeight=(360, 700),
-            sizeable=True
+        self._build_weighting_section(root)
+        self._build_hard_edges_section(root)
+        self._build_smoothing_section(root)
+        self._build_display_section(root)
+
+        root.addSpacing(4)
+
+        self.btn_apply = QtWidgets.QPushButton("APPLY WEIGHTED NORMALS")
+        self.btn_apply.setMinimumHeight(40)
+        self.btn_apply.clicked.connect(self.apply_normals)
+
+        self.btn_unfreeze = QtWidgets.QPushButton("UNFREEZE NORMALS")
+        self.btn_unfreeze.setMinimumHeight(30)
+        self.btn_unfreeze.clicked.connect(self.unfreeze_normals)
+
+        root.addWidget(self.btn_apply)
+        root.addWidget(self.btn_unfreeze)
+        root.addStretch(1)
+
+        self.setStyleSheet(
+            """
+            QDialog { background: #252525; color: #e8e8e8; }
+            QToolButton {
+                background: #343434;
+                border: 1px solid #4a4a4a;
+                border-radius: 6px;
+                padding: 6px;
+                font-weight: 600;
+                text-align: left;
+            }
+            QGroupBox {
+                border: 1px solid #444;
+                border-radius: 8px;
+                margin-top: 10px;
+                padding-top: 12px;
+                background: #2a2a2a;
+            }
+            QLabel { color: #d8d8d8; }
+            QCheckBox, QRadioButton, QPushButton { font-size: 12px; }
+            QDoubleSpinBox, QSpinBox {
+                background: #1f1f1f;
+                border: 1px solid #4d4d4d;
+                border-radius: 4px;
+                min-height: 22px;
+                padding: 1px 4px;
+            }
+            QSlider::groove:horizontal { height: 6px; background: #4b4b4b; border-radius: 3px; }
+            QSlider::handle:horizontal { background: #7fa8ff; width: 12px; margin: -4px 0; border-radius: 6px; }
+            QPushButton {
+                background: #3a3a3a;
+                border: 1px solid #505050;
+                border-radius: 6px;
+                padding: 6px;
+            }
+            QPushButton:hover { background: #474747; }
+            QPushButton#apply_btn { background: #2f6db2; border-color: #4d88cc; font-weight: 700; }
+            QPushButton#apply_btn:hover { background: #3a7ec9; }
+            QPushButton[modeBtn="true"] { background: #3c3c3c; border: 1px solid #606060; }
+            QPushButton[modeBtn="true"]:checked {
+                background: #a23333;
+                border: 1px solid #d95d5d;
+                color: #ffffff;
+                font-weight: 700;
+            }
+            """
         )
+        self.btn_apply.setObjectName("apply_btn")
 
-        main_col = cmds.columnLayout(adjustableColumn=True, rowSpacing=8)
+    def _build_weighting_section(self, parent_layout):
+        section = CollapsibleSection("Weighting", expanded=True)
+        parent_layout.addWidget(section)
+        layout = section.content_layout
 
-        # -------------------------
-        # WEIGHTING
-        # -------------------------
-        cmds.frameLayout(
-            label="Weighting",
-            collapsable=True,
-            collapse=False,
-            marginWidth=6,
-            marginHeight=6,
-            bgc=(0.2, 0.2, 0.2)
-        )
-        cmds.columnLayout(adjustableColumn=True, rowSpacing=4)
+        mode_row = QtWidgets.QHBoxLayout()
+        mode_row.setSpacing(6)
+        self.mode_group = QtWidgets.QButtonGroup(self)
+        self.mode_group.setExclusive(True)
 
-        self.weight_radio = cmds.radioCollection()
-        self.rb_area = cmds.radioButton(label="Area", select=True)
-        self.rb_angle = cmds.radioButton(label="Angle")
-        self.rb_both = cmds.radioButton(label="Area & Angle")
+        self.rb_area = QtWidgets.QPushButton("Area")
+        self.rb_angle = QtWidgets.QPushButton("Angle")
+        self.rb_both = QtWidgets.QPushButton("Area + Angle")
 
-        self.chk_convex = cmds.checkBox(
-            label="Use Convex Corner Angle",
-            value=True
-        )
+        for btn, mode in [(self.rb_area, "area"), (self.rb_angle, "angle"), (self.rb_both, "both")]:
+            btn.setCheckable(True)
+            btn.setProperty("modeBtn", True)
+            btn.setProperty("mode", mode)
+            self.mode_group.addButton(btn)
+            mode_row.addWidget(btn)
 
-        self.chk_snap = cmds.checkBox(
-            label="Snap To Largest Face",
-            value=True,
-            cc=self.update_ui_states
-        )
+        self.rb_area.setChecked(True)
+        layout.addLayout(mode_row)
 
-        self.flt_snap_strength = cmds.floatSliderGrp(
-            label="Snap Strength",
-            field=True,
-            minValue=0.0,
-            maxValue=1.0,
-            fieldMinValue=0.0,
-            fieldMaxValue=1.0,
-            value=0.9,
-            columnWidth3=(110, 50, 140)
-        )
+        self.chk_convex = QtWidgets.QCheckBox("Use Convex Corner Angle")
+        self.chk_convex.setChecked(True)
+        layout.addWidget(self.chk_convex)
 
-        self.int_snap_power = cmds.intSliderGrp(
-            label="Snap Power",
-            field=True,
-            minValue=1,
-            maxValue=32,
-            fieldMinValue=1,
-            fieldMaxValue=128,
-            value=15,
-            columnWidth3=(110, 50, 140)
-        )
+        self.chk_snap = QtWidgets.QCheckBox("Snap To Largest Face")
+        self.chk_snap.setChecked(True)
+        self.chk_snap.toggled.connect(self.update_ui_states)
+        layout.addWidget(self.chk_snap)
 
-        self.flt_blending = cmds.floatSliderGrp(
-            label="Blending",
-            field=True,
-            minValue=0.0,
-            maxValue=1.0,
-            fieldMinValue=0.0,
-            fieldMaxValue=1.0,
-            value=1.0,
-            columnWidth3=(110, 50, 140)
-        )
+        self.snap_strength = self._add_slider_row(layout, "Snap Strength", 0.0, 1.0, 0.9, decimals=2)
+        self.snap_power = self._add_slider_row(layout, "Snap Power", 1, 128, 15, is_int=True)
+        self.blending = self._add_slider_row(layout, "Blending", 0.0, 1.0, 1.0, decimals=2)
 
-        cmds.setParent(main_col)
+    def _build_hard_edges_section(self, parent_layout):
+        section = CollapsibleSection("Hard Edge Detection", expanded=False)
+        parent_layout.addWidget(section)
+        layout = section.content_layout
 
-        # -------------------------
-        # HARD EDGE DETECTION
-        # -------------------------
-        cmds.frameLayout(
-            label="Hard Edge Detection",
-            collapsable=True,
-            collapse=False,
-            marginWidth=6,
-            marginHeight=6,
-            bgc=(0.2, 0.2, 0.2)
-        )
-        cmds.columnLayout(adjustableColumn=True, rowSpacing=4)
+        self.chk_edge_angle = QtWidgets.QCheckBox("By Edge Angle")
+        self.chk_edge_angle.setChecked(False)
+        self.chk_edge_angle.toggled.connect(self.update_ui_states)
+        layout.addWidget(self.chk_edge_angle)
 
-        self.chk_edge_angle = cmds.checkBox(
-            label="By Edge Angle",
-            value=False,
-            cc=self.update_ui_states
-        )
+        self.edge_angle = self._add_slider_row(layout, "Edge Angle", 0.0, 180.0, 30.0, decimals=1)
 
-        self.flt_edge_angle = cmds.floatSliderGrp(
-            label="Edge Angle",
-            field=True,
-            minValue=0.0,
-            maxValue=180.0,
-            fieldMinValue=0.0,
-            fieldMaxValue=180.0,
-            value=30.0,
-            columnWidth3=(110, 50, 140)
-        )
+    def _build_smoothing_section(self, parent_layout):
+        section = CollapsibleSection("Smoothing", expanded=False)
+        parent_layout.addWidget(section)
+        layout = section.content_layout
 
-        cmds.setParent(main_col)
+        self.smoothing = self._add_slider_row(layout, "Smoothing", 0.0, 1.0, 0.0, decimals=2)
+        self.iterations = self._add_slider_row(layout, "Iterations", 1, 100, 1, is_int=True)
 
-        # -------------------------
-        # SMOOTHING
-        # -------------------------
-        cmds.frameLayout(
-            label="Smoothing",
-            collapsable=True,
-            collapse=False,
-            marginWidth=6,
-            marginHeight=6,
-            bgc=(0.2, 0.2, 0.2)
-        )
-        cmds.columnLayout(adjustableColumn=True, rowSpacing=4)
+    def _build_display_section(self, parent_layout):
+        section = CollapsibleSection("Display Normals", expanded=False)
+        parent_layout.addWidget(section)
+        layout = section.content_layout
 
-        self.flt_smooth = cmds.floatSliderGrp(
-            label="Smoothing",
-            field=True,
-            minValue=0.0,
-            maxValue=1.0,
-            fieldMinValue=0.0,
-            fieldMaxValue=1.0,
-            value=0.0,
-            columnWidth3=(110, 50, 140)
-        )
+        self.chk_display = QtWidgets.QCheckBox("Display Normals")
+        self.chk_display.setChecked(False)
+        self.chk_display.toggled.connect(self.toggle_display)
+        layout.addWidget(self.chk_display)
 
-        self.int_iterations = cmds.intSliderGrp(
-            label="Iterations",
-            field=True,
-            minValue=1,
-            maxValue=20,
-            fieldMinValue=1,
-            fieldMaxValue=100,
-            value=1,
-            columnWidth3=(110, 50, 140)
-        )
+        self.display_length = self._add_slider_row(layout, "Display Length", 0.1, 50.0, 10.0, decimals=2)
 
-        cmds.setParent(main_col)
+    def _add_slider_row(self, parent_layout, label, minimum, maximum, value, is_int=False, decimals=2):
+        row = QtWidgets.QHBoxLayout()
+        row.setSpacing(6)
 
-        # -------------------------
-        # DISPLAY
-        # -------------------------
-        cmds.frameLayout(
-            label="Display Normals",
-            collapsable=True,
-            collapse=False,
-            marginWidth=6,
-            marginHeight=6,
-            bgc=(0.2, 0.2, 0.2)
-        )
-        cmds.columnLayout(adjustableColumn=True, rowSpacing=4)
+        text = QtWidgets.QLabel(label)
+        text.setMinimumWidth(110)
+        row.addWidget(text)
 
-        self.chk_display = cmds.checkBox(
-            label="Display Normals",
-            value=False,
-            changeCommand=self.toggle_display
-        )
+        slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        slider.setMinimum(0)
+        slider.setMaximum(1000)
+        row.addWidget(slider, 1)
 
-        self.flt_display_len = cmds.floatSliderGrp(
-            label="Display Length",
-            field=True,
-            minValue=0.1,
-            maxValue=50.0,
-            fieldMinValue=0.001,
-            fieldMaxValue=9999.0,
-            value=10.0,
-            enable=False,
-            columnWidth3=(110, 50, 140)
-        )
+        if is_int:
+            spin = QtWidgets.QSpinBox()
+            spin.setRange(int(minimum), int(maximum))
+            spin.setValue(int(value))
+        else:
+            spin = QtWidgets.QDoubleSpinBox()
+            spin.setDecimals(decimals)
+            spin.setRange(float(minimum), float(maximum))
+            spin.setValue(float(value))
 
-        cmds.setParent(main_col)
+        spin.setMinimumWidth(78)
+        row.addWidget(spin)
 
-        cmds.separator(height=8, style='none')
+        parent_layout.addLayout(row)
 
-        cmds.button(
-            label="APPLY WEIGHTED NORMALS",
-            height=42,
-            bgc=(0.3, 0.5, 0.8),
-            command=self.apply_normals
-        )
+        widget = {
+            "slider": slider,
+            "spin": spin,
+            "min": float(minimum),
+            "max": float(maximum),
+            "is_int": is_int,
+        }
 
-        cmds.separator(height=6, style='none')
+        def spin_to_slider(v):
+            ratio = 0.0 if widget["max"] <= widget["min"] else (float(v) - widget["min"]) / (widget["max"] - widget["min"])
+            slider.blockSignals(True)
+            slider.setValue(int(max(0.0, min(1.0, ratio)) * 1000.0))
+            slider.blockSignals(False)
 
-        cmds.button(
-            label="UNFREEZE NORMALS",
-            height=28,
-            command=self.unfreeze_normals
-        )
+        def slider_to_spin(v):
+            ratio = float(v) / 1000.0
+            out = widget["min"] + ((widget["max"] - widget["min"]) * ratio)
+            spin.blockSignals(True)
+            if widget["is_int"]:
+                spin.setValue(int(round(out)))
+            else:
+                spin.setValue(float(out))
+            spin.blockSignals(False)
 
-        cmds.showWindow(self.window)
-        self.update_ui_states()
+        spin.valueChanged.connect(spin_to_slider)
+        slider.valueChanged.connect(slider_to_spin)
+        spin_to_slider(spin.value())
+
+        return widget
+
+    def _value(self, control):
+        return control["spin"].value()
+
+    def _set_enabled(self, control, enabled):
+        control["slider"].setEnabled(enabled)
+        control["spin"].setEnabled(enabled)
 
     def update_ui_states(self, *args):
-        use_snap = cmds.checkBox(self.chk_snap, q=True, v=True)
-        use_edge = cmds.checkBox(self.chk_edge_angle, q=True, v=True)
-        show_normals = cmds.checkBox(self.chk_display, q=True, v=True)
+        use_snap = self.chk_snap.isChecked()
+        use_edge = self.chk_edge_angle.isChecked()
+        show_normals = self.chk_display.isChecked()
 
-        cmds.floatSliderGrp(self.flt_snap_strength, e=True, enable=use_snap)
-        cmds.intSliderGrp(self.int_snap_power, e=True, enable=use_snap)
-        cmds.floatSliderGrp(self.flt_edge_angle, e=True, enable=use_edge)
-        cmds.floatSliderGrp(self.flt_display_len, e=True, enable=show_normals)
+        self._set_enabled(self.snap_strength, use_snap)
+        self._set_enabled(self.snap_power, use_snap)
+        self._set_enabled(self.edge_angle, use_edge)
+        self._set_enabled(self.display_length, show_normals)
 
     # =========================================================
     # HELPERS
@@ -322,11 +376,10 @@ class WeightedNormalsTool:
         return max(0.0, angle)
 
     def get_weight_mode(self):
-        if cmds.radioButton(self.rb_area, q=True, select=True):
+        checked = self.mode_group.checkedButton()
+        if checked is None:
             return "area"
-        elif cmds.radioButton(self.rb_angle, q=True, select=True):
-            return "angle"
-        return "both"
+        return checked.property("mode")
 
     def get_face_weight(self, mesh_fn, face_id, vertex_id, weight_mode, use_convex):
         area = self.get_polygon_area(mesh_fn, face_id)
@@ -336,35 +389,28 @@ class WeightedNormalsTool:
             return area
         elif weight_mode == "angle":
             return angle
-        else:
-            return area * angle
+        return area * angle
 
     def build_face_cache(self, mesh_fn):
         face_count = mesh_fn.numPolygons
         face_normals = {}
-        face_vertices = {}
 
         for f_id in range(face_count):
             try:
                 face_normals[f_id] = self.safe_normalize(
                     om.MVector(mesh_fn.getPolygonNormal(f_id, om.MSpace.kWorld))
                 )
-                face_vertices[f_id] = list(mesh_fn.getPolygonVertices(f_id))
             except Exception:
                 continue
 
-        return face_normals, face_vertices
+        return face_normals
 
     def apply_power_snap_weight(self, weight, max_weight, snap_strength, snap_power):
         if max_weight <= 1e-8:
             return weight
 
         ratio = max(0.0, min(1.0, weight / max_weight))
-
-        # snap_strength = 0 => comportement presque normal
-        # snap_strength = 1 => comportement très agressif
         exponent = 1.0 + (max(0.0, min(1.0, snap_strength)) * float(snap_power))
-
         boosted = weight * math.pow(ratio, exponent)
         return boosted
 
@@ -374,7 +420,7 @@ class WeightedNormalsTool:
         connected_faces,
         face_normals,
         use_edge_angle,
-        edge_angle_limit
+        edge_angle_limit,
     ):
         if not use_edge_angle:
             return list(connected_faces)
@@ -437,10 +483,10 @@ class WeightedNormalsTool:
         om.MGlobal.displayInfo("Normals déverrouillées.")
 
     def toggle_display(self, *args):
-        val = cmds.checkBox(self.chk_display, q=True, v=True)
-        cmds.floatSliderGrp(self.flt_display_len, e=True, enable=val)
+        self.update_ui_states()
+        val = self.chk_display.isChecked()
 
-        length = cmds.floatSliderGrp(self.flt_display_len, q=True, v=True)
+        length = self._value(self.display_length)
         meshes = self.get_selected_meshes()
         if not meshes:
             return
@@ -453,9 +499,9 @@ class WeightedNormalsTool:
                 cmds.select(mesh_name, r=True)
 
                 if val:
-                    mel.eval('polyOptions -displayNormal true -sizeNormal {};'.format(length))
+                    mel.eval("polyOptions -displayNormal true -sizeNormal {};".format(length))
                 else:
-                    mel.eval('polyOptions -displayNormal false;')
+                    mel.eval("polyOptions -displayNormal false;")
             except Exception:
                 pass
 
@@ -472,21 +518,20 @@ class WeightedNormalsTool:
             return
 
         weight_mode = self.get_weight_mode()
-        use_convex = cmds.checkBox(self.chk_convex, q=True, v=True)
-        use_snap = cmds.checkBox(self.chk_snap, q=True, v=True)
-        snap_strength = cmds.floatSliderGrp(self.flt_snap_strength, q=True, v=True)
-        snap_power = cmds.intSliderGrp(self.int_snap_power, q=True, v=True)
-        blending = cmds.floatSliderGrp(self.flt_blending, q=True, v=True)
+        use_convex = self.chk_convex.isChecked()
+        use_snap = self.chk_snap.isChecked()
+        snap_strength = self._value(self.snap_strength)
+        snap_power = self._value(self.snap_power)
+        blending = self._value(self.blending)
 
-        use_edge_angle = cmds.checkBox(self.chk_edge_angle, q=True, v=True)
-        edge_angle_limit = cmds.floatSliderGrp(self.flt_edge_angle, q=True, v=True)
+        use_edge_angle = self.chk_edge_angle.isChecked()
+        edge_angle_limit = self._value(self.edge_angle)
 
-        smoothing = cmds.floatSliderGrp(self.flt_smooth, q=True, v=True)
-        iterations = cmds.intSliderGrp(self.int_iterations, q=True, v=True)
+        smoothing = self._value(self.smoothing)
+        iterations = self._value(self.iterations)
 
         current_sel = cmds.ls(sl=True, long=True) or []
 
-        # Déverrouillage
         for dag_path in meshes:
             try:
                 cmds.select(dag_path.fullPathName(), r=True)
@@ -496,13 +541,11 @@ class WeightedNormalsTool:
                     "Erreur lors du déverrouillage des normales : {}".format(e)
                 )
 
-        # Calcul
         for dag_path in meshes:
             mesh_fn = om.MFnMesh(dag_path)
-            face_normals, face_vertices = self.build_face_cache(mesh_fn)
+            face_normals = self.build_face_cache(mesh_fn)
 
             vert_iter = om.MItMeshVertex(dag_path)
-
             new_normals = []
             face_ids = []
             vert_ids = []
@@ -515,7 +558,6 @@ class WeightedNormalsTool:
                     vert_iter.next()
                     continue
 
-                # Poids de base pour toutes les faces autour du vertex
                 base_weights = {}
                 for f_id in connected_faces:
                     try:
@@ -524,12 +566,11 @@ class WeightedNormalsTool:
                             face_id=f_id,
                             vertex_id=v_id,
                             weight_mode=weight_mode,
-                            use_convex=use_convex
+                            use_convex=use_convex,
                         )
                     except Exception:
                         base_weights[f_id] = 0.0
 
-                # Calcul par face-vertex
                 for current_face_id in connected_faces:
                     current_face_normal = face_normals.get(current_face_id)
                     if current_face_normal is None:
@@ -540,7 +581,7 @@ class WeightedNormalsTool:
                         connected_faces=connected_faces,
                         face_normals=face_normals,
                         use_edge_angle=use_edge_angle,
-                        edge_angle_limit=edge_angle_limit
+                        edge_angle_limit=edge_angle_limit,
                     )
 
                     if not valid_faces:
@@ -561,13 +602,12 @@ class WeightedNormalsTool:
                             continue
 
                         final_w = base_w
-
                         if use_snap:
                             final_w = self.apply_power_snap_weight(
                                 weight=base_w,
                                 max_weight=max_weight,
                                 snap_strength=snap_strength,
-                                snap_power=snap_power
+                                snap_power=snap_power,
                             )
 
                         weighted_sum += (other_normal * final_w)
@@ -578,17 +618,15 @@ class WeightedNormalsTool:
                     else:
                         result_normal = self.safe_normalize(weighted_sum)
 
-                    # petite stabilisation optionnelle
                     if ref_sum.length() > 1e-8:
                         ref_normal = self.safe_normalize(ref_sum)
                         result_normal = self.apply_soft_smoothing(
                             result_normal=result_normal,
                             ref_normal=ref_normal,
                             smoothing=smoothing,
-                            iterations=iterations
+                            iterations=iterations,
                         )
 
-                    # blending final avec la normale actuelle
                     try:
                         current_fv_normal = om.MVector(
                             mesh_fn.getFaceVertexNormal(current_face_id, v_id, om.MSpace.kWorld)
@@ -610,7 +648,7 @@ class WeightedNormalsTool:
                         new_normals,
                         face_ids,
                         vert_ids,
-                        om.MSpace.kWorld
+                        om.MSpace.kWorld,
                     )
                 except Exception as e:
                     om.MGlobal.displayWarning(
@@ -627,8 +665,26 @@ class WeightedNormalsTool:
 
         om.MGlobal.displayInfo("Weighted Normals Pro appliquées.")
 
-        if cmds.checkBox(self.chk_display, q=True, v=True):
+        if self.chk_display.isChecked():
             self.toggle_display()
 
 
-WeightedNormalsTool()
+def maya_main_window():
+    ptr = omui.MQtUtil.mainWindow()
+    if ptr is None:
+        return None
+    return wrapInstance(int(ptr), QtWidgets.QWidget)
+
+
+def show_weighted_normals_tool():
+    for widget in QtWidgets.QApplication.allWidgets():
+        if widget.objectName() == WeightedNormalsTool.WINDOW_NAME:
+            widget.close()
+            widget.deleteLater()
+
+    tool = WeightedNormalsTool(parent=maya_main_window())
+    tool.show()
+    return tool
+
+
+show_weighted_normals_tool()

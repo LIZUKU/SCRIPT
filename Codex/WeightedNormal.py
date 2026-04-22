@@ -108,7 +108,7 @@ class WeightedNormalsTool(QtWidgets.QDialog):
 
         self.setWindowTitle("Weighted Normals Pro")
 
-        self.resize(380, 320)
+        self.resize(380, 300)
 
         self.setMinimumWidth(360)
 
@@ -116,7 +116,7 @@ class WeightedNormalsTool(QtWidgets.QDialog):
 
         self._ui_scale = 1.0
 
-        self._base_font_size = 10.0
+        self._base_font_size = max(float(self.font().pointSizeF()), 10.0)
 
         self._section_widgets = []
 
@@ -179,6 +179,8 @@ class WeightedNormalsTool(QtWidgets.QDialog):
         root.addWidget(self.btn_apply)
 
         root.addWidget(self.btn_unfreeze)
+
+        root.addStretch(1)
 
 
 

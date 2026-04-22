@@ -105,7 +105,7 @@ class WeightedNormalsTool:
 
         self.chk_edge_angle = cmds.checkBox(
             label="By Edge Angle",
-            value=True,
+            value=False,
             cc=self.update_ui_states
         )
 

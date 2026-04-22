@@ -51,7 +51,8 @@ class WeightedNormalsTool(QtWidgets.QDialog):
         super(WeightedNormalsTool, self).__init__(parent)
         self.setObjectName(self.WINDOW_NAME)
         self.setWindowTitle("Weighted Normals Pro")
-        self.resize(420, 760)
+        self.resize(380, 620)
+        self.setMinimumSize(360, 520)
 
         self._build_ui()
         self.update_ui_states()
@@ -61,8 +62,8 @@ class WeightedNormalsTool(QtWidgets.QDialog):
     # =========================================================
     def _build_ui(self):
         root = QtWidgets.QVBoxLayout(self)
-        root.setContentsMargins(10, 10, 10, 10)
-        root.setSpacing(8)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(6)
 
         self._build_weighting_section(root)
         self._build_hard_edges_section(root)
@@ -72,11 +73,11 @@ class WeightedNormalsTool(QtWidgets.QDialog):
         root.addSpacing(4)
 
         self.btn_apply = QtWidgets.QPushButton("APPLY WEIGHTED NORMALS")
-        self.btn_apply.setMinimumHeight(40)
+        self.btn_apply.setMinimumHeight(34)
         self.btn_apply.clicked.connect(self.apply_normals)
 
         self.btn_unfreeze = QtWidgets.QPushButton("UNFREEZE NORMALS")
-        self.btn_unfreeze.setMinimumHeight(30)
+        self.btn_unfreeze.setMinimumHeight(28)
         self.btn_unfreeze.clicked.connect(self.unfreeze_normals)
 
         root.addWidget(self.btn_apply)
@@ -90,7 +91,7 @@ class WeightedNormalsTool(QtWidgets.QDialog):
                 background: #2c2c2c;
                 border: 1px solid #434343;
                 border-radius: 6px;
-                padding: 6px;
+                padding: 5px;
                 font-weight: 600;
                 text-align: left;
             }
@@ -102,13 +103,13 @@ class WeightedNormalsTool(QtWidgets.QDialog):
                 background: #242424;
             }
             QLabel { color: #d2d2d2; }
-            QCheckBox, QRadioButton, QPushButton { font-size: 12px; }
+            QCheckBox, QRadioButton, QPushButton { font-size: 11px; }
             QDoubleSpinBox, QSpinBox {
                 background: #202020;
                 border: 1px solid #4a4a4a;
                 border-radius: 4px;
-                min-height: 22px;
-                padding: 1px 4px;
+                min-height: 20px;
+                padding: 0px 4px;
             }
             QSlider::groove:horizontal { height: 6px; background: #808080; border-radius: 3px; }
             QSlider::handle:horizontal {
@@ -122,14 +123,14 @@ class WeightedNormalsTool(QtWidgets.QDialog):
                 background: #353535;
                 border: 1px solid #505050;
                 border-radius: 6px;
-                padding: 6px;
+                padding: 5px;
             }
             QPushButton:hover { background: #424242; }
-            QPushButton#apply_btn { background: #a13a3a; border-color: #c84f4f; font-weight: 700; }
-            QPushButton#apply_btn:hover { background: #b54646; }
+            QPushButton#apply_btn { background: #8f2f2f; border-color: #b44a4a; font-weight: 700; }
+            QPushButton#apply_btn:hover { background: #9c3737; }
             QPushButton[stepBtn="true"] {
-                min-width: 24px;
-                max-width: 24px;
+                min-width: 22px;
+                max-width: 22px;
                 padding: 0px;
                 font-weight: 700;
                 background: #3b3b3b;
@@ -138,8 +139,8 @@ class WeightedNormalsTool(QtWidgets.QDialog):
             QPushButton[stepBtn="true"]:hover { background: #4a4a4a; }
             QPushButton[modeBtn="true"] { background: #3c3c3c; border: 1px solid #606060; }
             QPushButton[modeBtn="true"]:checked {
-                background: #a23333;
-                border: 1px solid #d95d5d;
+                background: #8b2c2c;
+                border: 1px solid #b34949;
                 color: #ffffff;
                 font-weight: 700;
             }
@@ -153,7 +154,7 @@ class WeightedNormalsTool(QtWidgets.QDialog):
         layout = section.content_layout
 
         mode_row = QtWidgets.QHBoxLayout()
-        mode_row.setSpacing(6)
+        mode_row.setSpacing(5)
         self.mode_group = QtWidgets.QButtonGroup(self)
         self.mode_group.setExclusive(True)
 
@@ -221,7 +222,7 @@ class WeightedNormalsTool(QtWidgets.QDialog):
         row.setSpacing(6)
 
         text = QtWidgets.QLabel(label)
-        text.setMinimumWidth(110)
+        text.setMinimumWidth(96)
         row.addWidget(text)
 
         slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
@@ -244,7 +245,7 @@ class WeightedNormalsTool(QtWidgets.QDialog):
         plus_btn = QtWidgets.QPushButton("+")
         plus_btn.setProperty("stepBtn", True)
 
-        spin.setMinimumWidth(78)
+        spin.setMinimumWidth(70)
         row.addWidget(minus_btn)
         row.addWidget(spin)
         row.addWidget(plus_btn)

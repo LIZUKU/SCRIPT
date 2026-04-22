@@ -32,6 +32,8 @@ except ImportError:
 
 class CollapsibleSection(QtWidgets.QWidget):
 
+    toggled = QtCore.Signal(bool)
+
     def __init__(self, title, parent=None, expanded=False):
 
         super(CollapsibleSection, self).__init__(parent)
@@ -86,6 +88,8 @@ class CollapsibleSection(QtWidgets.QWidget):
 
         self.toggle_button.setArrowType(QtCore.Qt.DownArrow if checked else QtCore.Qt.RightArrow)
 
+        self.toggled.emit(checked)
+
 
 
 
@@ -104,9 +108,17 @@ class WeightedNormalsTool(QtWidgets.QDialog):
 
         self.setWindowTitle("Weighted Normals Pro")
 
-        self.resize(380, 400)
+        self.resize(380, 320)
 
-        self.setMinimumSize(360, 400)
+        self.setMinimumWidth(360)
+
+        self.setMinimumHeight(220)
+
+        self._ui_scale = 1.0
+
+        self._base_font_size = max(float(self.font().pointSizeF()), 10.0)
+
+        self._section_widgets = []
 
 
 
@@ -130,7 +142,9 @@ class WeightedNormalsTool(QtWidgets.QDialog):
 
         root.setSpacing(6)
 
+        root.setSizeConstraint(QtWidgets.QLayout.SetMinimumSize)
 
+        self._build_header_controls(root)
 
         self._build_weighting_section(root)
 
@@ -296,11 +310,45 @@ class WeightedNormalsTool(QtWidgets.QDialog):
 
         self.btn_apply.setObjectName("apply_btn")
 
+        self._apply_ui_scale(1.0)
+
+
+
+    def _build_header_controls(self, parent_layout):
+
+        header = QtWidgets.QHBoxLayout()
+
+        header.setContentsMargins(0, 0, 0, 0)
+
+        header.addStretch(1)
+
+        scale_label = QtWidgets.QLabel("UI Scale")
+
+        header.addWidget(scale_label)
+
+        self.scale_combo = QtWidgets.QComboBox()
+
+        for pct in (100, 90, 80, 50):
+
+            self.scale_combo.addItem("{}%".format(pct), pct / 100.0)
+
+        self.scale_combo.setCurrentIndex(0)
+
+        self.scale_combo.currentIndexChanged.connect(self._on_ui_scale_changed)
+
+        header.addWidget(self.scale_combo)
+
+        parent_layout.addLayout(header)
+
 
 
     def _build_weighting_section(self, parent_layout):
 
         section = CollapsibleSection("Weighting", expanded=True)
+
+        section.toggled.connect(self._refresh_dialog_size)
+
+        self._section_widgets.append(section)
 
         parent_layout.addWidget(section)
 
@@ -376,6 +424,10 @@ class WeightedNormalsTool(QtWidgets.QDialog):
 
         section = CollapsibleSection("Hard Edge Detection", expanded=False)
 
+        section.toggled.connect(self._refresh_dialog_size)
+
+        self._section_widgets.append(section)
+
         parent_layout.addWidget(section)
 
         layout = section.content_layout
@@ -400,6 +452,10 @@ class WeightedNormalsTool(QtWidgets.QDialog):
 
         section = CollapsibleSection("Smoothing", expanded=False)
 
+        section.toggled.connect(self._refresh_dialog_size)
+
+        self._section_widgets.append(section)
+
         parent_layout.addWidget(section)
 
         layout = section.content_layout
@@ -415,6 +471,10 @@ class WeightedNormalsTool(QtWidgets.QDialog):
     def _build_display_section(self, parent_layout):
 
         section = CollapsibleSection("Display Normals", expanded=False)
+
+        section.toggled.connect(self._refresh_dialog_size)
+
+        self._section_widgets.append(section)
 
         parent_layout.addWidget(section)
 
@@ -611,6 +671,42 @@ class WeightedNormalsTool(QtWidgets.QDialog):
         self._set_enabled(self.edge_angle, use_edge)
 
         self._set_enabled(self.display_length, show_normals)
+
+    def _on_ui_scale_changed(self, index):
+
+        if index < 0:
+
+            return
+
+        factor = self.scale_combo.itemData(index)
+
+        self._apply_ui_scale(float(factor))
+
+
+
+    def _apply_ui_scale(self, factor):
+
+        self._ui_scale = max(0.5, min(2.0, float(factor)))
+
+        font = self.font()
+
+        font.setPointSizeF(self._base_font_size * self._ui_scale)
+
+        self.setFont(font)
+
+        self.btn_apply.setMinimumHeight(max(24, int(round(34 * self._ui_scale))))
+
+        self.btn_unfreeze.setMinimumHeight(max(20, int(round(28 * self._ui_scale))))
+
+        self._refresh_dialog_size()
+
+
+
+    def _refresh_dialog_size(self, *args):
+
+        self.layout().activate()
+
+        self.adjustSize()
 
 
 

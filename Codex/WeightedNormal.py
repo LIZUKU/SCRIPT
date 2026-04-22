@@ -52,7 +52,8 @@ class WeightedNormalsTool(QtWidgets.QDialog):
         self.setObjectName(self.WINDOW_NAME)
         self.setWindowTitle("Weighted Normals Pro")
         self.resize(380, 620)
-        self.setMinimumSize(360, 520)
+        self.setMinimumSize(320, 460)
+        self.ui_scale_factor = 1.0
 
         self._build_ui()
         self.update_ui_states()
@@ -65,6 +66,7 @@ class WeightedNormalsTool(QtWidgets.QDialog):
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(6)
 
+        self._build_ui_scale_section(root)
         self._build_weighting_section(root)
         self._build_hard_edges_section(root)
         self._build_smoothing_section(root)
@@ -148,6 +150,45 @@ class WeightedNormalsTool(QtWidgets.QDialog):
         )
         self.btn_apply.setObjectName("apply_btn")
 
+
+    def _build_ui_scale_section(self, parent_layout):
+        row = QtWidgets.QHBoxLayout()
+        row.setSpacing(6)
+
+        label = QtWidgets.QLabel("UI Scale")
+        label.setMinimumWidth(96)
+        row.addWidget(label)
+
+        self.ui_scale_combo = QtWidgets.QComboBox()
+        self.ui_scale_combo.addItems(["100%", "90%", "80%", "70%"])
+        self.ui_scale_combo.setCurrentText("100%")
+        self.ui_scale_combo.currentTextChanged.connect(self.apply_ui_scale)
+        row.addWidget(self.ui_scale_combo, 1)
+
+        parent_layout.addLayout(row)
+
+    def apply_ui_scale(self, text):
+        try:
+            percent = int(str(text).replace("%", "").strip())
+        except Exception:
+            percent = 100
+
+        scale = max(0.5, min(1.5, percent / 100.0))
+        if abs(scale - self.ui_scale_factor) < 1e-6:
+            return
+
+        self.ui_scale_factor = scale
+
+        base_font_size = 11
+        scaled_font_size = max(8, int(round(base_font_size * scale)))
+
+        font = self.font()
+        font.setPointSize(scaled_font_size)
+        self.setFont(font)
+
+        self.btn_apply.setMinimumHeight(max(24, int(round(34 * scale))))
+        self.btn_unfreeze.setMinimumHeight(max(22, int(round(28 * scale))))
+
     def _build_weighting_section(self, parent_layout):
         section = CollapsibleSection("Weighting", expanded=True)
         parent_layout.addWidget(section)
@@ -181,7 +222,7 @@ class WeightedNormalsTool(QtWidgets.QDialog):
         self.chk_snap.toggled.connect(self.update_ui_states)
         layout.addWidget(self.chk_snap)
 
-        self.snap_strength = self._add_slider_row(layout, "Snap Strength", 0.0, 1.0, 0.9, decimals=2)
+        self.snap_strength = self._add_slider_row(layout, "Snap Strength", 0.0, 2.0, 1.0, decimals=2)
         self.snap_power = self._add_slider_row(layout, "Snap Power", 1, 128, 15, is_int=True)
         self.blending = self._add_slider_row(layout, "Blending", 0.0, 1.0, 1.0, decimals=2)
 
@@ -353,12 +394,12 @@ class WeightedNormalsTool(QtWidgets.QDialog):
         if len(verts) < 3:
             return 0.0
 
-        p0 = om.MVector(mesh_fn.getPoint(verts[0], om.MSpace.kWorld))
+        p0 = om.MVector(mesh_fn.getPoint(verts[0], om.MSpace.kObject))
         area = 0.0
 
         for i in range(1, len(verts) - 1):
-            p1 = om.MVector(mesh_fn.getPoint(verts[i], om.MSpace.kWorld))
-            p2 = om.MVector(mesh_fn.getPoint(verts[i + 1], om.MSpace.kWorld))
+            p1 = om.MVector(mesh_fn.getPoint(verts[i], om.MSpace.kObject))
+            p2 = om.MVector(mesh_fn.getPoint(verts[i + 1], om.MSpace.kObject))
             area += ((p1 - p0) ^ (p2 - p0)).length() * 0.5
 
         return area
@@ -374,18 +415,15 @@ class WeightedNormalsTool(QtWidgets.QDialog):
         prev_id = verts[(local_idx - 1) % count]
         next_id = verts[(local_idx + 1) % count]
 
-        p_current = om.MVector(mesh_fn.getPoint(vertex_id, om.MSpace.kWorld))
-        p_prev = om.MVector(mesh_fn.getPoint(prev_id, om.MSpace.kWorld))
-        p_next = om.MVector(mesh_fn.getPoint(next_id, om.MSpace.kWorld))
+        p_current = om.MVector(mesh_fn.getPoint(vertex_id, om.MSpace.kObject))
+        p_prev = om.MVector(mesh_fn.getPoint(prev_id, om.MSpace.kObject))
+        p_next = om.MVector(mesh_fn.getPoint(next_id, om.MSpace.kObject))
 
-        vec_a = p_prev - p_current
-        vec_b = p_next - p_current
+        vec_a = self.safe_normalize(p_prev - p_current)
+        vec_b = self.safe_normalize(p_next - p_current)
 
         if vec_a.length() < 1e-8 or vec_b.length() < 1e-8:
             return 0.0
-
-        vec_a = self.safe_normalize(vec_a)
-        vec_b = self.safe_normalize(vec_b)
 
         dotv = max(-1.0, min(1.0, vec_a * vec_b))
         angle = math.acos(dotv)
@@ -393,7 +431,7 @@ class WeightedNormalsTool(QtWidgets.QDialog):
         if use_convex:
             try:
                 face_normal = self.safe_normalize(
-                    om.MVector(mesh_fn.getPolygonNormal(face_id, om.MSpace.kWorld))
+                    om.MVector(mesh_fn.getPolygonNormal(face_id, om.MSpace.kObject))
                 )
                 cross_vec = vec_a ^ vec_b
                 if (cross_vec * face_normal) < 0.0:
@@ -424,16 +462,18 @@ class WeightedNormalsTool(QtWidgets.QDialog):
     def build_face_cache(self, mesh_fn):
         face_count = mesh_fn.numPolygons
         face_normals = {}
+        face_areas = {}
 
         for f_id in range(face_count):
             try:
                 face_normals[f_id] = self.safe_normalize(
-                    om.MVector(mesh_fn.getPolygonNormal(f_id, om.MSpace.kWorld))
+                    om.MVector(mesh_fn.getPolygonNormal(f_id, om.MSpace.kObject))
                 )
+                face_areas[f_id] = self.get_polygon_area(mesh_fn, f_id)
             except Exception:
                 continue
 
-        return face_normals
+        return face_normals, face_areas
 
     def apply_power_snap_weight(self, weight, max_weight, snap_strength, snap_power):
         if max_weight <= 1e-8:
@@ -541,6 +581,38 @@ class WeightedNormalsTool(QtWidgets.QDialog):
             except Exception:
                 pass
 
+    def get_extended_max_face_normal(self, dag_path, v_id, face_normals, face_areas, local_max_area):
+        """
+        Explore le voisinage étendu (1-ring) pour trouver une grande face plane
+        si le sommet actuel est isolé sur un coin (uniquement entouré de petites faces).
+        """
+        vert_iter = om.MItMeshVertex(dag_path)
+
+        try:
+            vert_iter.setIndex(v_id)
+            connected_verts = list(vert_iter.getConnectedVertices())
+
+            max_ext_area = 0.0
+            best_normal = None
+
+            for cv in connected_verts:
+                vert_iter.setIndex(cv)
+                neighbor_faces = vert_iter.getConnectedFaces()
+
+                for f in neighbor_faces:
+                    area = face_areas.get(f, 0.0)
+                    if area > max_ext_area:
+                        max_ext_area = area
+                        best_normal = face_normals.get(f)
+
+            if max_ext_area > (local_max_area * 3.0) and best_normal is not None:
+                return best_normal
+
+        except Exception:
+            pass
+
+        return None
+
     def apply_normals(self, *args):
         meshes = self.get_selected_meshes()
         if not meshes:
@@ -567,13 +639,11 @@ class WeightedNormalsTool(QtWidgets.QDialog):
                 cmds.select(dag_path.fullPathName(), r=True)
                 cmds.polyNormalPerVertex(unFreezeNormal=True)
             except Exception as e:
-                om.MGlobal.displayWarning(
-                    "Erreur lors du déverrouillage des normales : {}".format(e)
-                )
+                om.MGlobal.displayWarning("Erreur lors du déverrouillage des normales : {}".format(e))
 
         for dag_path in meshes:
             mesh_fn = om.MFnMesh(dag_path)
-            face_normals = self.build_face_cache(mesh_fn)
+            face_normals, face_areas = self.build_face_cache(mesh_fn)
 
             vert_iter = om.MItMeshVertex(dag_path)
             new_normals = []
@@ -590,16 +660,16 @@ class WeightedNormalsTool(QtWidgets.QDialog):
 
                 base_weights = {}
                 for f_id in connected_faces:
-                    try:
-                        base_weights[f_id] = self.get_face_weight(
-                            mesh_fn=mesh_fn,
-                            face_id=f_id,
-                            vertex_id=v_id,
-                            weight_mode=weight_mode,
-                            use_convex=use_convex,
-                        )
-                    except Exception:
-                        base_weights[f_id] = 0.0
+                    area = face_areas.get(f_id, 0.0)
+                    angle = self.get_corner_angle(mesh_fn, f_id, v_id, use_convex=use_convex)
+
+                    if weight_mode == "area":
+                        w = area
+                    elif weight_mode == "angle":
+                        w = angle
+                    else:
+                        w = area * angle
+                    base_weights[f_id] = w
 
                 for current_face_id in connected_faces:
                     current_face_normal = face_normals.get(current_face_id)
@@ -618,6 +688,7 @@ class WeightedNormalsTool(QtWidgets.QDialog):
                         valid_faces = [current_face_id]
 
                     max_weight = max([base_weights.get(fid, 0.0) for fid in valid_faces] or [0.0])
+                    local_max_area = max([face_areas.get(fid, 0.0) for fid in valid_faces] or [0.0])
 
                     weighted_sum = om.MVector(0.0, 0.0, 0.0)
                     ref_sum = om.MVector(0.0, 0.0, 0.0)
@@ -648,6 +719,13 @@ class WeightedNormalsTool(QtWidgets.QDialog):
                     else:
                         result_normal = self.safe_normalize(weighted_sum)
 
+                    if use_snap:
+                        dominant_normal = self.get_extended_max_face_normal(
+                            dag_path, v_id, face_normals, face_areas, local_max_area
+                        )
+                        if dominant_normal is not None:
+                            result_normal = self.nlerp(result_normal, dominant_normal, snap_strength * 0.95)
+
                     if ref_sum.length() > 1e-8:
                         ref_normal = self.safe_normalize(ref_sum)
                         result_normal = self.apply_soft_smoothing(
@@ -659,7 +737,7 @@ class WeightedNormalsTool(QtWidgets.QDialog):
 
                     try:
                         current_fv_normal = om.MVector(
-                            mesh_fn.getFaceVertexNormal(current_face_id, v_id, om.MSpace.kWorld)
+                            mesh_fn.getFaceVertexNormal(current_face_id, v_id, om.MSpace.kObject)
                         )
                     except Exception:
                         current_fv_normal = om.MVector(result_normal)
@@ -678,7 +756,7 @@ class WeightedNormalsTool(QtWidgets.QDialog):
                         new_normals,
                         face_ids,
                         vert_ids,
-                        om.MSpace.kWorld,
+                        om.MSpace.kObject,
                     )
                 except Exception as e:
                     om.MGlobal.displayWarning(
@@ -693,7 +771,7 @@ class WeightedNormalsTool(QtWidgets.QDialog):
             except Exception:
                 pass
 
-        om.MGlobal.displayInfo("Weighted Normals Pro appliquées.")
+        om.MGlobal.displayInfo("Weighted Normals Pro appliquées (avec Corner Fix).")
 
         if self.chk_display.isChecked():
             self.toggle_display()

@@ -85,42 +85,57 @@ class WeightedNormalsTool(QtWidgets.QDialog):
 
         self.setStyleSheet(
             """
-            QDialog { background: #252525; color: #e8e8e8; }
+            QDialog { background: #1f1f1f; color: #ececec; }
             QToolButton {
-                background: #343434;
-                border: 1px solid #4a4a4a;
+                background: #2c2c2c;
+                border: 1px solid #434343;
                 border-radius: 6px;
                 padding: 6px;
                 font-weight: 600;
                 text-align: left;
             }
             QGroupBox {
-                border: 1px solid #444;
+                border: 1px solid #3f3f3f;
                 border-radius: 8px;
                 margin-top: 10px;
                 padding-top: 12px;
-                background: #2a2a2a;
+                background: #242424;
             }
-            QLabel { color: #d8d8d8; }
+            QLabel { color: #d2d2d2; }
             QCheckBox, QRadioButton, QPushButton { font-size: 12px; }
             QDoubleSpinBox, QSpinBox {
-                background: #1f1f1f;
-                border: 1px solid #4d4d4d;
+                background: #202020;
+                border: 1px solid #4a4a4a;
                 border-radius: 4px;
                 min-height: 22px;
                 padding: 1px 4px;
             }
-            QSlider::groove:horizontal { height: 6px; background: #4b4b4b; border-radius: 3px; }
-            QSlider::handle:horizontal { background: #7fa8ff; width: 12px; margin: -4px 0; border-radius: 6px; }
+            QSlider::groove:horizontal { height: 6px; background: #808080; border-radius: 3px; }
+            QSlider::handle:horizontal {
+                background: #c7c7c7;
+                border: 1px solid #9b9b9b;
+                width: 12px;
+                margin: -4px 0;
+                border-radius: 6px;
+            }
             QPushButton {
-                background: #3a3a3a;
+                background: #353535;
                 border: 1px solid #505050;
                 border-radius: 6px;
                 padding: 6px;
             }
-            QPushButton:hover { background: #474747; }
-            QPushButton#apply_btn { background: #2f6db2; border-color: #4d88cc; font-weight: 700; }
-            QPushButton#apply_btn:hover { background: #3a7ec9; }
+            QPushButton:hover { background: #424242; }
+            QPushButton#apply_btn { background: #a13a3a; border-color: #c84f4f; font-weight: 700; }
+            QPushButton#apply_btn:hover { background: #b54646; }
+            QPushButton[stepBtn="true"] {
+                min-width: 24px;
+                max-width: 24px;
+                padding: 0px;
+                font-weight: 700;
+                background: #3b3b3b;
+                border: 1px solid #5b5b5b;
+            }
+            QPushButton[stepBtn="true"]:hover { background: #4a4a4a; }
             QPushButton[modeBtn="true"] { background: #3c3c3c; border: 1px solid #606060; }
             QPushButton[modeBtn="true"]:checked {
                 background: #a23333;
@@ -224,8 +239,15 @@ class WeightedNormalsTool(QtWidgets.QDialog):
             spin.setRange(float(minimum), float(maximum))
             spin.setValue(float(value))
 
+        minus_btn = QtWidgets.QPushButton("-")
+        minus_btn.setProperty("stepBtn", True)
+        plus_btn = QtWidgets.QPushButton("+")
+        plus_btn.setProperty("stepBtn", True)
+
         spin.setMinimumWidth(78)
+        row.addWidget(minus_btn)
         row.addWidget(spin)
+        row.addWidget(plus_btn)
 
         parent_layout.addLayout(row)
 
@@ -255,6 +277,13 @@ class WeightedNormalsTool(QtWidgets.QDialog):
 
         spin.valueChanged.connect(spin_to_slider)
         slider.valueChanged.connect(slider_to_spin)
+
+        def step_spin(delta):
+            step = 1 if widget["is_int"] else (10 ** (-spin.decimals()))
+            spin.setValue(spin.value() + (step * delta))
+
+        minus_btn.clicked.connect(lambda: step_spin(-1))
+        plus_btn.clicked.connect(lambda: step_spin(1))
         spin_to_slider(spin.value())
 
         return widget
@@ -678,7 +707,8 @@ def maya_main_window():
 
 def show_weighted_normals_tool():
     for widget in QtWidgets.QApplication.allWidgets():
-        if widget.objectName() == WeightedNormalsTool.WINDOW_NAME:
+        object_name = widget.objectName if isinstance(widget.objectName, str) else widget.objectName()
+        if object_name == WeightedNormalsTool.WINDOW_NAME:
             widget.close()
             widget.deleteLater()
 

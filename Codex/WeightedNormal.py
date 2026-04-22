@@ -96,7 +96,7 @@ class CollapsibleSection(QtWidgets.QWidget):
 
 class WeightedNormalsTool(QtWidgets.QDialog):
 
-    WINDOW_NAME = "WeightedNormalsUI_PowerSnap"
+    WINDOW_NAME = "WeightedNormalsUI_LinearBlend"
 
 
 
@@ -394,27 +394,7 @@ class WeightedNormalsTool(QtWidgets.QDialog):
 
 
 
-        self.chk_convex = QtWidgets.QCheckBox("Use Convex Corner Angle")
-
-        self.chk_convex.setChecked(True)
-
-        layout.addWidget(self.chk_convex)
-
-
-
-        self.chk_snap = QtWidgets.QCheckBox("Snap To Largest Face")
-
-        self.chk_snap.setChecked(True)
-
-        self.chk_snap.toggled.connect(self.update_ui_states)
-
-        layout.addWidget(self.chk_snap)
-
-
-
-        self.snap_strength = self._add_slider_row(layout, "Snap Strength", 0.0, 1.0, 0.9, decimals=2)
-
-        self.snap_power = self._add_slider_row(layout, "Snap Power", 1, 128, 15, is_int=True)
+        self.angle_bias = self._add_slider_row(layout, "Area/Angle Bias", 0.0, 1.0, 0.5, decimals=2)
 
         self.blending = self._add_slider_row(layout, "Blending", 0.0, 1.0, 1.0, decimals=2)
 
@@ -434,7 +414,15 @@ class WeightedNormalsTool(QtWidgets.QDialog):
 
 
 
-        self.chk_edge_angle = QtWidgets.QCheckBox("By Edge Angle")
+        self.chk_soft_edges = QtWidgets.QCheckBox("Respect Hard/Soft Edges")
+
+        self.chk_soft_edges.setChecked(True)
+
+        layout.addWidget(self.chk_soft_edges)
+
+
+
+        self.chk_edge_angle = QtWidgets.QCheckBox("By Edge Angle (Optional)")
 
         self.chk_edge_angle.setChecked(False)
 
@@ -656,17 +644,11 @@ class WeightedNormalsTool(QtWidgets.QDialog):
 
     def update_ui_states(self, *args):
 
-        use_snap = self.chk_snap.isChecked()
-
         use_edge = self.chk_edge_angle.isChecked()
 
         show_normals = self.chk_display.isChecked()
 
 
-
-        self._set_enabled(self.snap_strength, use_snap)
-
-        self._set_enabled(self.snap_power, use_snap)
 
         self._set_enabled(self.edge_angle, use_edge)
 
@@ -824,90 +806,6 @@ class WeightedNormalsTool(QtWidgets.QDialog):
 
 
 
-    def get_corner_angle(self, mesh_fn, face_id, vertex_id, use_convex=True):
-
-        verts = list(mesh_fn.getPolygonVertices(face_id))
-
-        if vertex_id not in verts:
-
-            return 0.0
-
-
-
-        count = len(verts)
-
-        local_idx = verts.index(vertex_id)
-
-
-
-        prev_id = verts[(local_idx - 1) % count]
-
-        next_id = verts[(local_idx + 1) % count]
-
-
-
-        p_current = om.MVector(mesh_fn.getPoint(vertex_id, om.MSpace.kWorld))
-
-        p_prev = om.MVector(mesh_fn.getPoint(prev_id, om.MSpace.kWorld))
-
-        p_next = om.MVector(mesh_fn.getPoint(next_id, om.MSpace.kWorld))
-
-
-
-        vec_a = p_prev - p_current
-
-        vec_b = p_next - p_current
-
-
-
-        if vec_a.length() < 1e-8 or vec_b.length() < 1e-8:
-
-            return 0.0
-
-
-
-        vec_a = self.safe_normalize(vec_a)
-
-        vec_b = self.safe_normalize(vec_b)
-
-
-
-        dotv = max(-1.0, min(1.0, vec_a * vec_b))
-
-        angle = math.acos(dotv)
-
-
-
-        if use_convex:
-
-            try:
-
-                face_normal = self.safe_normalize(
-
-                    om.MVector(mesh_fn.getPolygonNormal(face_id, om.MSpace.kWorld))
-
-                )
-
-                cross_vec = vec_a ^ vec_b
-
-                if (cross_vec * face_normal) < 0.0:
-
-                    angle = max(0.0, (2.0 * math.pi) - angle)
-
-                    if angle > math.pi:
-
-                        angle = (2.0 * math.pi) - angle
-
-            except Exception:
-
-                pass
-
-
-
-        return max(0.0, angle)
-
-
-
     def get_weight_mode(self):
 
         checked = self.mode_group.checkedButton()
@@ -920,23 +818,11 @@ class WeightedNormalsTool(QtWidgets.QDialog):
 
 
 
-    def get_face_weight(self, mesh_fn, face_id, vertex_id, weight_mode, use_convex):
+    def get_incidence_weight(self, source_normal, target_normal):
 
-        area = self.get_polygon_area(mesh_fn, face_id)
+        dotv = max(-1.0, min(1.0, self.safe_normalize(source_normal) * self.safe_normalize(target_normal)))
 
-        angle = self.get_corner_angle(mesh_fn, face_id, vertex_id, use_convex=use_convex)
-
-
-
-        if weight_mode == "area":
-
-            return area
-
-        elif weight_mode == "angle":
-
-            return angle
-
-        return area * angle
+        return max(0.0, dotv)
 
 
 
@@ -968,21 +854,27 @@ class WeightedNormalsTool(QtWidgets.QDialog):
 
 
 
-    def apply_power_snap_weight(self, weight, max_weight, snap_strength, snap_power):
+    def build_smooth_face_adjacency(self, dag_path):
 
-        if max_weight <= 1e-8:
+        adjacency = {}
 
-            return weight
+        edge_iter = om.MItMeshEdge(dag_path)
 
+        while not edge_iter.isDone():
 
+            smooth_attr = edge_iter.isSmooth
+            is_smooth = smooth_attr() if callable(smooth_attr) else bool(smooth_attr)
+            if is_smooth:
 
-        ratio = max(0.0, min(1.0, weight / max_weight))
+                linked_faces = edge_iter.getConnectedFaces()
+                if len(linked_faces) == 2:
+                    f0, f1 = linked_faces[0], linked_faces[1]
+                    adjacency.setdefault(f0, set()).add(f1)
+                    adjacency.setdefault(f1, set()).add(f0)
 
-        exponent = 1.0 + (max(0.0, min(1.0, snap_strength)) * float(snap_power))
+            edge_iter.next()
 
-        boosted = weight * math.pow(ratio, exponent)
-
-        return boosted
+        return adjacency
 
 
 
@@ -996,15 +888,24 @@ class WeightedNormalsTool(QtWidgets.QDialog):
 
         face_normals,
 
+        smooth_face_adjacency,
+
+        use_soft_edges,
+
         use_edge_angle,
 
         edge_angle_limit,
 
     ):
 
-        if not use_edge_angle:
+        valid_faces = list(connected_faces)
 
-            return list(connected_faces)
+        if use_soft_edges:
+            soft_neighbors = smooth_face_adjacency.get(target_face_id, set())
+            valid_faces = [f for f in valid_faces if (f == target_face_id or f in soft_neighbors)]
+
+        if not use_edge_angle:
+            return valid_faces or [target_face_id]
 
 
 
@@ -1016,9 +917,9 @@ class WeightedNormalsTool(QtWidgets.QDialog):
 
 
 
-        valid_faces = []
+        angle_filtered_faces = []
 
-        for other_face_id in connected_faces:
+        for other_face_id in valid_faces:
 
             other_normal = face_normals.get(other_face_id)
 
@@ -1032,17 +933,15 @@ class WeightedNormalsTool(QtWidgets.QDialog):
 
             if ang <= edge_angle_limit:
 
-                valid_faces.append(other_face_id)
+                angle_filtered_faces.append(other_face_id)
 
 
 
-        if not valid_faces:
+        if not angle_filtered_faces:
 
-            valid_faces = [target_face_id]
+            angle_filtered_faces = [target_face_id]
 
-
-
-        return valid_faces
+        return angle_filtered_faces
 
 
 
@@ -1194,17 +1093,13 @@ class WeightedNormalsTool(QtWidgets.QDialog):
 
         weight_mode = self.get_weight_mode()
 
-        use_convex = self.chk_convex.isChecked()
-
-        use_snap = self.chk_snap.isChecked()
-
-        snap_strength = self._value(self.snap_strength)
-
-        snap_power = self._value(self.snap_power)
+        angle_bias = self._value(self.angle_bias)
 
         blending = self._value(self.blending)
 
 
+
+        use_soft_edges = self.chk_soft_edges.isChecked()
 
         use_edge_angle = self.chk_edge_angle.isChecked()
 
@@ -1245,6 +1140,7 @@ class WeightedNormalsTool(QtWidgets.QDialog):
             mesh_fn = om.MFnMesh(dag_path)
 
             face_normals = self.build_face_cache(mesh_fn)
+            smooth_face_adjacency = self.build_smooth_face_adjacency(dag_path)
 
 
 
@@ -1274,29 +1170,13 @@ class WeightedNormalsTool(QtWidgets.QDialog):
 
 
 
-                base_weights = {}
+                area_weights = {}
 
                 for f_id in connected_faces:
-
                     try:
-
-                        base_weights[f_id] = self.get_face_weight(
-
-                            mesh_fn=mesh_fn,
-
-                            face_id=f_id,
-
-                            vertex_id=v_id,
-
-                            weight_mode=weight_mode,
-
-                            use_convex=use_convex,
-
-                        )
-
+                        area_weights[f_id] = self.get_polygon_area(mesh_fn, f_id)
                     except Exception:
-
-                        base_weights[f_id] = 0.0
+                        area_weights[f_id] = 0.0
 
 
 
@@ -1318,6 +1198,10 @@ class WeightedNormalsTool(QtWidgets.QDialog):
 
                         face_normals=face_normals,
 
+                        smooth_face_adjacency=smooth_face_adjacency,
+
+                        use_soft_edges=use_soft_edges,
+
                         use_edge_angle=use_edge_angle,
 
                         edge_angle_limit=edge_angle_limit,
@@ -1332,7 +1216,7 @@ class WeightedNormalsTool(QtWidgets.QDialog):
 
 
 
-                    max_weight = max([base_weights.get(fid, 0.0) for fid in valid_faces] or [0.0])
+                    max_area = max([area_weights.get(fid, 0.0) for fid in valid_faces] or [0.0])
 
 
 
@@ -1352,29 +1236,22 @@ class WeightedNormalsTool(QtWidgets.QDialog):
 
 
 
-                        base_w = base_weights.get(other_face_id, 0.0)
-
-                        if base_w <= 1e-8:
-
+                        area_w = area_weights.get(other_face_id, 0.0)
+                        if area_w <= 1e-8:
                             continue
 
+                        incidence_w = self.get_incidence_weight(current_face_normal, other_normal)
+                        area_norm = 0.0 if max_area <= 1e-8 else (area_w / max_area)
 
+                        if weight_mode == "area":
+                            final_w = area_w
+                        elif weight_mode == "angle":
+                            final_w = incidence_w
+                        else:
+                            final_w = ((1.0 - angle_bias) * area_norm) + (angle_bias * incidence_w)
 
-                        final_w = base_w
-
-                        if use_snap:
-
-                            final_w = self.apply_power_snap_weight(
-
-                                weight=base_w,
-
-                                max_weight=max_weight,
-
-                                snap_strength=snap_strength,
-
-                                snap_power=snap_power,
-
-                            )
+                        if final_w <= 1e-8:
+                            continue
 
 
 

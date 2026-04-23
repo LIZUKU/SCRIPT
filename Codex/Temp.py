@@ -350,32 +350,97 @@ def _faces_in_scope(mesh, work_on_selection, faces_by_mesh):
 
 
 # =============================================================================
+# OPENMAYA 2.0 HELPERS (fast path)
+# =============================================================================
+def get_dag_and_mfn(mesh_name):
+    """Retourne (MDagPath, MFnMesh) à partir d'un transform/shape mesh."""
+    if not om2:
+        return None, None
+    try:
+        sel = om2.MSelectionList()
+        sel.add(mesh_name)
+        dag_path = sel.getDagPath(0)
+        if dag_path.apiType() != om2.MFn.kMesh:
+            dag_path.extendToShape()
+        return dag_path, om2.MFnMesh(dag_path)
+    except Exception:
+        return None, None
+
+
+def _parse_component_index(component, token):
+    m = re.search(r"\.{}\[(\d+)\]".format(token), component)
+    return int(m.group(1)) if m else None
+
+
+def _get_edge_scope_indices(mesh, only_selected_faces=False):
+    """Retourne un set d'indices d'edges candidates (ou None = toutes)."""
+    if not only_selected_faces:
+        return None
+    sel_faces = filter_faces(cmds.ls(selection=True, flatten=True) or [])
+    if not sel_faces:
+        return None
+
+    dag_path, mfn_mesh = get_dag_and_mfn(mesh)
+    if not dag_path or not mfn_mesh:
+        return None
+
+    indices = set()
+    for face in sel_faces:
+        if get_mesh_from_component(face) != mesh:
+            continue
+        fi = _parse_component_index(face, "f")
+        if fi is None:
+            continue
+        try:
+            for ei in mfn_mesh.getPolygonEdges(fi):
+                indices.add(ei)
+        except Exception:
+            pass
+    return indices if indices else set()
+
+
+def get_fast_edge_angle(it_edge, mfn_mesh):
+    """Calcule l'angle entre 2 faces adjacentes via API 2.0."""
+    faces = it_edge.getConnectedFaces()
+    if len(faces) != 2:
+        return 180.0
+    n1 = mfn_mesh.getPolygonNormal(faces[0], om2.MSpace.kWorld)
+    n2 = mfn_mesh.getPolygonNormal(faces[1], om2.MSpace.kWorld)
+    return math.degrees(n1.angle(n2))
+
+
+# =============================================================================
 # NORMALS / ANGLES
 # =============================================================================
 def get_face_normal(face):
+    mesh = get_mesh_from_component(face)
+    fi = _parse_component_index(face, "f")
+    if not mesh or fi is None:
+        return (0.0, 1.0, 0.0)
+    dag_path, mfn_mesh = get_dag_and_mfn(mesh)
+    if not dag_path or not mfn_mesh:
+        return (0.0, 1.0, 0.0)
     try:
-        if not cmds.objExists(face):
-            return (0.0, 1.0, 0.0)
-        info = cmds.polyInfo(face, fn=True) or []
-        if not info:
-            return (0.0, 1.0, 0.0)
-        s = info[0].strip().replace("\t", " ")
-        parts = [p for p in s.split(" ") if p]
-        x, y, z = float(parts[-3]), float(parts[-2]), float(parts[-1])
-        return normalize((x, y, z))
+        n = mfn_mesh.getPolygonNormal(fi, om2.MSpace.kWorld)
+        return normalize((n.x, n.y, n.z))
     except Exception:
         return (0.0, 1.0, 0.0)
 
 
 def get_edge_face_angle(edge):
-    faces = edge_to_faces(edge)
-    if len(faces) != 2:
+    mesh = get_mesh_from_component(edge)
+    ei = _parse_component_index(edge, "e")
+    if not mesh or ei is None:
         return 180.0
-    n1 = get_face_normal(faces[0])
-    n2 = get_face_normal(faces[1])
-    d = abs(dot(n1, n2))
-    d = clamp(d, 0.0, 1.0)
-    return math.degrees(math.acos(d))
+    dag_path, mfn_mesh = get_dag_and_mfn(mesh)
+    if not dag_path or not mfn_mesh:
+        return 180.0
+    try:
+        it_edge = om2.MItMeshEdge(dag_path)
+        it_edge.setIndex(ei)
+        return get_fast_edge_angle(it_edge, mfn_mesh)
+    except Exception:
+        return 180.0
 
 
 def get_edge_direction(edge):
@@ -1821,56 +1886,46 @@ def select_removable_edges(angle_threshold=5.0, allow_ngons=False, only_selected
         show_inview_message("Aucun mesh selectionne!", 2.0, "error")
         return
 
-    sel = cmds.ls(selection=True, flatten=True) or []
-    sel_faces = filter_faces(sel)
+    dag_path, mfn_mesh = get_dag_and_mfn(mesh)
+    if not dag_path or not mfn_mesh:
+        cmds.warning("OpenMaya API indisponible pour ce mesh.")
+        return
 
-    # Définir les edges candidates
-    if only_selected_faces and sel_faces:
-        # Collecter uniquement les edges dans la région des faces sélectionnées
-        candidate_edges = set()
-        for f in sel_faces:
-            for e in face_to_edges(f):
-                candidate_edges.add(e)
-        candidate_edges = list(candidate_edges)
-    else:
-        # Toutes les edges du mesh
-        edge_count = cmds.polyEvaluate(mesh, edge=True)
-        candidate_edges = ["{}.e[{}]".format(mesh, i) for i in range(edge_count)]
-
+    allowed_edges = _get_edge_scope_indices(mesh, only_selected_faces=only_selected_faces)
+    threshold_rad = math.radians(angle_threshold)
+    it_edge = om2.MItMeshEdge(dag_path)
     removable = []
-    for e in candidate_edges:
-        if not cmds.objExists(e):
-            continue
-        
-        # Skip les edges de bord
-        if is_border_edge(e):
+
+    while not it_edge.isDone():
+        ei = it_edge.index()
+        if allowed_edges is not None and ei not in allowed_edges:
+            it_edge.next()
             continue
 
-        # Vérifier l'angle
-        ang = get_edge_face_angle(e)
-        if ang > angle_threshold:
-            continue
-
-        # Vérifier le résultat de la fusion
-        faces = edge_to_faces(e)
+        faces = it_edge.getConnectedFaces()
         if len(faces) != 2:
+            it_edge.next()
             continue
 
-        v1 = face_vertex_count(faces[0])
-        v2 = face_vertex_count(faces[1])
-        merged_vertices = v1 + v2 - 2  # Nombre de vertices après fusion
+        n1 = mfn_mesh.getPolygonNormal(faces[0], om2.MSpace.kWorld)
+        n2 = mfn_mesh.getPolygonNormal(faces[1], om2.MSpace.kWorld)
+        if n1.angle(n2) > threshold_rad:
+            it_edge.next()
+            continue
 
+        v1 = len(mfn_mesh.getPolygonVertices(faces[0]))
+        v2 = len(mfn_mesh.getPolygonVertices(faces[1]))
+        merged_vertices = v1 + v2 - 2
         if allow_ngons:
-            # Mode agressif : autorise jusqu'à des polygones raisonnables (ex: 8 sides max)
             if merged_vertices > 8:
+                it_edge.next()
                 continue
-        else:
-            # Mode conservateur : UNIQUEMENT quad->quad (4+4-2=6 NON, 3+3-2=4 OUI)
-            # Donc on veut que le résultat soit <= 4
-            if merged_vertices > 4:
-                continue
+        elif merged_vertices > 4:
+            it_edge.next()
+            continue
 
-        removable.append(e)
+        removable.append("{}.e[{}]".format(mesh, ei))
+        it_edge.next()
 
     if removable:
         set_selection_mode("edge")
@@ -1898,56 +1953,57 @@ def auto_clean(angle_threshold=5.0, allow_ngons=False, max_passes=50, only_selec
         show_inview_message("Aucun mesh selectionne!", 2.0, "error")
         return
 
-    sel = cmds.ls(selection=True, flatten=True) or []
-    sel_faces = filter_faces(sel)
-
     cmds.undoInfo(openChunk=True, chunkName="AutoClean")
     try:
         total = 0
-        
+        dag_path, mfn_mesh = get_dag_and_mfn(mesh)
+        if not dag_path or not mfn_mesh:
+            cmds.warning("OpenMaya API indisponible pour ce mesh.")
+            return
+
         for _pass in range(max_passes):
             if not cmds.objExists(mesh):
                 break
 
-            # Définir les edges candidates
-            if only_selected_faces and sel_faces:
-                candidate_edges = set()
-                for f in sel_faces:
-                    if cmds.objExists(f):
-                        for e in face_to_edges(f):
-                            candidate_edges.add(e)
-                candidate_edges = list(candidate_edges)
-            else:
-                edge_count = cmds.polyEvaluate(mesh, edge=True)
-                candidate_edges = ["{}.e[{}]".format(mesh, i) for i in range(edge_count)]
+            # Rafraîchir les handles après modifications topo
+            dag_path, mfn_mesh = get_dag_and_mfn(mesh)
+            if not dag_path or not mfn_mesh:
+                break
 
+            allowed_edges = _get_edge_scope_indices(mesh, only_selected_faces=only_selected_faces)
+            threshold_rad = math.radians(angle_threshold)
+            it_edge = om2.MItMeshEdge(dag_path)
             removable = []
-            for e in candidate_edges:
-                if not cmds.objExists(e):
-                    continue
-                if is_border_edge(e):
-                    continue
-
-                ang = get_edge_face_angle(e)
-                if ang > angle_threshold:
+            while not it_edge.isDone():
+                ei = it_edge.index()
+                if allowed_edges is not None and ei not in allowed_edges:
+                    it_edge.next()
                     continue
 
-                faces = edge_to_faces(e)
+                faces = it_edge.getConnectedFaces()
                 if len(faces) != 2:
+                    it_edge.next()
                     continue
 
-                v1 = face_vertex_count(faces[0])
-                v2 = face_vertex_count(faces[1])
-                merged = v1 + v2 - 2
+                n1 = mfn_mesh.getPolygonNormal(faces[0], om2.MSpace.kWorld)
+                n2 = mfn_mesh.getPolygonNormal(faces[1], om2.MSpace.kWorld)
+                if n1.angle(n2) > threshold_rad:
+                    it_edge.next()
+                    continue
 
+                v1 = len(mfn_mesh.getPolygonVertices(faces[0]))
+                v2 = len(mfn_mesh.getPolygonVertices(faces[1]))
+                merged = v1 + v2 - 2
                 if allow_ngons:
                     if merged > 8:
+                        it_edge.next()
                         continue
-                else:
-                    if merged > 4:
-                        continue
+                elif merged > 4:
+                    it_edge.next()
+                    continue
 
-                removable.append(e)
+                removable.append("{}.e[{}]".format(mesh, ei))
+                it_edge.next()
 
             if not removable:
                 break

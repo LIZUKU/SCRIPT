@@ -224,6 +224,9 @@ _IC_SHADER_UNIQUE   = "IC_shader_unique"
 _IC_LAYER_EXACT     = "IC_Matches_Exact"
 _IC_LAYER_SIMILAR   = "IC_Matches_Similar"
 _IC_LAYER_UNIQUE    = "IC_Matches_Unique"
+_IC_LAYER_MASTERS   = "IC_Instances_Master"
+_IC_LAYER_INSTANCES = "IC_Instances"
+_IC_LAYER_BACKUPS   = "IC_Instances_Backup"
 
 _IC_SAVED_SHADERS   = {}   # node -> [shadingEngine avant colorisation]
 
@@ -711,6 +714,7 @@ class MasterManager(object):
         master_orig_longs = cmds.ls(master_path, long=True) or [master_path]
 
         instances_created = []
+        backups_created = []
         instances_grp = self._ensure_instances_group()
         backup_grp = self._ensure_backup_group() if backup else None
 
@@ -758,8 +762,9 @@ class MasterManager(object):
             if backup and backup_grp:
                 try:
                     dup_bkp = cmds.duplicate(mesh, rr=True)[0]
-                    cmds.parent(dup_bkp, backup_grp)
+                    dup_bkp = cmds.parent(dup_bkp, backup_grp)[0]
                     cmds.setAttr(dup_bkp + ".visibility", 0)
+                    backups_created.append(dup_bkp)
                 except Exception:
                     pass
 
@@ -816,7 +821,10 @@ class MasterManager(object):
 
             instances_created.append(inst)
 
-        return instances_created
+        return {
+            "instances": instances_created,
+            "backups": backups_created
+        }
 
 
 def _matrix_to_list(mmat):
@@ -1109,12 +1117,7 @@ class InstanceCleaner(object):
     # ----------------------------------------------------------
     # CREATE MASTERS + REPLACE
     # ----------------------------------------------------------
-    def create_masters_and_replace(self,
-                                   preserve_transforms=True,
-                                   preserve_materials=True,
-                                   keep_hierarchy=False,
-                                   hide_original=True,
-                                   backup=True):
+    def create_masters_and_replace(self):
         """
         Pour chaque groupe accepté :
           1. Crée le master
@@ -1135,6 +1138,9 @@ class InstanceCleaner(object):
             "masters_created":   0,
             "instances_created": 0,
             "meshes_processed":  0,
+            "masters": [],
+            "instances": [],
+            "backups": [],
         }
 
         with UndoChunk("InstanceCleanerReplace"):
@@ -1156,22 +1162,41 @@ class InstanceCleaner(object):
                     index=idx
                 )
                 stats["masters_created"] += 1
+                stats["masters"].append(master)
 
                 # Replace (tout sauf le master lui-même)
-                instances = self.master_manager.replace_with_instances(
+                replace_data = self.master_manager.replace_with_instances(
                     group_label=label,
                     group_meshes=meshes,
-                    preserve_transforms=preserve_transforms,
-                    preserve_materials=preserve_materials,
-                    keep_hierarchy=keep_hierarchy,
-                    hide_original=hide_original,
-                    backup=backup
+                    preserve_transforms=True,
+                    preserve_materials=True,
+                    keep_hierarchy=False,
+                    hide_original=True,
+                    backup=True
                 )
+                instances = replace_data.get("instances", [])
+                backups = replace_data.get("backups", [])
                 stats["instances_created"] += len(instances)
                 stats["meshes_processed"]  += len(meshes)
+                stats["instances"].extend(instances)
+                stats["backups"].extend(backups)
 
-        self._clear_colors()
+        self.apply_colors()
+        self._assign_replace_display_layers(stats["masters"], stats["instances"], stats["backups"])
         return stats
+
+    def _assign_replace_display_layers(self, masters, instances, backups):
+        """Organise les résultats de replace dans des display layers dédiés."""
+        _ensure_display_layer(_IC_LAYER_MASTERS, 6)
+        _ensure_display_layer(_IC_LAYER_INSTANCES, 17)
+        _ensure_display_layer(_IC_LAYER_BACKUPS, 8)
+
+        if masters:
+            _add_to_display_layer(_IC_LAYER_MASTERS, masters)
+        if instances:
+            _add_to_display_layer(_IC_LAYER_INSTANCES, instances)
+        if backups:
+            _add_to_display_layer(_IC_LAYER_BACKUPS, backups)
 
     # ----------------------------------------------------------
     # REPORT
@@ -1585,7 +1610,6 @@ class InstanceCleanerUI(QDialog):
         self._tabs.addTab(self._build_tab_scan(),    "1 · SCAN")
         self._tabs.addTab(self._build_tab_groups(),  "2 · GROUPES")
         self._tabs.addTab(self._build_tab_replace(), "3 · REPLACE")
-        self._tabs.addTab(self._build_tab_report(),  "RAPPORT")
 
     # ------ TAB 1 : SCAN ------
     def _build_tab_scan(self):
@@ -1698,31 +1722,11 @@ class InstanceCleanerUI(QDialog):
 
         ly.addWidget(SectionLabel("OPTIONS REMPLACEMENT"))
 
-        self.pres_transforms_check = QCheckBox("Preserve Transforms")
-        self.pres_transforms_check.setChecked(True)
-        ly.addWidget(self.pres_transforms_check)
-
-        self.pres_materials_check = QCheckBox("Preserve Materials")
-        self.pres_materials_check.setChecked(True)
-        ly.addWidget(self.pres_materials_check)
-
-        self.keep_hierarchy_check = QCheckBox("Keep Hierarchy")
-        self.keep_hierarchy_check.setChecked(False)
-        ly.addWidget(self.keep_hierarchy_check)
-
-        self.hide_original_check = QCheckBox("Masquer les originaux (non-destructif)")
-        self.hide_original_check.setChecked(True)
-        ly.addWidget(self.hide_original_check)
-
-        ly.addWidget(SectionLabel("BACKUP"))
-
-        self.backup_check = QCheckBox("Backup obligatoire (_INSTANCE_CLEANER_BACKUP)")
-        self.backup_check.setChecked(True)
-        ly.addWidget(self.backup_check)
-
         note = QLabel(
             "Seuls les groupes ✓ acceptés seront traités.\n"
-            "Un master par groupe est placé au centre du monde."
+            "Un master par groupe est placé au centre du monde.\n"
+            "Les instances gardent la transform des originaux.\n"
+            "Backup auto: _INSTANCE_CLEANER_BACKUP."
         )
         note.setWordWrap(True)
         note.setStyleSheet("color:#424242;font-size:9px;font-style:italic;")
@@ -1735,46 +1739,6 @@ class InstanceCleanerUI(QDialog):
         go_btn.clicked.connect(self.do_replace)
         ly.addWidget(go_btn)
 
-        return w
-
-    # ------ TAB 4 : RAPPORT ------
-    def _build_tab_report(self):
-        w = QWidget()
-        ly = QVBoxLayout(w)
-        ly.setContentsMargins(6, 6, 6, 6)
-        ly.setSpacing(4)
-
-        self.report_labels = {}
-        fields = [
-            ("total_scanned",     "Meshes scannés"),
-            ("exact_groups",      "Groupes exacts"),
-            ("similar_groups",    "Groupes similaires"),
-            ("unique_meshes",     "Meshes uniques"),
-            ("accepted_groups",   "Groupes acceptés"),
-            ("meshes_in_accepted","Meshes dans groupes acc."),
-            ("estimated_saving",  "Instances éco. estimées"),
-        ]
-
-        for key, label in fields:
-            row = QHBoxLayout()
-            lbl = QLabel(label + ":")
-            lbl.setFixedWidth(160)
-            val = QLabel("—")
-            val.setStyleSheet("color: #a0a0a0; font-weight: bold;")
-            row.addWidget(lbl)
-            row.addWidget(val)
-            row.addStretch()
-            self.report_labels[key] = val
-            ly.addLayout(row)
-
-        ly.addSpacing(8)
-
-        refresh_btn = ColorBtn("↺  ACTUALISER RAPPORT", "",
-                               "#2a2a2a", "#909090", h=26)
-        refresh_btn.clicked.connect(self.do_refresh_report)
-        ly.addWidget(refresh_btn)
-
-        ly.addStretch()
         return w
 
     def _row(self, label_text, widget, label_width=90):
@@ -1825,7 +1789,6 @@ class InstanceCleanerUI(QDialog):
         )
 
         self.refresh_group_list()
-        self.do_refresh_report()
         self.cleaner.apply_colors()
 
         # Switch to groups tab
@@ -1870,7 +1833,6 @@ class InstanceCleanerUI(QDialog):
     def _refresh_item(self, label):
         if label in self.group_items:
             self.group_items[label].refresh()
-        self.do_refresh_report()
 
     # ----------------------------------------------------------
     # SLOT : GROUP ACTIONS
@@ -1897,19 +1859,16 @@ class InstanceCleanerUI(QDialog):
         for label in self.cleaner.validated_groups:
             self.cleaner.accept_group(label)
         self.refresh_group_list()
-        self.do_refresh_report()
 
     def do_reject_all(self):
         for label in self.cleaner.validated_groups:
             self.cleaner.reject_group(label)
         self.refresh_group_list()
-        self.do_refresh_report()
 
     def do_reset_validation(self):
         for label in self.cleaner.validated_groups:
             self.cleaner.validated_groups[label]["accepted"] = None
         self.refresh_group_list()
-        self.do_refresh_report()
 
     def do_exit_isolate(self):
         self.cleaner.exit_isolate()
@@ -1919,13 +1878,7 @@ class InstanceCleanerUI(QDialog):
     # SLOT : REPLACE
     # ----------------------------------------------------------
     def do_replace(self):
-        stats = self.cleaner.create_masters_and_replace(
-            preserve_transforms=self.pres_transforms_check.isChecked(),
-            preserve_materials=self.pres_materials_check.isChecked(),
-            keep_hierarchy=self.keep_hierarchy_check.isChecked(),
-            hide_original=self.hide_original_check.isChecked(),
-            backup=self.backup_check.isChecked()
-        )
+        stats = self.cleaner.create_masters_and_replace()
 
         if stats:
             msg = (
@@ -1935,16 +1888,7 @@ class InstanceCleanerUI(QDialog):
                 "Meshes traités : {meshes_processed}"
             ).format(**stats)
             QMessageBox.information(self, "Instance Cleaner", msg)
-            self.do_refresh_report()
             self.refresh_group_list()
-
-    # ----------------------------------------------------------
-    # SLOT : REPORT
-    # ----------------------------------------------------------
-    def do_refresh_report(self):
-        r = self.cleaner.get_report()
-        for key, lbl in self.report_labels.items():
-            lbl.setText(str(r.get(key, "—")))
 
     # ----------------------------------------------------------
     # CLOSE

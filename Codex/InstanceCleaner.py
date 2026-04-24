@@ -57,10 +57,12 @@ except ImportError:
 #  CONSTANTES
 # ============================================================
 MASTERS_GROUP   = "_INSTANCE_CLEANER_MASTERS"
+INSTANCES_GROUP = "_INSTANCE_CLEANER_INSTANCES"
 BACKUP_GROUP    = "_INSTANCE_CLEANER_BACKUP"
 ATTR_IC_TYPE    = "ic_type"
 ATTR_IC_GROUP   = "ic_group_id"
 ATTR_IC_SOURCE  = "ic_source"
+ATTR_IC_REPLACED = "ic_replaced"
 
 MATCH_EXACT     = "exact"
 MATCH_SIMILAR   = "similar"
@@ -219,9 +221,9 @@ def _get_selected_transforms():
 _IC_SHADER_EXACT    = "IC_shader_exact"
 _IC_SHADER_SIMILAR  = "IC_shader_similar"
 _IC_SHADER_UNIQUE   = "IC_shader_unique"
-_IC_LAYER_EXACT     = "IC_Layer_Exact"
-_IC_LAYER_SIMILAR   = "IC_Layer_Similar"
-_IC_LAYER_UNIQUE    = "IC_Layer_Unique"
+_IC_LAYER_EXACT     = "IC_Matches_Exact"
+_IC_LAYER_SIMILAR   = "IC_Matches_Similar"
+_IC_LAYER_UNIQUE    = "IC_Matches_Unique"
 
 _IC_SAVED_SHADERS   = {}   # node -> [shadingEngine avant colorisation]
 
@@ -622,12 +624,32 @@ class MasterManager(object):
             cmds.group(em=True, name=BACKUP_GROUP)
         return BACKUP_GROUP
 
+    def _ensure_instances_group(self):
+        if not cmds.objExists(INSTANCES_GROUP):
+            cmds.group(em=True, name=INSTANCES_GROUP)
+        return INSTANCES_GROUP
+
+    def _find_existing_master(self, group_label):
+        cached = self.masters.get(group_label)
+        if cached and cmds.objExists(cached):
+            return cached
+        candidates = cmds.ls("MASTER_{}".format(group_label), long=True) or []
+        if candidates:
+            self.masters[group_label] = candidates[0]
+            return candidates[0]
+        return None
+
     def create_master(self, group_label, reference_mesh, group_id,
-                      all_meshes, spacing=200.0, cols=5, index=0):
+                      all_meshes, index=0):
         """
         Duplique reference_mesh comme MASTER et le place dans la grille.
         Retourne le nom court du master (pour comparaison fiable).
         """
+        existing = self._find_existing_master(group_label)
+        if existing:
+            _tag_node(existing, "master", group_id, reference_mesh)
+            return existing
+
         masters_grp = self._ensure_masters_group()
 
         # Duplicate (returnRoots=True pour ne récupérer que la racine)
@@ -638,12 +660,8 @@ class MasterManager(object):
         except Exception:
             pass
 
-        # Placement en grille
-        row = index // max(1, cols)
-        col = index % max(1, cols)
-        tx  = col * spacing
-        tz  = row * spacing
-        cmds.xform(dup, ws=True, t=(tx, 0, tz))
+        # Placement au centre du monde pour édition du master
+        cmds.xform(dup, ws=True, t=(0, 0, 0))
 
         # Parent au groupe masters (retourne le chemin complet)
         try:
@@ -693,6 +711,7 @@ class MasterManager(object):
         master_orig_longs = cmds.ls(master_path, long=True) or [master_path]
 
         instances_created = []
+        instances_grp = self._ensure_instances_group()
         backup_grp = self._ensure_backup_group() if backup else None
 
         # Matériaux : en cas de signatures différentes dans le groupe d'instances,
@@ -721,6 +740,13 @@ class MasterManager(object):
                 continue
             if any(ml in master_orig_longs for ml in mesh_longs):
                 continue
+            # Déjà traité sur un précédent run
+            if cmds.attributeQuery(ATTR_IC_REPLACED, node=mesh, exists=True):
+                try:
+                    if cmds.getAttr(mesh + "." + ATTR_IC_REPLACED):
+                        continue
+                except Exception:
+                    pass
 
             # Récupère world matrix via OpenMaya
             wm = _get_world_matrix(mesh)
@@ -742,6 +768,13 @@ class MasterManager(object):
             if not inst_list:
                 continue
             inst = inst_list[0]
+
+            # Parent l'instance dans le groupe dédié (sauf keep hierarchy)
+            if not keep_hierarchy:
+                try:
+                    inst = cmds.parent(inst, instances_grp)[0]
+                except Exception:
+                    pass
 
             # Preserve materials
             if preserve_materials and not unsafe_material_mix:
@@ -779,6 +812,7 @@ class MasterManager(object):
 
             # Tag instance
             _tag_node(inst, "instance", 0, master_path)
+            _add_ic_attr(mesh, ATTR_IC_REPLACED, 1, "int")
 
             instances_created.append(inst)
 
@@ -1076,8 +1110,6 @@ class InstanceCleaner(object):
     # CREATE MASTERS + REPLACE
     # ----------------------------------------------------------
     def create_masters_and_replace(self,
-                                   spacing=200.0,
-                                   cols=5,
                                    preserve_transforms=True,
                                    preserve_materials=True,
                                    keep_hierarchy=False,
@@ -1121,8 +1153,6 @@ class InstanceCleaner(object):
                     reference_mesh=ref_mesh,
                     group_id=group_id,
                     all_meshes=meshes,
-                    spacing=spacing,
-                    cols=cols,
                     index=idx
                 )
                 stats["masters_created"] += 1
@@ -1602,16 +1632,6 @@ class InstanceCleanerUI(QDialog):
         scan_btn.clicked.connect(self.do_scan)
         ly.addWidget(scan_btn)
 
-        color_btn = ColorBtn("🎨  COLORIER VIEWPORT", "",
-                              "#2a2a1a", "#c0b060", h=28)
-        color_btn.clicked.connect(self.do_color)
-        ly.addWidget(color_btn)
-
-        clear_btn = ColorBtn("✕  EFFACER COULEURS", "",
-                              "#2a2a2a", "#606060", h=24)
-        clear_btn.clicked.connect(self.do_clear_colors)
-        ly.addWidget(clear_btn)
-
         return w
 
     # ------ TAB 2 : GROUPES ------
@@ -1676,18 +1696,6 @@ class InstanceCleanerUI(QDialog):
         ly.setContentsMargins(6, 6, 6, 6)
         ly.setSpacing(6)
 
-        ly.addWidget(SectionLabel("PLACEMENT MASTERS"))
-
-        self.master_spacing_slider = ParamSlider("Espacement", 10, 2000, 200, 0, label_width=90)
-        ly.addWidget(self.master_spacing_slider)
-
-        self.master_cols_spin = QSpinBox()
-        self.master_cols_spin.setRange(1, 20)
-        self.master_cols_spin.setValue(5)
-        self.master_cols_spin.setFixedWidth(48)
-        self.master_cols_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
-        ly.addLayout(self._row("Colonnes", self.master_cols_spin))
-
         ly.addWidget(SectionLabel("OPTIONS REMPLACEMENT"))
 
         self.pres_transforms_check = QCheckBox("Preserve Transforms")
@@ -1714,7 +1722,7 @@ class InstanceCleanerUI(QDialog):
 
         note = QLabel(
             "Seuls les groupes ✓ acceptés seront traités.\n"
-            "Les masters sont placés dans _INSTANCE_CLEANER_MASTERS."
+            "Un master par groupe est placé au centre du monde."
         )
         note.setWordWrap(True)
         note.setStyleSheet("color:#424242;font-size:9px;font-style:italic;")
@@ -1818,18 +1826,10 @@ class InstanceCleanerUI(QDialog):
 
         self.refresh_group_list()
         self.do_refresh_report()
+        self.cleaner.apply_colors()
 
         # Switch to groups tab
         self._tabs.setCurrentIndex(1)
-
-    # ----------------------------------------------------------
-    # SLOT : VIEWPORT COLORS
-    # ----------------------------------------------------------
-    def do_color(self):
-        self.cleaner.apply_colors()
-
-    def do_clear_colors(self):
-        self.cleaner.clear_colors()
 
     # ----------------------------------------------------------
     # SLOT : GROUP LIST
@@ -1920,8 +1920,6 @@ class InstanceCleanerUI(QDialog):
     # ----------------------------------------------------------
     def do_replace(self):
         stats = self.cleaner.create_masters_and_replace(
-            spacing=self.master_spacing_slider.value(),
-            cols=self.master_cols_spin.value(),
             preserve_transforms=self.pres_transforms_check.isChecked(),
             preserve_materials=self.pres_materials_check.isChecked(),
             keep_hierarchy=self.keep_hierarchy_check.isChecked(),

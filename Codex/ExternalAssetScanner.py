@@ -280,6 +280,15 @@ def scan_textures():
     return data
 
 
+def scan_qdm_materials():
+    data = {}
+    for node in cmds.ls(materials=True, long=True) or []:
+        short = strip_ns(short_name(node)).upper()
+        if short.startswith("QDM_"):
+            data.setdefault(short, []).append(node)
+    return data
+
+
 def scan_reused_assets(scan_all=True, include_kits=True, current_asset=None):
     reused = {}
     kits = {}
@@ -482,6 +491,7 @@ def build_catalog_candidates(asset_name, category, prefixes):
 
 class AssetTree(QtWidgets.QTreeWidget):
     doubleClickedSignal = QtCore.Signal(str)
+    itemDoubleClickedSignal = QtCore.Signal(object)
 
     def __init__(self, parent=None):
         super(AssetTree, self).__init__(parent)
@@ -498,6 +508,7 @@ class AssetTree(QtWidgets.QTreeWidget):
 
     def _on_item_double_clicked(self, item, column):
         self.doubleClickedSignal.emit(item.text(0))
+        self.itemDoubleClickedSignal.emit(item)
 
     def set_data(self, data_dict):
         self.clear()
@@ -615,10 +626,18 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
         self.kit_cb.setChecked(True)
 
         self.skip_existing_cb = QtWidgets.QCheckBox("Skip If In Scene")
-        self.skip_existing_cb.setChecked(False)
+        self.skip_existing_cb.setChecked(True)
         self.skip_existing_cb.setToolTip(
-            "When enabled, loading is skipped only for exact asset names already detected in scene."
+            "When enabled, loading is skipped for asset names already detected in outliner."
         )
+        self.skip_existing_cb.toggled.connect(self._on_skip_existing_toggled)
+
+        self.force_import_cb = QtWidgets.QCheckBox("Force Import")
+        self.force_import_cb.setChecked(False)
+        self.force_import_cb.setToolTip(
+            "When checked, import even if the asset appears to already exist in scene."
+        )
+        self.force_import_cb.toggled.connect(self._on_force_import_toggled)
 
         self.scan_btn = QtWidgets.QPushButton("Scan")
         self.scan_btn.clicked.connect(self._scan)
@@ -629,6 +648,7 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
         top.addWidget(self.scan_all_cb)
         top.addWidget(self.kit_cb)
         top.addWidget(self.skip_existing_cb)
+        top.addWidget(self.force_import_cb)
         top.addWidget(self.scan_btn)
 
         root.addLayout(top)
@@ -640,7 +660,7 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
         root.addLayout(prefix_row)
 
         self.hint_label = QtWidgets.QLabel(
-            "Click Scan to populate lists. Texture tab is diagnostic: it groups texture nodes by detected texture family."
+            "Click Scan to populate lists. Texture tab lists texture families and all QDM_* materials found in scene."
         )
         self.hint_label.setWordWrap(True)
         root.addWidget(self.hint_label)
@@ -653,6 +673,7 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
         self.tree_reused.doubleClickedSignal.connect(self._copy_name)
         self.tree_kit.doubleClickedSignal.connect(self._copy_name)
         self.tree_texture.doubleClickedSignal.connect(self._copy_name)
+        self.tree_texture.itemDoubleClickedSignal.connect(self._on_texture_item_double_clicked)
         self.tree_reused.itemSelectionChanged.connect(self._on_tree_selection_changed)
         self.tree_kit.itemSelectionChanged.connect(self._on_tree_selection_changed)
         self.tree_texture.itemSelectionChanged.connect(self._on_tree_selection_changed)
@@ -760,6 +781,7 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
         self.status_label = QtWidgets.QLabel("")
         root.addWidget(self.status_label)
         self._on_log_toggled(self.log_box.isChecked())
+        self._on_force_import_toggled(self.force_import_cb.isChecked())
 
     def _reset_ui_before_first_scan(self):
         self.current_asset = current_asset_from_scene()
@@ -789,6 +811,14 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
             self.log_box.setMaximumHeight(16777215)
         else:
             self.log_box.setMaximumHeight(34)
+
+    def _on_force_import_toggled(self, checked):
+        if checked:
+            self.skip_existing_cb.setChecked(False)
+
+    def _on_skip_existing_toggled(self, checked):
+        if checked and self.force_import_cb.isChecked():
+            self.force_import_cb.setChecked(False)
 
     def _prefixes(self):
         raw = self.prefixes_edit.text().strip()
@@ -830,6 +860,14 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
         self._set_asset_name_field(name)
         self._set_status("Copied: {}".format(name))
 
+    def _on_texture_item_double_clicked(self, item):
+        if self.tabs.currentIndex() != 2:
+            return
+        if not item:
+            return
+        item.setSelected(True)
+        self.select_selected_nodes()
+
     def copy_asset_name_field(self):
         name = self._normalized_asset_name_from_field()
         if not name:
@@ -859,6 +897,11 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
             current_asset=self.current_asset
         )
         self.data_textures = scan_textures()
+        qdm_data = scan_qdm_materials()
+        for key, nodes in qdm_data.items():
+            self.data_textures.setdefault(key, [])
+            self.data_textures[key].extend(nodes)
+            self.data_textures[key] = list(set(self.data_textures[key]))
 
         self.tree_reused.set_data(self.data_reused)
         self.tree_kit.set_data(self.data_kits)
@@ -982,9 +1025,18 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
             out.add(self.current_asset)
         return out
 
+    def _scan_asset_names_from_outliner(self):
+        names = set()
+        for node in cmds.ls(type="transform", long=True) or []:
+            detected = extract_main_name_from_string(node) or extract_kit_name_from_string(node)
+            if detected:
+                names.add(detected.upper())
+        return names
+
     def _is_asset_already_in_scene(self, asset_name):
         asset_name = asset_name.upper()
         existing = {x.upper() for x in self._scene_known_asset_names()}
+        existing.update(self._scan_asset_names_from_outliner())
         return asset_name in existing
 
     def _do_load_one(self, asset_name, category):
@@ -1039,7 +1091,8 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
             if progress.wasCanceled():
                 break
 
-            if self.skip_existing_cb.isChecked() and self._is_asset_already_in_scene(name):
+            should_skip_existing = self.skip_existing_cb.isChecked() and not self.force_import_cb.isChecked()
+            if should_skip_existing and self._is_asset_already_in_scene(name):
                 skipped.append(name)
                 self._log("SKIP {} (already in scene)".format(name))
                 continue
@@ -1126,27 +1179,35 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
         self._run_load_batch(names, category, "Load From List")
 
     def load_from_maya_selection(self):
-        sel = cmds.ls(selection=True, long=True) or []
-        category = self.category_edit.text().strip() or "Props"
+        try:
+            sel = cmds.ls(selection=True, long=True) or []
+            category = self.category_edit.text().strip() or "Props"
 
-        if not sel:
-            cmds.warning("Nothing selected in Maya.")
-            return
+            if not sel:
+                cmds.warning("Nothing selected in Maya.")
+                return
 
-        found = []
-        seen = set()
+            found = []
+            seen = set()
 
-        for node in sel:
-            detected = extract_main_name_from_string(node) or extract_kit_name_from_string(node)
-            if detected and detected not in seen:
-                seen.add(detected)
-                found.append(detected)
+            for node in sel:
+                try:
+                    detected = extract_main_name_from_string(node) or extract_kit_name_from_string(node)
+                except Exception:
+                    detected = None
+                if detected and detected not in seen:
+                    seen.add(detected)
+                    found.append(detected)
 
-        if not found:
-            cmds.warning("No recognizable asset found in Maya selection.")
-            return
+            if not found:
+                cmds.warning("No recognizable asset found in Maya selection.")
+                return
 
-        self._run_load_batch(found, category, "Load From Maya Selection")
+            self._run_load_batch(found, category, "Load From Maya Selection")
+        except Exception as exc:
+            self._log("ERROR load_from_maya_selection -> {}".format(exc))
+            self._log(traceback.format_exc())
+            cmds.warning("Load From Maya Selection failed. Check scanner log.")
 
     def load_current_asset(self):
         if not self.current_asset:

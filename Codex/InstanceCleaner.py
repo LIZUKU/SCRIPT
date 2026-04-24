@@ -21,7 +21,6 @@ Changelog V1.1 :
 - Ajout : cleanup shaders/layers dans clear_colors()
 """
 
-import math
 import hashlib
 import struct
 from collections import defaultdict
@@ -510,13 +509,13 @@ def _classify_pair(a, b, tol_similar=0.05, use_vertex_hash=False):
         return MatchResult(MATCH_UNIQUE, float("inf"))
 
     if dist < 1e-6:
-        # Vertex hash si disponible
+        # Exact uniquement si hash vertices activé ET identique.
+        # Sans hash fiable, on reste volontairement en "similar" (safe-first).
         if use_vertex_hash and a.vertex_hash and b.vertex_hash:
             if a.vertex_hash == b.vertex_hash:
                 return MatchResult(MATCH_EXACT, 0.0)
-            else:
-                return MatchResult(MATCH_SIMILAR, dist)
-        return MatchResult(MATCH_EXACT, 0.0)
+            return MatchResult(MATCH_SIMILAR, dist)
+        return MatchResult(MATCH_SIMILAR, dist)
 
     if dist <= tol_similar:
         return MatchResult(MATCH_SIMILAR, dist)
@@ -696,6 +695,22 @@ class MasterManager(object):
         instances_created = []
         backup_grp = self._ensure_backup_group() if backup else None
 
+        # Matériaux : en cas de signatures différentes dans le groupe d'instances,
+        # on évite un transfert potentiellement destructif.
+        source_mat_sig = {}
+        group_mat_sigs = set()
+        for gm in group_meshes:
+            if cmds.objExists(gm):
+                sig = _material_signature(gm)
+                source_mat_sig[gm] = sig
+                group_mat_sigs.add(sig)
+        unsafe_material_mix = preserve_materials and len(group_mat_sigs) > 1
+        if unsafe_material_mix:
+            cmds.warning(
+                "[IC] {}: matériaux différents détectés dans le groupe. "
+                "Preserve Materials désactivé pour éviter de casser les instances.".format(group_label)
+            )
+
         for mesh in group_meshes:
             if not cmds.objExists(mesh):
                 continue
@@ -709,9 +724,9 @@ class MasterManager(object):
 
             # Récupère world matrix via OpenMaya
             wm = _get_world_matrix(mesh)
-
-            # Décompose TRS depuis MMatrix
-            t, r, s = _decompose_matrix(wm)
+            if _has_negative_scale(wm):
+                cmds.warning("[IC] Mirror/negative scale détecté sur {}. "
+                             "La matrice monde complète sera préservée.".format(mesh))
 
             # Backup
             if backup and backup_grp:
@@ -728,18 +743,8 @@ class MasterManager(object):
                 continue
             inst = inst_list[0]
 
-            if preserve_transforms:
-                try:
-                    cmds.xform(inst, ws=True, t=t)
-                    cmds.xform(inst, ws=True, ro=r)
-                    cmds.setAttr(inst + ".scaleX", s[0])
-                    cmds.setAttr(inst + ".scaleY", s[1])
-                    cmds.setAttr(inst + ".scaleZ", s[2])
-                except Exception:
-                    pass
-
             # Preserve materials
-            if preserve_materials:
+            if preserve_materials and not unsafe_material_mix:
                 _transfer_materials(mesh, inst)
 
             # Keep hierarchy : place l'instance dans le même parent que l'original
@@ -752,6 +757,13 @@ class MasterManager(object):
                             inst = cmds.parent(inst, par)[0]
                         except Exception:
                             pass
+
+            # Applique la matrice monde complète pour préserver mirror/shear/etc.
+            if preserve_transforms:
+                try:
+                    cmds.xform(inst, ws=True, matrix=_matrix_to_list(wm))
+                except Exception:
+                    pass
 
             # Hide/Delete original
             if hide_original:
@@ -773,44 +785,37 @@ class MasterManager(object):
         return instances_created
 
 
-def _decompose_matrix(mmat):
-    """Décompose MMatrix en T, R (euler), S."""
-    # Translation
-    t = (mmat[12], mmat[13], mmat[14])
+def _matrix_to_list(mmat):
+    """Convertit MMatrix en liste 16 float (row-major) pour cmds.xform(matrix=...)."""
+    return [mmat[r][c] for r in range(4) for c in range(4)]
 
-    # Scale (longueur des colonnes)
-    sx = math.sqrt(mmat[0]**2 + mmat[1]**2 + mmat[2]**2)
-    sy = math.sqrt(mmat[4]**2 + mmat[5]**2 + mmat[6]**2)
-    sz = math.sqrt(mmat[8]**2 + mmat[9]**2 + mmat[10]**2)
-    s  = (sx, sy, sz)
 
-    # Rotation matrix normalisée
-    if sx > 1e-9:
-        r00, r10, r20 = mmat[0]/sx, mmat[1]/sx, mmat[2]/sx
-    else:
-        r00, r10, r20 = 1, 0, 0
-    if sy > 1e-9:
-        r01, r11, r21 = mmat[4]/sy, mmat[5]/sy, mmat[6]/sy
-    else:
-        r01, r11, r21 = 0, 1, 0
-    if sz > 1e-9:
-        r02, r12, r22 = mmat[8]/sz, mmat[9]/sz, mmat[10]/sz
-    else:
-        r02, r12, r22 = 0, 0, 1
+def _has_negative_scale(mmat):
+    """
+    Détecte une inversion de handedness (scale négatif / mirror) via déterminant 3x3.
+    """
+    r00, r01, r02 = mmat[0], mmat[1], mmat[2]
+    r10, r11, r12 = mmat[4], mmat[5], mmat[6]
+    r20, r21, r22 = mmat[8], mmat[9], mmat[10]
 
-    # Euler XYZ
-    ry = math.asin(max(-1.0, min(1.0, -r20)))
-    if abs(math.cos(ry)) > 1e-6:
-        rx = math.atan2(r21, r22)
-        rz = math.atan2(r10, r00)
-    else:
-        rx = math.atan2(-r12, r11)
-        rz = 0.0
+    det = (
+        r00 * (r11 * r22 - r12 * r21)
+        - r01 * (r10 * r22 - r12 * r20)
+        + r02 * (r10 * r21 - r11 * r20)
+    )
+    return det < 0.0
 
-    deg = math.degrees
-    r = (deg(rx), deg(ry), deg(rz))
 
-    return t, r, s
+def _material_signature(transform):
+    """Signature simple des shadingEngines connectés à la shape (triée)."""
+    try:
+        shapes = cmds.listRelatives(transform, shapes=True, fullPath=True) or []
+        if not shapes:
+            return tuple()
+        sgs = cmds.listConnections(shapes[0], type="shadingEngine") or []
+        return tuple(sorted(set(sgs)))
+    except Exception:
+        return tuple()
 
 
 def _transfer_materials(source, dest):
@@ -873,9 +878,8 @@ class InstanceCleaner(object):
         seen = set()
         unique_transforms = []
         for t in transforms:
-            short = _short(t)
-            if short not in seen:
-                seen.add(short)
+            if t not in seen:
+                seen.add(t)
                 unique_transforms.append(t)
         transforms = unique_transforms
 
@@ -1085,6 +1089,9 @@ class InstanceCleaner(object):
           2. Remplace par instances
         Retourne stats dict.
         """
+        # Important: retire les shaders preview AVANT duplication du master.
+        self._clear_colors()
+
         accepted = {k: v for k, v in self.validated_groups.items()
                     if v["accepted"] is True}
 

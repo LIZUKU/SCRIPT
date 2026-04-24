@@ -113,6 +113,26 @@ def extract_main_name_from_string(name):
     return None
 
 
+def extract_asset_name_from_qds_shader_name(name):
+    shader_name = strip_ns(short_name(name)).upper()
+    if not shader_name.startswith("QDS_"):
+        return None
+
+    core = shader_name[4:]
+    parts = core.split("_")
+    if len(parts) < 3:
+        return None
+
+    collected = []
+    for part in parts:
+        if not re.match(r"^[A-Z0-9]+$", part):
+            break
+        collected.append(part)
+        if re.match(r"^[A-Z]$", part):
+            return "_".join(collected) if len(collected) >= 3 else None
+    return None
+
+
 def extract_kit_name_from_string(name):
     name = strip_ns(short_name(name)).upper()
     parts = name.split("_")
@@ -152,6 +172,10 @@ def is_probable_texture_name(asset_name):
     if re.match(r"^\d+$", tail) and len(parts) >= 2 and parts[-2] in MAP_SUFFIXES:
         return True
     return False
+
+
+def is_excluded_reused_asset_name(asset_name):
+    return (asset_name or "").upper().startswith("QDD_")
 
 
 def current_asset_from_scene():
@@ -270,6 +294,8 @@ def scan_reused_assets(scan_all=True, include_kits=True, current_asset=None):
         if main_name:
             if is_probable_texture_name(main_name):
                 continue
+            if is_excluded_reused_asset_name(main_name):
+                continue
             if current_asset and main_name == current_asset:
                 continue
             reused.setdefault(main_name, []).append(node)
@@ -285,7 +311,43 @@ def scan_reused_assets(scan_all=True, include_kits=True, current_asset=None):
                 kits.setdefault(kit_name, []).append(node)
                 continue
 
+    shader_reused = scan_reused_assets_from_shaders(nodes, current_asset=current_asset)
+    for asset_name, vals in shader_reused.items():
+        reused.setdefault(asset_name, [])
+        reused[asset_name].extend(vals)
+        reused[asset_name] = list(set(reused[asset_name]))
+
     return reused, kits
+
+
+def scan_reused_assets_from_shaders(nodes, current_asset=None):
+    reused = {}
+    mesh_to_owner = {}
+
+    for node in nodes:
+        try:
+            for mesh in cmds.listRelatives(node, ad=True, type="mesh", fullPath=True) or []:
+                mesh_to_owner[mesh] = node
+        except Exception:
+            pass
+
+    for mesh, owner in mesh_to_owner.items():
+        for sg in shading_engines_on_mesh(mesh):
+            shader = surface_shader_from_sg(sg)
+            if not shader:
+                continue
+
+            asset_name = extract_asset_name_from_qds_shader_name(shader)
+            if not asset_name:
+                continue
+            if is_excluded_reused_asset_name(asset_name):
+                continue
+            if current_asset and asset_name == current_asset:
+                continue
+
+            reused.setdefault(asset_name, []).append(owner)
+
+    return reused
 
 
 def meshes_under(nodes):

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Instance Cleaner for Maya - V1.1
+Instance Cleaner for Maya - V1.2
 ----------------------------------
 Outil d'optimisation d'assets complexes :
 - Détection automatique des meshes dupliqués/similaires
@@ -19,6 +19,12 @@ Changelog V1.1 :
 - Fix : panel viewport résolu via modelPanel actif, pas withFocus (UI-safe)
 - Ajout : display layers IC_Exact / IC_Similar / IC_Unique créés automatiquement
 - Ajout : cleanup shaders/layers dans clear_colors()
+
+Changelog V1.2 :
+- Match: option "Ignorer scale/rotation" pour grouper par topologie (polycount + shells)
+- Scan: option "shells" pour inclure le nombre de shells dans la détection
+- Replace: préservation fiable des transforms monde des instances
+- UX: simplification des options de remplacement
 """
 
 import hashlib
@@ -399,6 +405,7 @@ class MeshSignature(object):
 
     __slots__ = (
         "transform", "vertex_count", "face_count", "edge_count",
+        "shell_count",
         "bbox_x", "bbox_y", "bbox_z",
         "bbox_rx", "bbox_ry", "bbox_rz",
         "vertex_hash"
@@ -409,6 +416,7 @@ class MeshSignature(object):
         self.vertex_count = 0
         self.face_count   = 0
         self.edge_count   = 0
+        self.shell_count  = 0
         self.bbox_x = self.bbox_y = self.bbox_z = 0.0
         self.bbox_rx = self.bbox_ry = self.bbox_rz = 0.0
         self.vertex_hash  = ""
@@ -436,6 +444,10 @@ def _compute_signature(transform_name, vertex_hash=False, tol=0.001):
     sig.vertex_count = fn_mesh.numVertices
     sig.face_count   = fn_mesh.numPolygons
     sig.edge_count   = fn_mesh.numEdges
+    try:
+        sig.shell_count = cmds.polyEvaluate(transform_name, shell=True) or 0
+    except Exception:
+        sig.shell_count = 0
 
     # BBox via MFnMesh
     bb = fn_mesh.boundingBox
@@ -483,7 +495,7 @@ class MatchResult(object):
         self.score      = score       # 0.0 = identique, +grand = plus différent
 
 
-def _sig_distance(a, b, tol_ratio=0.01):
+def _sig_distance(a, b, tol_ratio=0.01, ignore_bbox=False, use_shell_count=False):
     """
     Distance normalisée entre deux signatures.
     Retourne 0.0 si identiques, >0 sinon.
@@ -495,6 +507,11 @@ def _sig_distance(a, b, tol_ratio=0.01):
         return float("inf")
     if a.edge_count != b.edge_count:
         return float("inf")
+    if use_shell_count and a.shell_count != b.shell_count:
+        return float("inf")
+
+    if ignore_bbox:
+        return 0.0
 
     # Distance sur les ratios bbox (invariant à l'échelle)
     dr = (abs(a.bbox_rx - b.bbox_rx) +
@@ -504,11 +521,12 @@ def _sig_distance(a, b, tol_ratio=0.01):
     return dr
 
 
-def _classify_pair(a, b, tol_similar=0.05, use_vertex_hash=False):
+def _classify_pair(a, b, tol_similar=0.05, use_vertex_hash=False,
+                   ignore_bbox=False, use_shell_count=False):
     """
     Classifie la relation entre deux signatures.
     """
-    dist = _sig_distance(a, b)
+    dist = _sig_distance(a, b, ignore_bbox=ignore_bbox, use_shell_count=use_shell_count)
 
     if dist == float("inf"):
         return MatchResult(MATCH_UNIQUE, float("inf"))
@@ -528,7 +546,8 @@ def _classify_pair(a, b, tol_similar=0.05, use_vertex_hash=False):
     return MatchResult(MATCH_UNIQUE, dist)
 
 
-def find_groups(signatures, tol_similar=0.05, use_vertex_hash=False):
+def find_groups(signatures, tol_similar=0.05, use_vertex_hash=False,
+                ignore_bbox=False, use_shell_count=False):
     """
     Regroupe les signatures par similarité.
     Retourne:
@@ -567,7 +586,9 @@ def find_groups(signatures, tol_similar=0.05, use_vertex_hash=False):
                 res = _classify_pair(
                     signatures[i], signatures[j],
                     tol_similar=tol_similar,
-                    use_vertex_hash=use_vertex_hash
+                    use_vertex_hash=use_vertex_hash,
+                    ignore_bbox=ignore_bbox,
+                    use_shell_count=use_shell_count
                 )
                 if res.match_type in (MATCH_EXACT, MATCH_SIMILAR):
                     union(i, j)
@@ -687,7 +708,6 @@ class MasterManager(object):
     def replace_with_instances(self, group_label, group_meshes,
                                 preserve_transforms=True,
                                 preserve_materials=True,
-                                keep_hierarchy=False,
                                 hide_original=True,
                                 backup=True):
         """
@@ -752,11 +772,16 @@ class MasterManager(object):
                 except Exception:
                     pass
 
-            # Récupère world matrix via OpenMaya
-            wm = _get_world_matrix(mesh)
-            if _has_negative_scale(wm):
-                cmds.warning("[IC] Mirror/negative scale détecté sur {}. "
-                             "La matrice monde complète sera préservée.".format(mesh))
+            # Capture transform monde AVANT toute opération
+            world_matrix = None
+            if preserve_transforms:
+                try:
+                    world_matrix = cmds.xform(mesh, q=True, ws=True, matrix=True)
+                except Exception:
+                    world_matrix = _matrix_to_list(_get_world_matrix(mesh))
+                if world_matrix and _has_negative_scale(world_matrix):
+                    cmds.warning("[IC] Mirror/negative scale détecté sur {}. "
+                                 "La matrice monde complète sera préservée.".format(mesh))
 
             # Backup
             if backup and backup_grp:
@@ -774,32 +799,20 @@ class MasterManager(object):
                 continue
             inst = inst_list[0]
 
-            # Parent l'instance dans le groupe dédié (sauf keep hierarchy)
-            if not keep_hierarchy:
-                try:
-                    inst = cmds.parent(inst, instances_grp)[0]
-                except Exception:
-                    pass
+            # Parent systématique dans le groupe instances (workflow simplifié)
+            try:
+                inst = cmds.parent(inst, instances_grp)[0]
+            except Exception:
+                pass
 
             # Preserve materials
             if preserve_materials and not unsafe_material_mix:
                 _transfer_materials(mesh, inst)
 
-            # Keep hierarchy : place l'instance dans le même parent que l'original
-            if keep_hierarchy:
-                orig_parent = cmds.listRelatives(mesh, parent=True, fullPath=True)
-                if orig_parent:
-                    par = orig_parent[0]
-                    if par and not par.startswith("|" + MASTERS_GROUP):
-                        try:
-                            inst = cmds.parent(inst, par)[0]
-                        except Exception:
-                            pass
-
             # Applique la matrice monde complète pour préserver mirror/shear/etc.
-            if preserve_transforms:
+            if preserve_transforms and world_matrix:
                 try:
-                    cmds.xform(inst, ws=True, matrix=_matrix_to_list(wm))
+                    cmds.xform(inst, ws=True, matrix=world_matrix)
                 except Exception:
                     pass
 
@@ -836,9 +849,14 @@ def _has_negative_scale(mmat):
     """
     Détecte une inversion de handedness (scale négatif / mirror) via déterminant 3x3.
     """
-    r00, r01, r02 = mmat[0], mmat[1], mmat[2]
-    r10, r11, r12 = mmat[4], mmat[5], mmat[6]
-    r20, r21, r22 = mmat[8], mmat[9], mmat[10]
+    if hasattr(mmat, "__len__") and len(mmat) == 16:
+        r00, r01, r02 = mmat[0], mmat[1], mmat[2]
+        r10, r11, r12 = mmat[4], mmat[5], mmat[6]
+        r20, r21, r22 = mmat[8], mmat[9], mmat[10]
+    else:
+        r00, r01, r02 = mmat[0][0], mmat[0][1], mmat[0][2]
+        r10, r11, r12 = mmat[1][0], mmat[1][1], mmat[1][2]
+        r20, r21, r22 = mmat[2][0], mmat[2][1], mmat[2][2]
 
     det = (
         r00 * (r11 * r22 - r12 * r21)
@@ -891,7 +909,7 @@ class InstanceCleaner(object):
     # SCAN
     # ----------------------------------------------------------
     def scan(self, root=None, use_vertex_hash=False, tol_similar=0.05,
-             progress_cb=None):
+             ignore_bbox=True, use_shell_count=False, progress_cb=None):
         """
         Scanne les meshes sous root (ou sélection si None).
         Retourne le nombre de groupes trouvés.
@@ -945,7 +963,9 @@ class InstanceCleaner(object):
         self.groups_exact, self.groups_similar, self.uniques = find_groups(
             self.signatures,
             tol_similar=tol_similar,
-            use_vertex_hash=use_vertex_hash
+            use_vertex_hash=use_vertex_hash,
+            ignore_bbox=ignore_bbox,
+            use_shell_count=use_shell_count
         )
 
         # Initialise validated_groups
@@ -1170,7 +1190,6 @@ class InstanceCleaner(object):
                     group_meshes=meshes,
                     preserve_transforms=True,
                     preserve_materials=True,
-                    keep_hierarchy=False,
                     hide_original=True,
                     backup=True
                 )
@@ -1181,7 +1200,8 @@ class InstanceCleaner(object):
                 stats["instances"].extend(instances)
                 stats["backups"].extend(backups)
 
-        self.apply_colors()
+        # Recolorise uniquement les éléments encore visibles (masters/instances/backups via layers)
+        self.clear_colors(delete_layers=False)
         self._assign_replace_display_layers(stats["masters"], stats["instances"], stats["backups"])
         return stats
 
@@ -1473,7 +1493,7 @@ class GroupItem(QWidget):
 #  MAIN UI
 # ============================================================
 class InstanceCleanerUI(QDialog):
-    WINDOW_TITLE = "Instance Cleaner V1.1"
+    WINDOW_TITLE = "Instance Cleaner V1.2"
 
     def __init__(self, parent=maya_main_window()):
         super(InstanceCleanerUI, self).__init__(parent)
@@ -1637,6 +1657,14 @@ class InstanceCleanerUI(QDialog):
         self.vertex_hash_check.setChecked(False)
         ly.addWidget(self.vertex_hash_check)
 
+        self.ignore_bbox_check = QCheckBox("Ignorer scale/rotation (match topologie)")
+        self.ignore_bbox_check.setChecked(True)
+        ly.addWidget(self.ignore_bbox_check)
+
+        self.shell_scan_check = QCheckBox("Option shells : comparer aussi le nombre de shells")
+        self.shell_scan_check.setChecked(False)
+        ly.addWidget(self.shell_scan_check)
+
         ly.addWidget(SectionLabel("PROGRESSION"))
 
         self.progress_bar = QProgressBar()
@@ -1759,6 +1787,8 @@ class InstanceCleanerUI(QDialog):
 
         use_hash = self.vertex_hash_check.isChecked()
         tol      = self.tol_slider.value()
+        ignore_bbox = self.ignore_bbox_check.isChecked()
+        use_shell_count = self.shell_scan_check.isChecked()
 
         # Root
         mode = self.scan_mode_combo.currentText()
@@ -1778,6 +1808,8 @@ class InstanceCleanerUI(QDialog):
             root=root,
             use_vertex_hash=use_hash,
             tol_similar=tol,
+            ignore_bbox=ignore_bbox,
+            use_shell_count=use_shell_count,
             progress_cb=progress_cb
         )
 

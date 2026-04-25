@@ -717,49 +717,46 @@ class WeightedNormalsTool(QtWidgets.QDialog):
     # =========================================================
 
     def get_selected_meshes(self):
+
+        sel = om.MGlobal.getActiveSelectionList()
+
         meshes = []
-        seen_paths = set()
-        selected_items = cmds.ls(sl=True, long=True, objectsOnly=True) or []
 
-        for item in selected_items:
+
+
+        for i in range(sel.length()):
+
             try:
-                node_type = cmds.nodeType(item)
-            except Exception:
-                continue
 
-            candidate_shapes = []
-            if node_type == "mesh":
-                candidate_shapes = [item]
-            elif node_type == "transform":
-                candidate_shapes = cmds.listRelatives(
-                    item,
-                    shapes=True,
-                    noIntermediate=True,
-                    fullPath=True,
-                    type="mesh",
-                ) or []
+                dag_path = sel.getDagPath(i)
 
-            for shape in candidate_shapes:
-                if shape in seen_paths:
-                    continue
-                try:
-                    if cmds.getAttr("{}.intermediateObject".format(shape)):
-                        continue
-                except Exception:
-                    pass
 
-                sel_list = om.MSelectionList()
-                try:
-                    sel_list.add(shape)
-                    dag_path = sel_list.getDagPath(0)
-                except Exception:
-                    continue
+
+                if dag_path.hasFn(om.MFn.kTransform):
+
+                    try:
+
+                        dag_path.extendToShape()
+
+                    except Exception:
+
+                        pass
+
+
 
                 if dag_path.hasFn(om.MFn.kMesh):
+
                     meshes.append(dag_path)
-                    seen_paths.add(shape)
+
+            except Exception:
+
+                continue
+
+
 
         return meshes
+
+
 
     def safe_normalize(self, vec):
 
@@ -1147,22 +1144,6 @@ class WeightedNormalsTool(QtWidgets.QDialog):
 
 
 
-        self._apply_display_state(meshes, val, length)
-
-
-
-        if current_sel:
-
-            try:
-
-                cmds.select(current_sel, r=True)
-
-            except Exception:
-
-                pass
-
-    def _apply_display_state(self, meshes, enabled, length):
-
         for dag_path in meshes:
 
             try:
@@ -1171,13 +1152,27 @@ class WeightedNormalsTool(QtWidgets.QDialog):
 
                 cmds.select(mesh_name, r=True)
 
-                if enabled:
+
+
+                if val:
 
                     mel.eval("polyOptions -displayNormal true -sizeNormal {};".format(length))
 
                 else:
 
                     mel.eval("polyOptions -displayNormal false;")
+
+            except Exception:
+
+                pass
+
+
+
+        if current_sel:
+
+            try:
+
+                cmds.select(current_sel, r=True)
 
             except Exception:
 
@@ -1475,24 +1470,6 @@ class WeightedNormalsTool(QtWidgets.QDialog):
 
                     )
 
-                try:
-
-                    cmds.select(dag_path.fullPathName(), r=True)
-
-                    cmds.polyNormalPerVertex(freezeNormal=True)
-
-                except Exception as e:
-
-                    om.MGlobal.displayWarning(
-
-                        "Impossible de verrouiller les normales sur {} : {}".format(
-
-                            dag_path.fullPathName(), e
-
-                        )
-
-                    )
-
 
 
         if current_sel:
@@ -1513,7 +1490,7 @@ class WeightedNormalsTool(QtWidgets.QDialog):
 
         if self.chk_display.isChecked():
 
-            self._apply_display_state(meshes, True, self._value(self.display_length))
+            self.toggle_display()
 
 
 
@@ -1537,7 +1514,7 @@ def show_weighted_normals_tool():
 
     for widget in QtWidgets.QApplication.allWidgets():
 
-        object_name = widget.objectName() if callable(getattr(widget, "objectName", None)) else ""
+        object_name = widget.objectName if isinstance(widget.objectName, str) else widget.objectName()
 
         if object_name == WeightedNormalsTool.WINDOW_NAME:
 

@@ -718,7 +718,14 @@ class WeightedNormalsTool(QtWidgets.QDialog):
 
     def get_selected_meshes(self):
 
-        sel = om.MGlobal.getActiveSelectionList()
+        sel = om.MSelectionList()
+        try:
+            om.MGlobal.getActiveSelectionList(sel, om.MGlobal.kReplaceList)
+        except TypeError:
+            try:
+                om.MGlobal.getActiveSelectionList(sel)
+            except TypeError:
+                sel = om.MGlobal.getActiveSelectionList()
 
         meshes = []
 
@@ -1144,27 +1151,7 @@ class WeightedNormalsTool(QtWidgets.QDialog):
 
 
 
-        for dag_path in meshes:
-
-            try:
-
-                mesh_name = dag_path.fullPathName()
-
-                cmds.select(mesh_name, r=True)
-
-
-
-                if val:
-
-                    mel.eval("polyOptions -displayNormal true -sizeNormal {};".format(length))
-
-                else:
-
-                    mel.eval("polyOptions -displayNormal false;")
-
-            except Exception:
-
-                pass
+        self._apply_display_state(meshes, val, length)
 
 
 
@@ -1173,6 +1160,28 @@ class WeightedNormalsTool(QtWidgets.QDialog):
             try:
 
                 cmds.select(current_sel, r=True)
+
+            except Exception:
+
+                pass
+
+    def _apply_display_state(self, meshes, enabled, length):
+
+        for dag_path in meshes:
+
+            try:
+
+                mesh_name = dag_path.fullPathName()
+
+                cmds.select(mesh_name, r=True)
+
+                if enabled:
+
+                    mel.eval("polyOptions -displayNormal true -sizeNormal {};".format(length))
+
+                else:
+
+                    mel.eval("polyOptions -displayNormal false;")
 
             except Exception:
 
@@ -1470,6 +1479,24 @@ class WeightedNormalsTool(QtWidgets.QDialog):
 
                     )
 
+                try:
+
+                    cmds.select(dag_path.fullPathName(), r=True)
+
+                    cmds.polyNormalPerVertex(unFreezeNormal=True)
+
+                except Exception as e:
+
+                    om.MGlobal.displayWarning(
+
+                        "Impossible de déverrouiller les normales sur {} : {}".format(
+
+                            dag_path.fullPathName(), e
+
+                        )
+
+                    )
+
 
 
         if current_sel:
@@ -1490,7 +1517,7 @@ class WeightedNormalsTool(QtWidgets.QDialog):
 
         if self.chk_display.isChecked():
 
-            self.toggle_display()
+            self._apply_display_state(meshes, True, self._value(self.display_length))
 
 
 
@@ -1514,7 +1541,7 @@ def show_weighted_normals_tool():
 
     for widget in QtWidgets.QApplication.allWidgets():
 
-        object_name = widget.objectName if isinstance(widget.objectName, str) else widget.objectName()
+        object_name = widget.objectName() if callable(getattr(widget, "objectName", None)) else ""
 
         if object_name == WeightedNormalsTool.WINDOW_NAME:
 

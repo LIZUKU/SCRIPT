@@ -717,53 +717,49 @@ class WeightedNormalsTool(QtWidgets.QDialog):
     # =========================================================
 
     def get_selected_meshes(self):
-
-        sel = om.MSelectionList()
-        try:
-            om.MGlobal.getActiveSelectionList(sel, om.MGlobal.kReplaceList)
-        except TypeError:
-            try:
-                om.MGlobal.getActiveSelectionList(sel)
-            except TypeError:
-                sel = om.MGlobal.getActiveSelectionList()
-
         meshes = []
+        seen_paths = set()
+        selected_items = cmds.ls(sl=True, long=True, objectsOnly=True) or []
 
-
-
-        for i in range(sel.length()):
-
+        for item in selected_items:
             try:
-
-                dag_path = sel.getDagPath(i)
-
-
-
-                if dag_path.hasFn(om.MFn.kTransform):
-
-                    try:
-
-                        dag_path.extendToShape()
-
-                    except Exception:
-
-                        pass
-
-
-
-                if dag_path.hasFn(om.MFn.kMesh):
-
-                    meshes.append(dag_path)
-
+                node_type = cmds.nodeType(item)
             except Exception:
-
                 continue
 
+            candidate_shapes = []
+            if node_type == "mesh":
+                candidate_shapes = [item]
+            elif node_type == "transform":
+                candidate_shapes = cmds.listRelatives(
+                    item,
+                    shapes=True,
+                    noIntermediate=True,
+                    fullPath=True,
+                    type="mesh",
+                ) or []
 
+            for shape in candidate_shapes:
+                if shape in seen_paths:
+                    continue
+                try:
+                    if cmds.getAttr("{}.intermediateObject".format(shape)):
+                        continue
+                except Exception:
+                    pass
+
+                sel_list = om.MSelectionList()
+                try:
+                    sel_list.add(shape)
+                    dag_path = sel_list.getDagPath(0)
+                except Exception:
+                    continue
+
+                if dag_path.hasFn(om.MFn.kMesh):
+                    meshes.append(dag_path)
+                    seen_paths.add(shape)
 
         return meshes
-
-
 
     def safe_normalize(self, vec):
 
@@ -1483,13 +1479,13 @@ class WeightedNormalsTool(QtWidgets.QDialog):
 
                     cmds.select(dag_path.fullPathName(), r=True)
 
-                    cmds.polyNormalPerVertex(unFreezeNormal=True)
+                    cmds.polyNormalPerVertex(freezeNormal=True)
 
                 except Exception as e:
 
                     om.MGlobal.displayWarning(
 
-                        "Impossible de déverrouiller les normales sur {} : {}".format(
+                        "Impossible de verrouiller les normales sur {} : {}".format(
 
                             dag_path.fullPathName(), e
 

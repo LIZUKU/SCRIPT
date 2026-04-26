@@ -101,6 +101,7 @@ _sweep_original_ep_size = None
 
 _always_on_top_enabled = True
 _always_on_top_draw_job = None
+_draw_isolate_sync_job = None
 SWEEP_MODE_ITEMS = ["Precision", "Start to End", "EP to EP", "Distance"]
 SWEEP_PROFILE_ITEMS = ["Poly", "Rectangle", "Line", "Arc", "Wave", "Custom"]
 SWEEP_PROFILE_ATTR_CANDIDATES = ("sweepProfileType", "profileType", "profileShape", "profilePreset")
@@ -390,6 +391,47 @@ def _stop_draw_on_top_job():
         except Exception:
             pass
     _always_on_top_draw_job = None
+
+
+def _sync_selected_curves_to_isolate():
+    try:
+        sel = cmds.ls(sl=True, long=True) or []
+        curves = []
+        for s in sel:
+            crv = get_curve_transform(s)
+            if crv and crv not in curves:
+                curves.append(crv)
+        if curves:
+            add_to_isolate(curves)
+            if _always_on_top_enabled:
+                for crv in curves:
+                    _set_curve_always_on_top(crv)
+    except Exception:
+        pass
+
+
+def _start_draw_isolate_sync_job():
+    global _draw_isolate_sync_job
+    _stop_draw_isolate_sync_job()
+    try:
+        _draw_isolate_sync_job = cmds.scriptJob(
+            event=["SelectionChanged", _sync_selected_curves_to_isolate],
+            protected=True
+        )
+        _sync_selected_curves_to_isolate()
+    except Exception:
+        _draw_isolate_sync_job = None
+
+
+def _stop_draw_isolate_sync_job():
+    global _draw_isolate_sync_job
+    if _draw_isolate_sync_job:
+        try:
+            if cmds.scriptJob(exists=_draw_isolate_sync_job):
+                cmds.scriptJob(kill=_draw_isolate_sync_job, force=True)
+        except Exception:
+            pass
+    _draw_isolate_sync_job = None
 
 
 # ============================================================
@@ -925,18 +967,12 @@ def draw_curve(degree=1, snap_grid=False):
             pass
         cmds.snapMode(grid=bool(snap_grid))
         _start_draw_on_top_job()
+        _start_draw_isolate_sync_job()
 
         def _on_tool_exit():
             _stop_draw_on_top_job()
-            if _always_on_top_enabled:
-                try:
-                    sel = cmds.ls(sl=True, long=True) or []
-                    for s in sel:
-                        crv = get_curve_transform(s)
-                        if crv:
-                            _set_curve_always_on_top(crv)
-                except Exception:
-                    pass
+            _stop_draw_isolate_sync_job()
+            _sync_selected_curves_to_isolate()
 
         cmds.scriptJob(event=["ToolChanged", _on_tool_exit], runOnce=True)
     except Exception as e:
@@ -945,6 +981,7 @@ def draw_curve(degree=1, snap_grid=False):
 
 def stop_draw_tool():
     _stop_draw_on_top_job()
+    _stop_draw_isolate_sync_job()
     try:
         mel.eval("setToolTo selectSuperContext")
     except Exception:

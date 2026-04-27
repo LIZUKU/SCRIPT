@@ -1273,7 +1273,7 @@ def mesh_detect_lamina_faces():
 # VERTEX TOOLS - VERSION API 2.0
 # =============================================================================
 
-def mesh_remove_useless_vertices(angle_tolerance=0.9998, max_passes=20):
+def mesh_remove_useless_vertices(angle_threshold_deg=0.5, max_passes=20):
     """
     Supprime les vertices inutiles (alignés sur une arête droite).
     Version API 2.0 : récupération des positions en batch, sans cmds dans la boucle.
@@ -1285,7 +1285,8 @@ def mesh_remove_useless_vertices(angle_tolerance=0.9998, max_passes=20):
         return
 
     total_supprimes = 0
-    cross_tolerance = 0.00001
+    angle_threshold_deg = max(0.0, float(angle_threshold_deg))
+    cos_threshold = math.cos(math.radians(angle_threshold_deg))
 
     for obj in selection:
         shapes = cmds.listRelatives(obj, shapes=True, type='mesh')
@@ -1331,16 +1332,19 @@ def mesh_remove_useless_vertices(angle_tolerance=0.9998, max_passes=20):
                 pa = all_points[voisins[0]]
                 pc = all_points[voisins[1]]
 
-                vec1 = [pv.x - pa.x, pv.y - pa.y, pv.z - pa.z]
-                vec2 = [pc.x - pv.x, pc.y - pv.y, pc.z - pv.z]
+                vec1 = om2.MVector(pv.x - pa.x, pv.y - pa.y, pv.z - pa.z)
+                vec2 = om2.MVector(pc.x - pv.x, pc.y - pv.y, pc.z - pv.z)
+                len1 = vec1.length()
+                len2 = vec2.length()
+                if len1 <= 1e-12 or len2 <= 1e-12:
+                    it_vert.next()
+                    continue
 
-                cross = [
-                    vec1[1] * vec2[2] - vec1[2] * vec2[1],
-                    vec1[2] * vec2[0] - vec1[0] * vec2[2],
-                    vec1[0] * vec2[1] - vec1[1] * vec2[0]
-                ]
+                dot = (vec1.x * vec2.x + vec1.y * vec2.y + vec1.z * vec2.z) / (len1 * len2)
+                dot = max(-1.0, min(1.0, dot))
 
-                if all(abs(val) < cross_tolerance for val in cross):
+                # Dot proche de -1 => angle proche de 180° => vertex quasi colinéaire.
+                if dot <= -cos_threshold:
                     a_supprimer.append(vid)
 
                 it_vert.next()
@@ -1399,12 +1403,13 @@ def mesh_remove_useless_vertices(angle_tolerance=0.9998, max_passes=20):
                 pos_c = cmds.pointPosition(voisins[1], world=True)
                 vec1 = [pos_v[i] - pos_a[i] for i in range(3)]
                 vec2 = [pos_c[i] - pos_v[i] for i in range(3)]
-                cross = [
-                    vec1[1]*vec2[2] - vec1[2]*vec2[1],
-                    vec1[2]*vec2[0] - vec1[0]*vec2[2],
-                    vec1[0]*vec2[1] - vec1[1]*vec2[0]
-                ]
-                if all(abs(val) < cross_tolerance for val in cross):
+                len1 = math.sqrt(vec1[0] ** 2 + vec1[1] ** 2 + vec1[2] ** 2)
+                len2 = math.sqrt(vec2[0] ** 2 + vec2[1] ** 2 + vec2[2] ** 2)
+                if len1 <= 1e-12 or len2 <= 1e-12:
+                    continue
+                dot = (vec1[0] * vec2[0] + vec1[1] * vec2[1] + vec1[2] * vec2[2]) / (len1 * len2)
+                dot = max(-1.0, min(1.0, dot))
+                if dot <= -cos_threshold:
                     a_supprimer.append(v)
             if a_supprimer:
                 a_supprimer.sort(key=lambda x: int(x.split('[')[-1].rstrip(']')), reverse=True)
@@ -2606,7 +2611,7 @@ class MeshToolkitWidget(QtWidgets.QWidget):
         vert_row.addStretch()
         main_layout.addLayout(vert_row)
 
-        self.merge_slider = MTK_ParamSlider("Threshold", 0, 0.1, merge_threshold_value, 4)
+        self.merge_slider = MTK_ParamSlider("Threshold", 0, 1.0, merge_threshold_value, 4)
         main_layout.addWidget(self.merge_slider)
 
         # ===== TOPOLOGY =====
@@ -2698,7 +2703,9 @@ class MeshToolkitWidget(QtWidgets.QWidget):
         self.stuck_btn.clicked.connect(mesh_detect_stuck_extrusions)
         self.lamina_btn.clicked.connect(mesh_detect_lamina_faces)
 
-        self.remove_verts_btn.clicked.connect(mesh_remove_useless_vertices)
+        self.remove_verts_btn.clicked.connect(
+            lambda: mesh_remove_useless_vertices(angle_threshold_deg=angle_threshold_value)
+        )
         self.merge_verts_btn.clicked.connect(lambda: mesh_merge_vertices(threshold=merge_threshold_value))
         self.merge_slider.valueChanged.connect(self._on_merge_threshold)
 

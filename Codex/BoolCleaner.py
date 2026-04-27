@@ -821,38 +821,65 @@ def deactivateInteractiveTool():
 class BevelSnapWeldCleaner:
 
     def __init__(self):
-        self.is_previewing = False
+        self.ctx = "bevelSnapContext_V22"
+        self.threshold = 0.0
+        self.max_threshold = 9999.0
+        self.initial_threshold = 0.0
+        self.anchor_point = [0.0, 0.0, 0.0]
+        self.initial_selection = []
+        self.original_positions = {}
+        self.script_job = None
+        self.is_validating = False
+        self.fallback_count = 0
         self.is_valid = False
         self.mesh_name = None
         self.snap_map = []
         self.dag_path = None
         self.component = None
-        self.original_positions = {}
 
-        selected_faces = mc.filterExpand(sm=34)
-
-        if not selected_faces:
-            mc.warning("Select bevel faces first.")
+        faces = mc.filterExpand(mc.ls(sl=True, fl=True), sm=34) or []
+        if not faces:
+            self.popup("SELECT BEVEL FACES")
+            mc.warning("Select bevel faces.")
             return
+
+        self.initial_selection = list(faces)
 
         sel = om2.MGlobal.getActiveSelectionList()
-
         if sel.isEmpty():
-            mc.warning("Select bevel faces first.")
+            self.popup("FACE SELECTION ONLY")
+            mc.warning("Please select faces.")
             return
 
-        self.dag_path, self.component = sel.getComponent(0)
-        self.mesh_name = self.dag_path.fullPathName()
+        try:
+            self.dag_path, self.component = sel.getComponent(0)
+            self.mesh_name = self.dag_path.fullPathName()
+        except Exception:
+            self.popup("FACE SELECTION ONLY")
+            mc.warning("Please select faces.")
+            return
 
         self.border_vertices = self.get_selection_border_vertices()
         self.snap_map = self.precompute_snap_map()
 
         if not self.snap_map:
-            mc.warning("No valid bevel snap points found.")
+            self.popup("NO VALID SNAP POINT FOUND")
+            mc.warning("No valid snap points found.")
             return
 
         self.cache_original_positions()
+        self.setup_context()
         self.is_valid = True
+
+    def popup(self, text):
+        mc.inViewMessage(
+            amg="<span style='color:#FF4444;font-size:22px;'><hl>{}</hl></span>".format(text),
+            pos="midCenter",
+            fade=True,
+            fadeStayTime=1400,
+            fadeOutTime=300
+        )
+        mc.refresh(f=True)
 
     def cache_original_positions(self):
         vtx_it = om2.MItMeshVertex(self.dag_path)
@@ -895,22 +922,51 @@ class BevelSnapWeldCleaner:
             }
 
         mapping = []
+        self.fallback_count = 0
+        used_mobile = set()
+        used_target = set()
 
-        for v_id, info in vtx_info.items():
+        sorted_vertices = sorted(
+            vtx_info.keys(),
+            key=lambda vid: vtx_info[vid]["valence"]
+        )
+
+        for v_id in sorted_vertices:
+            info = vtx_info[v_id]
+
             if info["valence"] == 4:
+                continue
+
+            if v_id in used_target or v_id in used_mobile:
                 continue
 
             best_target = None
             min_dist = 999999.0
+            used_fallback = False
 
             for neighbor_id in info["connected_vtx"]:
                 if neighbor_id not in self.border_vertices:
+                    continue
+                if neighbor_id in used_mobile:
                     continue
                 if vtx_info[neighbor_id]["valence"] == 4:
                     dist = info["pos"].distanceTo(vtx_info[neighbor_id]["pos"])
                     if dist < min_dist:
                         min_dist = dist
                         best_target = neighbor_id
+                        used_fallback = False
+
+            if best_target is None:
+                for neighbor_id in info["connected_vtx"]:
+                    if neighbor_id not in self.border_vertices:
+                        continue
+                    if neighbor_id in used_mobile or neighbor_id in used_target:
+                        continue
+                    dist = info["pos"].distanceTo(vtx_info[neighbor_id]["pos"])
+                    if dist < min_dist:
+                        min_dist = dist
+                        best_target = neighbor_id
+                        used_fallback = True
 
             if best_target is not None:
                 mapping.append({
@@ -919,6 +975,10 @@ class BevelSnapWeldCleaner:
                     "target_pos": vtx_info[best_target]["pos"],
                     "dist": min_dist
                 })
+                used_mobile.add(v_id)
+                used_target.add(best_target)
+                if used_fallback:
+                    self.fallback_count += 1
 
         return mapping
 
@@ -926,22 +986,18 @@ class BevelSnapWeldCleaner:
         if not self.is_valid:
             return
 
-        threshold = getThresholdValue()
-
         self.reset_preview_positions()
 
-        if threshold <= 0.0001:
-            self.is_previewing = False
+        if self.threshold <= 0.0001:
             mc.refresh(f=True)
             return
 
         for item in self.snap_map:
-            if item["dist"] <= threshold:
+            if item["dist"] <= self.threshold:
                 v_name = "{}.vtx[{}]".format(self.mesh_name, item["mobile_id"])
                 p = item["target_pos"]
                 mc.xform(v_name, ws=True, t=(p.x, p.y, p.z))
 
-        self.is_previewing = True
         mc.refresh(f=True)
 
     def reset_preview_positions(self):
@@ -952,36 +1008,133 @@ class BevelSnapWeldCleaner:
             v_name = "{}.vtx[{}]".format(self.mesh_name, v_id)
             mc.xform(v_name, ws=True, t=(p.x, p.y, p.z))
 
+    def setup_context(self):
+        if mc.draggerContext(self.ctx, exists=True):
+            mc.deleteUI(self.ctx)
+
+        mc.draggerContext(
+            self.ctx,
+            pressCommand=self.on_press,
+            dragCommand=self.on_drag,
+            releaseCommand=self.on_release,
+            cursor="crossHair",
+            undoMode="off"
+        )
+
+        mc.setToolTo(self.ctx)
+        mc.select(clear=True)
+
+        self.script_job = mc.scriptJob(
+            event=["ToolChanged", self.on_tool_changed],
+            protected=True
+        )
+
+        msg = "<hl>Drag left/right</hl> | Shift fast | Ctrl precise | Q/Esc to validate"
+        if self.fallback_count:
+            msg += " | Fallback: {}".format(self.fallback_count)
+
+        mc.inViewMessage(
+            amg=msg,
+            pos="topCenter",
+            fade=True,
+            fadeStayTime=1800,
+            fadeOutTime=300
+        )
+        mc.refresh(f=True)
+
+    def on_press(self):
+        self.anchor_point = mc.draggerContext(self.ctx, q=True, anchorPoint=True)
+        self.initial_threshold = self.threshold
+
+    def on_drag(self):
+        drag_point = mc.draggerContext(self.ctx, q=True, dragPoint=True)
+        dx = drag_point[0] - self.anchor_point[0]
+
+        speed = 0.002
+        mods = mc.getModifiers()
+        if mods & 1:
+            speed *= 10.0
+        if mods & 4:
+            speed *= 0.1
+
+        self.threshold = min(
+            self.max_threshold,
+            max(0.0, self.initial_threshold + dx * speed)
+        )
+        self.apply_preview()
+
+        mc.inViewMessage(
+            amg="Threshold : <hl>{:.4f}</hl>".format(self.threshold),
+            pos="topCenter",
+            fade=True,
+            fadeStayTime=250,
+            fadeOutTime=100
+        )
+        mc.select(clear=True)
+        mc.refresh(f=True)
+
+    def on_release(self):
+        pass
+
+    def on_tool_changed(self):
+        if self.is_validating:
+            return
+        if mc.currentCtx() != self.ctx:
+            self.validate()
+
     def cancel(self):
         self.reset_preview_positions()
-        self.is_previewing = False
+        self.cleanup()
         self.is_valid = False
 
     def validate(self):
-        if not self.is_valid:
+        if not self.is_valid or self.is_validating:
             mc.warning("No active Bevel Snap Weld.")
             return
 
-        threshold = getThresholdValue()
+        self.is_validating = True
         verts_to_merge = []
-
         self.reset_preview_positions()
-        self.is_previewing = False
 
         for item in self.snap_map:
-            if item["dist"] <= threshold:
+            if item["dist"] <= self.threshold:
                 verts_to_merge.append("{}.vtx[{}]".format(self.mesh_name, item["mobile_id"]))
                 verts_to_merge.append("{}.vtx[{}]".format(self.mesh_name, item["target_id"]))
 
         if verts_to_merge:
             verts_to_merge = list(dict.fromkeys(verts_to_merge))
             mc.undoInfo(openChunk=True)
-            mc.polyMergeVertex(verts_to_merge, d=0.01, am=False, ch=False)
-            mc.polySoftEdge(self.mesh_name, angle=30, ch=False)
-            mc.undoInfo(closeChunk=True)
-            mc.select(self.mesh_name)
+            try:
+                for item in self.snap_map:
+                    if item["dist"] <= self.threshold:
+                        v_name = "{}.vtx[{}]".format(self.mesh_name, item["mobile_id"])
+                        p = item["target_pos"]
+                        mc.xform(v_name, ws=True, t=(p.x, p.y, p.z))
 
+                mc.polyMergeVertex(verts_to_merge, d=0.01, am=False, ch=False)
+                mc.polySoftEdge(self.mesh_name, angle=30, ch=False)
+                mc.inViewMessage(amg="<hl>BEVEL SNAP VALIDATED</hl>", pos='midCenter', fade=True, fst=900)
+            finally:
+                mc.undoInfo(closeChunk=True)
+        else:
+            mc.inViewMessage(amg="<hl>NOTHING TO MERGE</hl>", pos='midCenter', fade=True, fst=900)
+
+        mc.refresh(f=True)
+        self.cleanup()
         self.is_valid = False
+
+    def cleanup(self):
+        if self.script_job and mc.scriptJob(exists=self.script_job):
+            mc.scriptJob(kill=self.script_job, force=True)
+            self.script_job = None
+
+        if mc.draggerContext(self.ctx, exists=True):
+            mc.deleteUI(self.ctx)
+
+        try:
+            mc.select(self.initial_selection, r=True)
+        except Exception:
+            mc.select(clear=True)
 
 
 def bevelPreview():
@@ -991,8 +1144,7 @@ def bevelPreview():
     bevelCleanerInstance = BevelSnapWeldCleaner()
 
     if bevelCleanerInstance and bevelCleanerInstance.is_valid:
-        bevelCleanerInstance.apply_preview()
-        mc.inViewMessage(amg='<hl>Bevel Preview active</hl>', pos='topCenter', fade=True, fst=1000)
+        mc.inViewMessage(amg='<hl>Bevel Snap active</hl>', pos='topCenter', fade=True, fst=1000)
 
 
 def bevelWeld():
@@ -1045,7 +1197,7 @@ def boolPrecisionSliderUpdate():
         value=0,
         sliderStep=value / 10000.0,
         fieldStep=value / 1000.0,
-        maxValue=value
+        maxValue=9999.0
     )
 
     unifiedThresholdChanged()
@@ -1171,7 +1323,7 @@ def boolCleanerPro():
         sliderStep=0.00001,
         fieldStep=0.0001,
         minValue=0,
-        maxValue=0.1,
+        maxValue=9999.0,
         label="",
         field=True,
         h=25,

@@ -1,0 +1,2930 @@
+# -*- coding: utf-8 -*-
+"""
+SmartCleaner - Mesh Toolkit pour Maya
+Version OpenMaya 2.0 - Optimisée pour gros meshes
+Remplacement complet de toutes les fonctions lentes (cmds.polyInfo, polyListComponentConversion, etc.)
+par des équivalents API 2.0 ultra-rapides.
+"""
+
+import math
+import re
+from collections import defaultdict
+import maya.cmds as cmds
+import maya.mel as mel
+import maya.api.OpenMaya as om2  # Import obligatoire - plus optionnel
+
+# ------------------------------------------------------------
+# PySide2/6
+# ------------------------------------------------------------
+try:
+    from PySide2 import QtWidgets, QtCore, QtGui
+    from shiboken2 import wrapInstance
+    PYSIDE_VER = 2
+except Exception:
+    from PySide6 import QtWidgets, QtCore, QtGui
+    from shiboken6 import wrapInstance
+    PYSIDE_VER = 6
+
+import maya.OpenMayaUI as omui
+
+
+# =============================================================================
+# SHARED - Maya main window
+# =============================================================================
+def get_maya_main_window():
+    """Get Maya main window as Qt object."""
+    try:
+        ptr = omui.MQtUtil.mainWindow()
+        if ptr:
+            return wrapInstance(int(ptr), QtWidgets.QWidget)
+    except Exception:
+        pass
+    return None
+
+
+# =============================================================================
+# =============================================================================
+#                    COUCHE API 2.0 - FONCTIONS CORE RAPIDES
+# =============================================================================
+# =============================================================================
+
+def _get_dag_and_mfn(mesh_name):
+    """
+    Retourne (MDagPath, MFnMesh) à partir d'un nom de transform ou shape.
+    Point d'entrée central pour toutes les opérations API.
+    """
+    sel = om2.MSelectionList()
+    sel.add(mesh_name)
+    dag = sel.getDagPath(0)
+    # Si c'est un transform, on descend au shape
+    if dag.apiType() != om2.MFn.kMesh:
+        dag.extendToShape()
+    return dag, om2.MFnMesh(dag)
+
+
+def _get_face_normal_api(mfn_mesh, face_id):
+    """
+    Récupère la normale d'une face via API (50x plus rapide que polyInfo+parsing).
+    Retourne un MVector normalisé en world space.
+    """
+    return mfn_mesh.getPolygonNormal(face_id, om2.MSpace.kWorld)
+
+
+def _get_edge_face_angle_api(dag_path, mfn_mesh, edge_id):
+    """
+    Calcule l'angle dièdre d'une edge via itérateur API.
+    Remplace get_edge_face_angle() qui faisait du parsing de texte.
+    """
+    it = om2.MItMeshEdge(dag_path)
+    util = om2.MScriptUtil()
+    prev = util.asIntPtr()
+    it.setIndex(edge_id, prev)
+
+    face_ids = it.getConnectedFaces()
+    if len(face_ids) != 2:
+        return 180.0
+
+    n1 = mfn_mesh.getPolygonNormal(face_ids[0], om2.MSpace.kWorld)
+    n2 = mfn_mesh.getPolygonNormal(face_ids[1], om2.MSpace.kWorld)
+    return math.degrees(n1.angle(n2))
+
+
+def _get_polygon_vertex_count_api(mfn_mesh, face_id):
+    """Nombre de vertices d'une face via API (instantané)."""
+    return mfn_mesh.polygonVertexCount(face_id)
+
+
+def _get_vertex_position_api(mfn_mesh, vert_id):
+    """Position d'un vertex via API (pas de round-trip Python/MEL)."""
+    pt = mfn_mesh.getPoint(vert_id, om2.MSpace.kWorld)
+    return (pt.x, pt.y, pt.z)
+
+
+def _get_edge_connected_faces_api(dag_path, edge_id):
+    """Retourne les indices de faces connectées à une edge via API."""
+    it = om2.MItMeshEdge(dag_path)
+    util = om2.MScriptUtil()
+    prev = util.asIntPtr()
+    it.setIndex(edge_id, prev)
+    return it.getConnectedFaces()
+
+
+def _get_edge_vertex_indices_api(dag_path, edge_id):
+    """Retourne les 2 indices de vertex d'une edge via API."""
+    it = om2.MItMeshEdge(dag_path)
+    util = om2.MScriptUtil()
+    prev = util.asIntPtr()
+    it.setIndex(edge_id, prev)
+    return it.vertexId(0), it.vertexId(1)
+
+
+def _is_border_edge_api(dag_path, edge_id):
+    """Vérifie si une edge est sur le bord via API."""
+    it = om2.MItMeshEdge(dag_path)
+    util = om2.MScriptUtil()
+    prev = util.asIntPtr()
+    it.setIndex(edge_id, prev)
+    return it.onBoundary()
+
+
+def _collect_removable_edges_api(mesh_name, angle_threshold, allow_ngons,
+                                  candidate_indices=None):
+    """
+    Passe unique de détection des edges supprimables via API.
+    C'est le coeur optimisé : une seule passe sans aucun appel cmds dans la boucle.
+
+    Args:
+        mesh_name: nom du transform/mesh
+        angle_threshold: angle max en degrés
+        allow_ngons: bool
+        candidate_indices: liste d'indices d'edges, ou None (= toutes)
+
+    Returns:
+        list[int] : indices des edges supprimables
+    """
+    try:
+        dag_path, mfn_mesh = _get_dag_and_mfn(mesh_name)
+    except Exception:
+        return []
+
+    threshold_rad = math.radians(angle_threshold)
+    max_merged = 8 if allow_ngons else 4
+
+    removable = []
+
+    if candidate_indices is not None:
+        # On itère uniquement les indices demandés
+        it = om2.MItMeshEdge(dag_path)
+        util = om2.MScriptUtil()
+        prev = util.asIntPtr()
+        for idx in candidate_indices:
+            it.setIndex(idx, prev)
+            if it.onBoundary():
+                continue
+            face_ids = it.getConnectedFaces()
+            if len(face_ids) != 2:
+                continue
+            n1 = mfn_mesh.getPolygonNormal(face_ids[0], om2.MSpace.kWorld)
+            n2 = mfn_mesh.getPolygonNormal(face_ids[1], om2.MSpace.kWorld)
+            if n1.angle(n2) > threshold_rad:
+                continue
+            v1 = mfn_mesh.polygonVertexCount(face_ids[0])
+            v2 = mfn_mesh.polygonVertexCount(face_ids[1])
+            if (v1 + v2 - 2) > max_merged:
+                continue
+            removable.append(idx)
+    else:
+        # Itérateur complet - le plus rapide pour tout le mesh
+        it = om2.MItMeshEdge(dag_path)
+        while not it.isDone():
+            if not it.onBoundary():
+                face_ids = it.getConnectedFaces()
+                if len(face_ids) == 2:
+                    n1 = mfn_mesh.getPolygonNormal(face_ids[0], om2.MSpace.kWorld)
+                    n2 = mfn_mesh.getPolygonNormal(face_ids[1], om2.MSpace.kWorld)
+                    if n1.angle(n2) <= threshold_rad:
+                        v1 = mfn_mesh.polygonVertexCount(face_ids[0])
+                        v2 = mfn_mesh.polygonVertexCount(face_ids[1])
+                        if (v1 + v2 - 2) <= max_merged:
+                            removable.append(it.index())
+            it.next()
+
+    return removable
+
+
+def _face_edge_indices_api(dag_path, face_id):
+    """Retourne les indices d'edges d'une face via API."""
+    it = om2.MItMeshPolygon(dag_path)
+    util = om2.MScriptUtil()
+    prev = util.asIntPtr()
+    it.setIndex(face_id, prev)
+    return list(it.getEdges())
+
+
+def _face_vertex_indices_api(dag_path, face_id):
+    """Retourne les indices de vertex d'une face via API."""
+    it = om2.MItMeshPolygon(dag_path)
+    util = om2.MScriptUtil()
+    prev = util.asIntPtr()
+    it.setIndex(face_id, prev)
+    return list(it.getVertices())
+
+
+def _vert_connected_edges_api(dag_path, vert_id):
+    """Retourne les indices d'edges connectées à un vertex via API."""
+    it = om2.MItMeshVertex(dag_path)
+    util = om2.MScriptUtil()
+    prev = util.asIntPtr()
+    it.setIndex(vert_id, prev)
+    return list(it.getConnectedEdges())
+
+
+def _vert_connected_faces_api(dag_path, vert_id):
+    """Retourne les indices de faces connectées à un vertex via API."""
+    it = om2.MItMeshVertex(dag_path)
+    util = om2.MScriptUtil()
+    prev = util.asIntPtr()
+    it.setIndex(vert_id, prev)
+    return list(it.getConnectedFaces())
+
+
+# =============================================================================
+# =============================================================================
+#                               TAB 1 - MESH TOOLKIT
+# =============================================================================
+# =============================================================================
+
+# =============================================================================
+# POPUP NOTIFICATION SYSTEM
+# =============================================================================
+def show_inview_message(message, duration=2.0, color="info"):
+    """
+    Affiche une boîte de dialogue popup qui disparaît automatiquement.
+    color: "info" (bleu), "success" (vert), "warning" (orange), "error" (rouge)
+    """
+    icons = {"info": "i", "success": "OK", "warning": "!", "error": "X"}
+    titles = {"info": "Info", "success": "Succes", "warning": "Attention", "error": "Erreur"}
+    icon = icons.get(color, "i")
+    title = titles.get(color, "Info")
+
+    popup_win = "meshToolkitNotif"
+    if cmds.window(popup_win, exists=True):
+        try:
+            cmds.deleteUI(popup_win)
+        except Exception:
+            pass
+
+    bg_colors = {
+        "info": [0.22, 0.35, 0.50],
+        "success": [0.22, 0.45, 0.28],
+        "warning": [0.55, 0.45, 0.20],
+        "error": [0.55, 0.25, 0.25],
+    }
+    bg = bg_colors.get(color, bg_colors["info"])
+
+    cmds.window(popup_win, title=title, widthHeight=(300, 70),
+                sizeable=False, toolbox=True, titleBarMenu=False)
+    cmds.columnLayout(adjustableColumn=True, bgc=bg, rowSpacing=5)
+    cmds.separator(height=15, style="none")
+    cmds.text(label="{}  {}".format(icon, message), align="center", font="boldLabelFont", height=25)
+    cmds.separator(height=15, style="none")
+    cmds.setParent("..")
+    cmds.showWindow(popup_win)
+
+    try:
+        cmds.window(popup_win, e=True, topLeftCorner=[400, 600])
+    except Exception:
+        pass
+
+    QTimer = None
+    try:
+        from PySide2.QtCore import QTimer as _QT
+        QTimer = _QT
+    except Exception:
+        try:
+            from PySide6.QtCore import QTimer as _QT
+            QTimer = _QT
+        except Exception:
+            try:
+                from PyQt5.QtCore import QTimer as _QT
+                QTimer = _QT
+            except Exception:
+                QTimer = None
+
+    if QTimer:
+        def close_popup():
+            if cmds.window(popup_win, exists=True):
+                try:
+                    cmds.deleteUI(popup_win)
+                except Exception:
+                    pass
+
+        timer = QTimer()
+        timer.setSingleShot(True)
+        timer.timeout.connect(close_popup)
+        timer.start(int(duration * 1000))
+
+        if not hasattr(show_inview_message, "_timers"):
+            show_inview_message._timers = []
+        show_inview_message._timers.append(timer)
+        show_inview_message._timers = [t for t in show_inview_message._timers if t.isActive()]
+    else:
+        import threading
+        import time
+
+        def delayed_close():
+            time.sleep(duration)
+            if cmds.window(popup_win, exists=True):
+                cmds.evalDeferred(lambda: cmds.deleteUI(popup_win) if cmds.window(popup_win, exists=True) else None)
+
+        t = threading.Thread(target=delayed_close)
+        t.daemon = True
+        t.start()
+
+
+# =============================================================================
+# BASIC UTILS
+# =============================================================================
+def set_selection_mode(mode):
+    """Change le mode de sélection Maya."""
+    if mode == "edge":
+        cmds.selectMode(component=True)
+        cmds.selectType(edge=True)
+    elif mode == "face":
+        cmds.selectMode(component=True)
+        cmds.selectType(facet=True)
+    elif mode == "vertex":
+        cmds.selectMode(component=True)
+        cmds.selectType(vertex=True)
+    else:
+        cmds.selectMode(object=True)
+
+
+def get_mesh_from_component(component):
+    """Extrait le nom du mesh depuis un composant."""
+    try:
+        return component.split(".")[0]
+    except Exception:
+        return None
+
+
+def get_selected_mesh():
+    """Retourne le mesh sélectionné ou None (premier trouvé)."""
+    sel = cmds.ls(selection=True, flatten=True) or []
+    if not sel:
+        return None
+
+    first = sel[0]
+    if cmds.objectType(first) == "transform":
+        shapes = cmds.listRelatives(first, shapes=True, type="mesh") or []
+        return first if shapes else None
+
+    mesh = get_mesh_from_component(first)
+    if mesh and cmds.objExists(mesh):
+        shapes = cmds.listRelatives(mesh, shapes=True, type="mesh") or []
+        return mesh if shapes else None
+
+    return None
+
+
+def get_all_selected_meshes():
+    """Retourne tous les mesh transforms présents dans la sélection (objets + composants)."""
+    sel = cmds.ls(selection=True, long=True, flatten=True) or []
+    meshes = []
+    for it in sel:
+        m = it.split(".")[0] if "." in it else it
+        if not cmds.objExists(m):
+            continue
+        if cmds.objectType(m) == "transform":
+            shapes = cmds.listRelatives(m, shapes=True, type="mesh") or []
+            if shapes and m not in meshes:
+                meshes.append(m)
+        elif cmds.objectType(m) == "mesh":
+            p = cmds.listRelatives(m, parent=True, fullPath=True) or []
+            if p and p[0] not in meshes:
+                meshes.append(p[0])
+    return meshes
+
+
+def filter_edges(components):
+    return cmds.filterExpand(components, selectionMask=32) or []
+
+
+def filter_faces(components):
+    return cmds.filterExpand(components, selectionMask=34) or []
+
+
+def filter_verts(components):
+    return cmds.filterExpand(components, selectionMask=31) or []
+
+
+# --------------------------------------------------------------------------
+# Fonctions de conversion composants - utilise l'API quand le mesh est dispo
+# --------------------------------------------------------------------------
+
+def edge_to_faces(edge):
+    """
+    Retourne les faces connectées à une edge (format 'mesh.f[N]').
+    Utilise l'API si possible, sinon fallback cmds.
+    """
+    if not cmds.objExists(edge):
+        return []
+    mesh = edge_to_mesh_name(edge)
+    edge_id = _parse_component_index(edge)
+    if mesh and edge_id is not None:
+        try:
+            dag, _ = _get_dag_and_mfn(mesh)
+            face_ids = _get_edge_connected_faces_api(dag, edge_id)
+            return ["{}.f[{}]".format(mesh, fi) for fi in face_ids]
+        except Exception:
+            pass
+    # Fallback
+    faces = cmds.polyListComponentConversion(edge, toFace=True)
+    return cmds.filterExpand(faces, selectionMask=34) or []
+
+
+def edge_to_verts(edge):
+    """
+    Retourne les vertices d'une edge (format 'mesh.vtx[N]').
+    Utilise l'API si possible.
+    """
+    if not cmds.objExists(edge):
+        return []
+    mesh = edge_to_mesh_name(edge)
+    edge_id = _parse_component_index(edge)
+    if mesh and edge_id is not None:
+        try:
+            dag, _ = _get_dag_and_mfn(mesh)
+            v0, v1 = _get_edge_vertex_indices_api(dag, edge_id)
+            return ["{}.vtx[{}]".format(mesh, v0), "{}.vtx[{}]".format(mesh, v1)]
+        except Exception:
+            pass
+    # Fallback
+    verts = cmds.polyListComponentConversion(edge, toVertex=True)
+    return cmds.filterExpand(verts, selectionMask=31) or []
+
+
+def vert_to_edges(vtx):
+    """Retourne les edges connectées à un vertex via API."""
+    if not cmds.objExists(vtx):
+        return []
+    mesh = edge_to_mesh_name(vtx)
+    vert_id = _parse_component_index(vtx)
+    if mesh and vert_id is not None:
+        try:
+            dag, _ = _get_dag_and_mfn(mesh)
+            edge_ids = _vert_connected_edges_api(dag, vert_id)
+            return ["{}.e[{}]".format(mesh, ei) for ei in edge_ids]
+        except Exception:
+            pass
+    # Fallback
+    edges = cmds.polyListComponentConversion(vtx, toEdge=True)
+    return cmds.filterExpand(edges, selectionMask=32) or []
+
+
+def vert_to_faces(vtx):
+    """Retourne les faces connectées à un vertex via API."""
+    if not cmds.objExists(vtx):
+        return []
+    mesh = edge_to_mesh_name(vtx)
+    vert_id = _parse_component_index(vtx)
+    if mesh and vert_id is not None:
+        try:
+            dag, _ = _get_dag_and_mfn(mesh)
+            face_ids = _vert_connected_faces_api(dag, vert_id)
+            return ["{}.f[{}]".format(mesh, fi) for fi in face_ids]
+        except Exception:
+            pass
+    # Fallback
+    faces = cmds.polyListComponentConversion(vtx, toFace=True)
+    return cmds.filterExpand(faces, selectionMask=34) or []
+
+
+def face_to_edges(face):
+    """Retourne les edges d'une face via API."""
+    if not cmds.objExists(face):
+        return []
+    mesh = edge_to_mesh_name(face)
+    face_id = _parse_component_index(face)
+    if mesh and face_id is not None:
+        try:
+            dag, _ = _get_dag_and_mfn(mesh)
+            edge_ids = _face_edge_indices_api(dag, face_id)
+            return ["{}.e[{}]".format(mesh, ei) for ei in edge_ids]
+        except Exception:
+            pass
+    # Fallback
+    edges = cmds.polyListComponentConversion(face, toEdge=True)
+    return cmds.filterExpand(edges, selectionMask=32) or []
+
+
+def face_to_verts(face):
+    """Retourne les vertices d'une face via API."""
+    if not cmds.objExists(face):
+        return []
+    mesh = edge_to_mesh_name(face)
+    face_id = _parse_component_index(face)
+    if mesh and face_id is not None:
+        try:
+            dag, mfn = _get_dag_and_mfn(mesh)
+            vert_ids = _face_vertex_indices_api(dag, face_id)
+            return ["{}.vtx[{}]".format(mesh, vi) for vi in vert_ids]
+        except Exception:
+            pass
+    # Fallback
+    verts = cmds.polyListComponentConversion(face, toVertex=True)
+    return cmds.filterExpand(verts, selectionMask=31) or []
+
+
+def face_vertex_count(face):
+    """
+    Nombre de vertices d'une face via API.
+    Remplace le pattern face_to_verts + len().
+    """
+    mesh = edge_to_mesh_name(face)
+    face_id = _parse_component_index(face)
+    if mesh and face_id is not None:
+        try:
+            _, mfn = _get_dag_and_mfn(mesh)
+            return mfn.polygonVertexCount(face_id)
+        except Exception:
+            pass
+    # Fallback
+    try:
+        if not cmds.objExists(face):
+            return 0
+        return len(face_to_verts(face))
+    except Exception:
+        return 0
+
+
+def get_vertex_position(vtx):
+    """Position d'un vertex via API."""
+    mesh = edge_to_mesh_name(vtx)
+    vert_id = _parse_component_index(vtx)
+    if mesh and vert_id is not None:
+        try:
+            _, mfn = _get_dag_and_mfn(mesh)
+            pt = mfn.getPoint(vert_id, om2.MSpace.kWorld)
+            return (pt.x, pt.y, pt.z)
+        except Exception:
+            pass
+    # Fallback
+    try:
+        if not cmds.objExists(vtx):
+            return None
+        return tuple(cmds.pointPosition(vtx, world=True))
+    except Exception:
+        return None
+
+
+# --------------------------------------------------------------------------
+# Helpers de parsing de noms de composants
+# --------------------------------------------------------------------------
+
+def edge_to_mesh_name(component):
+    """Extrait 'mesh' depuis 'mesh.e[N]', 'mesh.f[N]', 'mesh.vtx[N]'."""
+    try:
+        return component.split(".")[0]
+    except Exception:
+        return None
+
+
+def _parse_component_index(component):
+    """Extrait l'index entier depuis 'mesh.e[42]' -> 42."""
+    m = re.search(r"\[(\d+)\]", component)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+# --------------------------------------------------------------------------
+# Utilitaires vectoriels (inchangés, pas de hotspot perf)
+# --------------------------------------------------------------------------
+
+def normalize(v):
+    length = math.sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2])
+    if length < 1e-12:
+        return (0.0, 0.0, 0.0)
+    return (v[0]/length, v[1]/length, v[2]/length)
+
+
+def subtract(a, b):
+    return (a[0]-b[0], a[1]-b[1], a[2]-b[2])
+
+
+def dot(a, b):
+    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+
+
+def clamp(x, a, b):
+    return max(a, min(b, x))
+
+
+# --------------------------------------------------------------------------
+# Border tests via API
+# --------------------------------------------------------------------------
+
+def is_border_edge(edge):
+    """Test bord via API."""
+    mesh = edge_to_mesh_name(edge)
+    edge_id = _parse_component_index(edge)
+    if mesh and edge_id is not None:
+        try:
+            dag, _ = _get_dag_and_mfn(mesh)
+            return _is_border_edge_api(dag, edge_id)
+        except Exception:
+            pass
+    # Fallback
+    try:
+        if not cmds.objExists(edge):
+            return False
+        return len(edge_to_faces(edge)) == 1
+    except Exception:
+        return False
+
+
+def is_border_vertex(vtx):
+    """Test bord vertex via API."""
+    mesh = edge_to_mesh_name(vtx)
+    vert_id = _parse_component_index(vtx)
+    if mesh and vert_id is not None:
+        try:
+            dag, _ = _get_dag_and_mfn(mesh)
+            edge_ids = _vert_connected_edges_api(dag, vert_id)
+            return any(_is_border_edge_api(dag, ei) for ei in edge_ids)
+        except Exception:
+            pass
+    # Fallback
+    if not cmds.objExists(vtx):
+        return False
+    for e in vert_to_edges(vtx):
+        if is_border_edge(e):
+            return True
+    return False
+
+
+# =============================================================================
+# NORMALS / ANGLES  -  VERSION API 2.0
+# =============================================================================
+
+def get_face_normal(face):
+    """
+    Normale d'une face via API (remplace polyInfo + parsing de texte).
+    """
+    mesh = edge_to_mesh_name(face)
+    face_id = _parse_component_index(face)
+    if mesh and face_id is not None:
+        try:
+            _, mfn = _get_dag_and_mfn(mesh)
+            n = mfn.getPolygonNormal(face_id, om2.MSpace.kWorld)
+            length = math.sqrt(n.x*n.x + n.y*n.y + n.z*n.z)
+            if length > 1e-12:
+                return (n.x/length, n.y/length, n.z/length)
+            return (0.0, 1.0, 0.0)
+        except Exception:
+            pass
+    return (0.0, 1.0, 0.0)
+
+
+def get_edge_face_angle(edge):
+    """
+    Angle dièdre d'une edge via API 2.0.
+    Remplace l'ancienne version avec polyInfo + parsing texte (50x plus rapide).
+    """
+    mesh = edge_to_mesh_name(edge)
+    edge_id = _parse_component_index(edge)
+    if mesh and edge_id is not None:
+        try:
+            dag, mfn = _get_dag_and_mfn(mesh)
+            return _get_edge_face_angle_api(dag, mfn, edge_id)
+        except Exception:
+            pass
+    # Fallback legacy
+    faces = edge_to_faces(edge)
+    if len(faces) != 2:
+        return 180.0
+    n1 = get_face_normal(faces[0])
+    n2 = get_face_normal(faces[1])
+    d = abs(dot(n1, n2))
+    d = clamp(d, 0.0, 1.0)
+    return math.degrees(math.acos(d))
+
+
+def get_edge_direction(edge):
+    """Direction d'une edge via API."""
+    mesh = edge_to_mesh_name(edge)
+    edge_id = _parse_component_index(edge)
+    if mesh and edge_id is not None:
+        try:
+            dag, mfn = _get_dag_and_mfn(mesh)
+            v0, v1 = _get_edge_vertex_indices_api(dag, edge_id)
+            p1 = mfn.getPoint(v0, om2.MSpace.kWorld)
+            p2 = mfn.getPoint(v1, om2.MSpace.kWorld)
+            dx, dy, dz = p2.x - p1.x, p2.y - p1.y, p2.z - p1.z
+            return normalize((dx, dy, dz))
+        except Exception:
+            pass
+    # Fallback
+    vs = edge_to_verts(edge)
+    if len(vs) != 2:
+        return None
+    p1 = get_vertex_position(vs[0])
+    p2 = get_vertex_position(vs[1])
+    if not p1 or not p2:
+        return None
+    return normalize(subtract(p2, p1))
+
+
+def angle_between_edges(edge1, edge2):
+    d1 = get_edge_direction(edge1)
+    d2 = get_edge_direction(edge2)
+    if not d1 or not d2:
+        return 90.0
+    d = abs(dot(d1, d2))
+    d = clamp(d, 0.0, 1.0)
+    return math.degrees(math.acos(d))
+
+
+# =============================================================================
+# SCOPE UTILS (faces sélectionnées OU meshes)
+# =============================================================================
+def get_work_scope():
+    """
+    Scope-safe:
+      - Si faces sélectionnées -> travaille seulement sur ces faces (multi-mesh)
+      - Sinon -> travaille sur mesh(s) sélectionnés entier(s)
+
+    Returns:
+      work_on_selection (bool)
+      meshes (list[str])
+      faces_by_mesh (dict[str, list[str]])
+      sel_faces (list[str])
+    """
+    sel = cmds.ls(sl=True, fl=True) or []
+    sel_faces = filter_faces(sel)
+
+    faces_by_mesh = defaultdict(list)
+    if sel_faces:
+        for f in sel_faces:
+            m = get_mesh_from_component(f)
+            if m and cmds.objExists(m):
+                faces_by_mesh[m].append(f)
+        meshes = list(faces_by_mesh.keys())
+        return True, meshes, faces_by_mesh, sel_faces
+
+    meshes = get_all_selected_meshes()
+    return False, meshes, faces_by_mesh, sel_faces
+
+
+def _faces_in_scope(mesh, work_on_selection, faces_by_mesh):
+    if work_on_selection:
+        return [f for f in faces_by_mesh.get(mesh, []) if cmds.objExists(f)]
+    fc = cmds.polyEvaluate(mesh, face=True) or 0
+    return ["{}.f[{}]".format(mesh, i) for i in range(int(fc))]
+
+
+# =============================================================================
+# CONNECTIVITY / CHAINS
+# =============================================================================
+def connected_edge_components(edges):
+    edges = list(edges)
+    edge_set = set(edges)
+    comps = []
+    visited = set()
+
+    def bfs(start):
+        q = [start]
+        comp = set()
+        while q:
+            cur = q.pop()
+            if cur in comp:
+                continue
+            comp.add(cur)
+            for v in edge_to_verts(cur):
+                for ne in vert_to_edges(v):
+                    if ne in edge_set and ne not in comp:
+                        q.append(ne)
+        return comp
+
+    for e in edges:
+        if e in visited:
+            continue
+        comp = bfs(e)
+        visited |= comp
+        comps.append(list(comp))
+    return comps
+
+
+def boundary_edges_from_faces(faces):
+    face_set = set(faces)
+    all_edges = set()
+    for f in faces:
+        all_edges.update(face_to_edges(f))
+
+    boundary = []
+    for e in all_edges:
+        ef = edge_to_faces(e)
+        in_sel = sum(1 for f in ef if f in face_set)
+        if in_sel == 1:
+            boundary.append(e)
+    return boundary
+
+
+def build_boundary_adjacency(boundary_edges):
+    edge_set = set(boundary_edges)
+    adj = defaultdict(list)
+    for e in boundary_edges:
+        for v in edge_to_verts(e):
+            for ne in vert_to_edges(v):
+                if ne in edge_set and ne != e:
+                    if ne not in adj[e]:
+                        adj[e].append(ne)
+    return adj
+
+
+def split_boundary_by_angle(boundary_edges, angle_threshold=45.0):
+    if not boundary_edges:
+        return []
+
+    adj = build_boundary_adjacency(boundary_edges)
+    visited = set()
+    chains = []
+
+    def walk_chain(start_edge):
+        chain = [start_edge]
+        visited.add(start_edge)
+
+        for direction in [0, 1]:
+            cur = start_edge
+            while True:
+                neighbors = [n for n in adj[cur] if n not in visited]
+                if not neighbors:
+                    break
+                valid = [n for n in neighbors if angle_between_edges(cur, n) < angle_threshold]
+                if not valid:
+                    break
+                nxt = min(valid, key=lambda n: angle_between_edges(cur, n))
+                visited.add(nxt)
+                if direction == 0:
+                    chain.append(nxt)
+                else:
+                    chain.insert(0, nxt)
+                cur = nxt
+        return chain
+
+    for e in boundary_edges:
+        if e not in visited:
+            ch = walk_chain(e)
+            if ch:
+                chains.append(ch)
+
+    return chains
+
+
+def ordered_chain_vertices(chain_edges):
+    if not chain_edges:
+        return []
+
+    v_adj = defaultdict(list)
+    for e in chain_edges:
+        vs = edge_to_verts(e)
+        if len(vs) != 2:
+            continue
+        a, b = vs
+        v_adj[a].append(b)
+        v_adj[b].append(a)
+
+    if not v_adj:
+        return []
+
+    endpoints = [v for v, nbs in v_adj.items() if len(nbs) == 1]
+    start = endpoints[0] if endpoints else next(iter(v_adj.keys()))
+
+    ordered = [start]
+    prev = None
+    cur = start
+    while True:
+        nbs = v_adj.get(cur, [])
+        nxt = None
+        for nb in nbs:
+            if nb != prev:
+                nxt = nb
+                break
+        if not nxt:
+            break
+        ordered.append(nxt)
+        prev, cur = cur, nxt
+        if len(ordered) > len(v_adj) + 2:
+            break
+
+    return ordered
+
+
+def best_align_vertex_lists(vlist_a, vlist_b):
+    if not vlist_a or not vlist_b:
+        return vlist_a, vlist_b
+
+    n = min(len(vlist_a), len(vlist_b))
+    a = vlist_a[:n]
+    b0 = vlist_b[:n]
+    b1 = list(reversed(vlist_b))[:n]
+
+    def total_dist(va, vb):
+        s = 0.0
+        for x, y in zip(va, vb):
+            px = get_vertex_position(x)
+            py = get_vertex_position(y)
+            if not px or not py:
+                continue
+            dx = px[0]-py[0]
+            dy = px[1]-py[1]
+            dz = px[2]-py[2]
+            s += dx*dx + dy*dy + dz*dz
+        return s
+
+    return (a, b1) if total_dist(a, b1) < total_dist(a, b0) else (a, b0)
+
+
+# =============================================================================
+# CLEAN TOOLS - VERSION API 2.0 COMPLÈTE
+# =============================================================================
+
+def _collect_edges_in_faces_region_api(mesh, face_strings):
+    """
+    Collecte les indices d'edges dans une région de faces via API.
+    Remplace la version qui faisait face_to_edges() + filterExpand() en boucle.
+    """
+    try:
+        dag, _ = _get_dag_and_mfn(mesh)
+        edge_set = set()
+        for f in face_strings:
+            face_id = _parse_component_index(f)
+            if face_id is not None:
+                edge_ids = _face_edge_indices_api(dag, face_id)
+                edge_set.update(edge_ids)
+        return list(edge_set)
+    except Exception:
+        # Fallback
+        edges = set()
+        for f in face_strings:
+            if cmds.objExists(f):
+                edges.update(face_to_edges(f))
+        return [_parse_component_index(e) for e in edges if _parse_component_index(e) is not None]
+
+
+def select_removable_edges(angle_threshold=5.0, allow_ngons=False, only_selected_faces=False):
+    """
+    Sélectionne les edges supprimables (coplanaires).
+    Version API 2.0 : une seule passe sans appels cmds dans la boucle.
+    """
+    mesh = get_selected_mesh()
+    if not mesh:
+        cmds.warning("Sélectionne un mesh!")
+        show_inview_message("Aucun mesh selectionne!", 2.0, "error")
+        return
+
+    sel = cmds.ls(selection=True, flatten=True) or []
+    sel_faces = filter_faces(sel)
+
+    try:
+        dag, _ = _get_dag_and_mfn(mesh)
+    except Exception:
+        cmds.warning("Impossible d'accéder au mesh via API.")
+        return
+
+    # Déterminer les indices candidates
+    candidate_indices = None
+    if only_selected_faces and sel_faces:
+        candidate_indices = _collect_edges_in_faces_region_api(mesh, sel_faces)
+
+    # Passe API unique - le gros gain de perf
+    removable_indices = _collect_removable_edges_api(
+        mesh, angle_threshold, allow_ngons, candidate_indices
+    )
+
+    if removable_indices:
+        edges_str = ["{}.e[{}]".format(mesh, i) for i in removable_indices]
+        set_selection_mode("edge")
+        cmds.select(edges_str, r=True)
+        mode_txt = "allow ngons" if allow_ngons else "quads only"
+        show_inview_message("{} edges ({}, {}°)".format(len(removable_indices), mode_txt, angle_threshold), 2.0, "info")
+    else:
+        cmds.select(mesh, r=True)
+        show_inview_message("Aucune edge supprimable", 2.0, "success")
+
+
+def auto_clean(angle_threshold=5.0, allow_ngons=False, max_passes=50, only_selected_faces=False):
+    """
+    Supprime automatiquement les edges coplanaires.
+    Version API 2.0 : détection en une passe API, suppression batch via cmds.
+    Compromis optimal performance/undo.
+    """
+    mesh = get_selected_mesh()
+    if not mesh:
+        cmds.warning("Sélectionne un mesh!")
+        show_inview_message("Aucun mesh selectionne!", 2.0, "error")
+        return
+
+    sel = cmds.ls(selection=True, flatten=True) or []
+    sel_faces = filter_faces(sel)
+
+    cmds.undoInfo(openChunk=True, chunkName="AutoClean")
+    try:
+        total = 0
+
+        for _pass in range(max_passes):
+            if not cmds.objExists(mesh):
+                break
+
+            # Déterminer les indices candidates
+            candidate_indices = None
+            if only_selected_faces and sel_faces:
+                candidate_indices = _collect_edges_in_faces_region_api(mesh, sel_faces)
+
+            # Passe API : zéro cmds dans la boucle
+            removable_indices = _collect_removable_edges_api(
+                mesh, angle_threshold, allow_ngons, candidate_indices
+            )
+
+            if not removable_indices:
+                break
+
+            # Suppression batch via cmds (nécessaire pour l'undo)
+            edges_str = ["{}.e[{}]".format(mesh, i) for i in removable_indices]
+            try:
+                cmds.polyDelEdge(edges_str, cleanVertices=True, constructionHistory=False)
+                total += len(removable_indices)
+            except Exception:
+                cnt = 0
+                for e in edges_str:
+                    if not cmds.objExists(e):
+                        continue
+                    try:
+                        cmds.polyDelEdge(e, cleanVertices=True, constructionHistory=False)
+                        cnt += 1
+                    except Exception:
+                        pass
+                if cnt == 0:
+                    break
+                total += cnt
+
+        if cmds.objExists(mesh):
+            cmds.select(mesh, r=True)
+
+        mode_txt = "allow ngons" if allow_ngons else "quads only"
+        show_inview_message("{} edges ({})".format(total, mode_txt), 2.0, "success" if total > 0 else "info")
+
+    except Exception as e:
+        cmds.warning("AutoClean erreur: {}".format(e))
+        show_inview_message("Erreur AutoClean!", 2.0, "error")
+        import traceback
+        traceback.print_exc()
+    finally:
+        cmds.undoInfo(closeChunk=True)
+
+
+# =============================================================================
+# DETECT TOOLS (multi-mesh) - VERSION API 2.0
+# =============================================================================
+
+def mesh_detect_ngons():
+    """Détecte les N-gons via API (itérateur de polygones)."""
+    meshes = get_all_selected_meshes()
+    if not meshes:
+        cmds.warning("Sélectionne un mesh!")
+        show_inview_message("Aucun mesh sélectionné!", 2.0, "error")
+        return
+
+    ngons = []
+    for mesh in meshes:
+        try:
+            dag, mfn = _get_dag_and_mfn(mesh)
+            it = om2.MItMeshPolygon(dag)
+            while not it.isDone():
+                if it.polygonVertexCount() > 4:
+                    ngons.append("{}.f[{}]".format(mesh, it.index()))
+                it.next()
+        except Exception:
+            # Fallback
+            face_count = cmds.polyEvaluate(mesh, face=True)
+            for i in range(face_count):
+                f = "{}.f[{}]".format(mesh, i)
+                if face_vertex_count(f) > 4:
+                    ngons.append(f)
+
+    if ngons:
+        set_selection_mode("face")
+        cmds.select(ngons, r=True)
+        show_inview_message("{} N-gons détectés".format(len(ngons)), 2.0, "warning")
+    else:
+        cmds.select(meshes, r=True)
+        show_inview_message("Aucun N-gon", 2.0, "success")
+
+
+def mesh_detect_triangles():
+    """Détecte les triangles via API (itérateur de polygones)."""
+    meshes = get_all_selected_meshes()
+    if not meshes:
+        cmds.warning("Sélectionne un mesh!")
+        show_inview_message("Aucun mesh sélectionné!", 2.0, "error")
+        return
+
+    tris = []
+    for mesh in meshes:
+        try:
+            dag, mfn = _get_dag_and_mfn(mesh)
+            it = om2.MItMeshPolygon(dag)
+            while not it.isDone():
+                if it.polygonVertexCount() == 3:
+                    tris.append("{}.f[{}]".format(mesh, it.index()))
+                it.next()
+        except Exception:
+            face_count = cmds.polyEvaluate(mesh, face=True)
+            for i in range(face_count):
+                f = "{}.f[{}]".format(mesh, i)
+                if face_vertex_count(f) == 3:
+                    tris.append(f)
+
+    if tris:
+        set_selection_mode("face")
+        cmds.select(tris, r=True)
+        show_inview_message("{} triangles détectés".format(len(tris)), 2.0, "warning")
+    else:
+        cmds.select(meshes, r=True)
+        show_inview_message("Aucun triangle", 2.0, "success")
+
+
+def mesh_detect_quads():
+    """Détecte les quads via API (itérateur de polygones)."""
+    meshes = get_all_selected_meshes()
+    if not meshes:
+        cmds.warning("Sélectionne un mesh!")
+        show_inview_message("Aucun mesh sélectionné!", 2.0, "error")
+        return
+
+    quads = []
+    for mesh in meshes:
+        try:
+            dag, mfn = _get_dag_and_mfn(mesh)
+            it = om2.MItMeshPolygon(dag)
+            while not it.isDone():
+                if it.polygonVertexCount() == 4:
+                    quads.append("{}.f[{}]".format(mesh, it.index()))
+                it.next()
+        except Exception:
+            face_count = cmds.polyEvaluate(mesh, face=True)
+            for i in range(face_count):
+                f = "{}.f[{}]".format(mesh, i)
+                if face_vertex_count(f) == 4:
+                    quads.append(f)
+
+    if quads:
+        set_selection_mode("face")
+        cmds.select(quads, r=True)
+        show_inview_message("{} quads détectés".format(len(quads)), 2.0, "info")
+    else:
+        cmds.select(meshes, r=True)
+        show_inview_message("Aucun quad", 2.0, "warning")
+
+
+def mesh_detect_stuck_extrusions():
+    """
+    Détecte les extrusions collées (vertices superposés) via API.
+    Utilise MFnMesh.getPoints() pour récupérer toutes les positions en une fois.
+    """
+    meshes = get_all_selected_meshes()
+    if not meshes:
+        cmds.warning("Sélectionne un mesh!")
+        show_inview_message("Aucun mesh sélectionné!", 2.0, "error")
+        return
+
+    all_faces = []
+    total_overlapping = 0
+
+    for mesh in meshes:
+        try:
+            dag, mfn = _get_dag_and_mfn(mesh)
+            # Récupère TOUTES les positions en une seule requête API
+            all_points = mfn.getPoints(om2.MSpace.kWorld)
+
+            pos_to_verts = defaultdict(list)
+            for i, pt in enumerate(all_points):
+                key = (round(pt.x, 5), round(pt.y, 5), round(pt.z, 5))
+                pos_to_verts[key].append(i)
+
+            overlapping_ids = []
+            for vs in pos_to_verts.values():
+                if len(vs) > 1:
+                    overlapping_ids.extend(vs)
+
+            if overlapping_ids:
+                total_overlapping += len(overlapping_ids)
+                # Récupérer les faces adjacentes via API
+                faces_set = set()
+                for vid in overlapping_ids:
+                    it = om2.MItMeshVertex(dag)
+                    util = om2.MScriptUtil()
+                    prev = util.asIntPtr()
+                    it.setIndex(vid, prev)
+                    for fi in it.getConnectedFaces():
+                        faces_set.add("{}.f[{}]".format(mesh, fi))
+                all_faces.extend(list(faces_set))
+
+        except Exception:
+            # Fallback original
+            vcount = cmds.polyEvaluate(mesh, vertex=True)
+            pos_to_verts = defaultdict(list)
+            for i in range(vcount):
+                vtx = "{}.vtx[{}]".format(mesh, i)
+                pos = get_vertex_position(vtx)
+                if pos:
+                    key = (round(pos[0], 5), round(pos[1], 5), round(pos[2], 5))
+                    pos_to_verts[key].append(vtx)
+            overlapping = []
+            for vs in pos_to_verts.values():
+                if len(vs) > 1:
+                    overlapping.extend(vs)
+            if overlapping:
+                total_overlapping += len(overlapping)
+                faces = set()
+                for v in overlapping:
+                    for f in vert_to_faces(v):
+                        faces.add(f)
+                all_faces.extend(list(faces))
+
+    if all_faces:
+        set_selection_mode("face")
+        cmds.select(all_faces, r=True)
+        show_inview_message("{} vtx superposés, {} faces".format(total_overlapping, len(all_faces)), 2.0, "warning")
+    else:
+        cmds.select(meshes, r=True)
+        show_inview_message("Aucune extrusion collée", 2.0, "success")
+
+
+def mesh_detect_lamina_faces():
+    meshes = get_all_selected_meshes()
+    if not meshes:
+        cmds.warning("Sélectionne un mesh!")
+        show_inview_message("Aucun mesh sélectionné!", 2.0, "error")
+        return
+
+    lamina_faces = []
+    for mesh in meshes:
+        cmds.select(mesh, r=True)
+        try:
+            mel.eval('polyCleanupArgList 4 { "0","2","1","0","0","0","0","0","0","1e-05","0","1e-05","0","1e-05","0","-1","1","0" }')
+        except Exception:
+            pass
+        sel = cmds.ls(selection=True, flatten=True) or []
+        faces = filter_faces(sel)
+        lamina_faces.extend(faces)
+
+    if lamina_faces:
+        set_selection_mode("face")
+        cmds.select(lamina_faces, r=True)
+        show_inview_message("{} faces lamina".format(len(lamina_faces)), 2.0, "warning")
+    else:
+        cmds.select(meshes, r=True)
+        show_inview_message("Aucune face lamina", 2.0, "success")
+
+
+# =============================================================================
+# VERTEX TOOLS - VERSION API 2.0
+# =============================================================================
+
+def mesh_remove_useless_vertices(angle_tolerance=0.9998, max_passes=20):
+    """
+    Supprime les vertices inutiles (alignés sur une arête droite).
+    Version API 2.0 : récupération des positions en batch, sans cmds dans la boucle.
+    """
+    selection = cmds.ls(selection=True, type='transform')
+    if not selection:
+        cmds.warning("Sélectionne un mesh!")
+        show_inview_message("Aucun mesh sélectionné!", 2.0, "error")
+        return
+
+    total_supprimes = 0
+    cross_tolerance = 0.00001
+
+    for obj in selection:
+        shapes = cmds.listRelatives(obj, shapes=True, type='mesh')
+        if not shapes:
+            continue
+
+        try:
+            dag, mfn = _get_dag_and_mfn(obj)
+
+            # Récupère TOUTES les positions en une seule requête
+            all_points = mfn.getPoints(om2.MSpace.kWorld)
+            vcount = mfn.numVertices
+
+            a_supprimer = []
+            it_vert = om2.MItMeshVertex(dag)
+
+            while not it_vert.isDone():
+                vid = it_vert.index()
+                edge_ids = it_vert.getConnectedEdges()
+
+                if len(edge_ids) != 2:
+                    it_vert.next()
+                    continue
+
+                # Récupérer les 2 vertices voisins via itérateur edge
+                voisins = []
+                it_edge = om2.MItMeshEdge(dag)
+                util = om2.MScriptUtil()
+                prev = util.asIntPtr()
+                for eid in edge_ids:
+                    it_edge.setIndex(eid, prev)
+                    v0 = it_edge.vertexId(0)
+                    v1 = it_edge.vertexId(1)
+                    other = v1 if v0 == vid else v0
+                    voisins.append(other)
+
+                if len(voisins) != 2:
+                    it_vert.next()
+                    continue
+
+                # Positions depuis le tableau pré-chargé (pas de requête supplémentaire)
+                pv = all_points[vid]
+                pa = all_points[voisins[0]]
+                pc = all_points[voisins[1]]
+
+                vec1 = [pv.x - pa.x, pv.y - pa.y, pv.z - pa.z]
+                vec2 = [pc.x - pv.x, pc.y - pv.y, pc.z - pv.z]
+
+                cross = [
+                    vec1[1] * vec2[2] - vec1[2] * vec2[1],
+                    vec1[2] * vec2[0] - vec1[0] * vec2[2],
+                    vec1[0] * vec2[1] - vec1[1] * vec2[0]
+                ]
+
+                if all(abs(val) < cross_tolerance for val in cross):
+                    a_supprimer.append(vid)
+
+                it_vert.next()
+
+            if a_supprimer:
+                # Conversion indices -> noms de composants pour cmds
+                vtx_names = ["{}.vtx[{}]".format(obj, vid) for vid in sorted(a_supprimer, reverse=True)]
+                cmds.select(vtx_names, replace=True)
+                try:
+                    cmds.polyDelVertex(constructionHistory=False)
+                    print(len(a_supprimer), "vertex inutiles supprimés sur", obj)
+                    total_supprimes += len(a_supprimer)
+                except Exception:
+                    removed = 0
+                    for vname in vtx_names:
+                        if cmds.objExists(vname):
+                            try:
+                                cmds.select(vname, r=True)
+                                cmds.delete(vname)
+                                removed += 1
+                            except Exception:
+                                pass
+                    print(removed, "vertex inutiles supprimés (fallback) sur", obj)
+                    total_supprimes += removed
+            else:
+                print("Aucun vertex inutile trouvé sur", obj)
+
+        except Exception:
+            # Fallback original (sans API)
+            import traceback
+            traceback.print_exc()
+            shapes_list = cmds.listRelatives(obj, shapes=True, type='mesh')
+            if not shapes_list:
+                continue
+            mesh = shapes_list[0]
+            verts = cmds.ls(mesh + ".vtx[*]", flatten=True)
+            a_supprimer = []
+            for v in verts:
+                edges = cmds.polyListComponentConversion(v, toEdge=True, fromVertex=True)
+                if not edges:
+                    continue
+                edges = cmds.ls(edges, flatten=True)
+                if len(edges) != 2:
+                    continue
+                voisins = []
+                for edge in edges:
+                    edge_verts = cmds.polyListComponentConversion(edge, toVertex=True)
+                    edge_verts = cmds.ls(edge_verts, flatten=True)
+                    autre = [ev for ev in edge_verts if ev != v]
+                    if autre:
+                        voisins.append(autre[0])
+                if len(voisins) != 2:
+                    continue
+                pos_v = cmds.pointPosition(v, world=True)
+                pos_a = cmds.pointPosition(voisins[0], world=True)
+                pos_c = cmds.pointPosition(voisins[1], world=True)
+                vec1 = [pos_v[i] - pos_a[i] for i in range(3)]
+                vec2 = [pos_c[i] - pos_v[i] for i in range(3)]
+                cross = [
+                    vec1[1]*vec2[2] - vec1[2]*vec2[1],
+                    vec1[2]*vec2[0] - vec1[0]*vec2[2],
+                    vec1[0]*vec2[1] - vec1[1]*vec2[0]
+                ]
+                if all(abs(val) < cross_tolerance for val in cross):
+                    a_supprimer.append(v)
+            if a_supprimer:
+                a_supprimer.sort(key=lambda x: int(x.split('[')[-1].rstrip(']')), reverse=True)
+                cmds.select(a_supprimer, replace=True)
+                try:
+                    cmds.polyDelVertex(constructionHistory=False)
+                    total_supprimes += len(a_supprimer)
+                except Exception:
+                    pass
+
+    if total_supprimes > 0:
+        print("FINI :", total_supprimes, "vertex inutiles supprimés au total.")
+        show_inview_message("{} vertices supprimés".format(total_supprimes), 2.0, "success")
+    else:
+        print("Aucun vertex inutile détecté.")
+        show_inview_message("Aucun vertex inutile détecté", 2.0, "info")
+
+
+def mesh_merge_vertices(threshold=0.001):
+    """Fusionne les vertices proches."""
+    meshes = get_all_selected_meshes()
+    if not meshes:
+        cmds.warning("Sélectionne un mesh!")
+        show_inview_message("Aucun mesh sélectionné!", 2.0, "error")
+        return
+    cmds.undoInfo(openChunk=True, chunkName="MergeVertices")
+    try:
+        for mesh in meshes:
+            cmds.select("{}.vtx[*]".format(mesh), r=True)
+            cmds.polyMergeVertex(distance=threshold, am=True, ch=False)
+        cmds.select(meshes, r=True)
+        show_inview_message("Merge verts (dist={})".format(threshold), 2.0, "success")
+    except Exception as e:
+        cmds.warning("MergeVerts erreur: {}".format(e))
+        show_inview_message("Erreur Merge!", 2.0, "error")
+    finally:
+        cmds.undoInfo(closeChunk=True)
+
+
+# =============================================================================
+# GEOMETRY HELPERS (pour triangulate) - VERSION API 2.0
+# =============================================================================
+
+def get_shared_vertices(face1, face2):
+    """Retourne les vertices partagés entre deux faces via API."""
+    mesh1 = edge_to_mesh_name(face1)
+    f1_id = _parse_component_index(face1)
+    f2_id = _parse_component_index(face2)
+    if mesh1 and f1_id is not None and f2_id is not None:
+        try:
+            dag, _ = _get_dag_and_mfn(mesh1)
+            v1 = set(_face_vertex_indices_api(dag, f1_id))
+            v2 = set(_face_vertex_indices_api(dag, f2_id))
+            shared = v1.intersection(v2)
+            return ["{}.vtx[{}]".format(mesh1, vi) for vi in shared]
+        except Exception:
+            pass
+    # Fallback
+    if not cmds.objExists(face1) or not cmds.objExists(face2):
+        return []
+    verts1 = set(face_to_verts(face1))
+    verts2 = set(face_to_verts(face2))
+    return list(verts1.intersection(verts2))
+
+
+def would_form_valid_quad(face1, face2):
+    """
+    Vérifie si deux triangles adjacents formeraient un quad valide via API.
+    """
+    mesh = edge_to_mesh_name(face1)
+    f1_id = _parse_component_index(face1)
+    f2_id = _parse_component_index(face2)
+    if mesh and f1_id is not None and f2_id is not None:
+        try:
+            dag, mfn = _get_dag_and_mfn(mesh)
+            if mfn.polygonVertexCount(f1_id) != 3 or mfn.polygonVertexCount(f2_id) != 3:
+                return False
+            v1 = set(_face_vertex_indices_api(dag, f1_id))
+            v2 = set(_face_vertex_indices_api(dag, f2_id))
+            shared = v1.intersection(v2)
+            all_v = v1.union(v2)
+            return len(shared) == 2 and len(all_v) == 4
+        except Exception:
+            pass
+    # Fallback
+    if not cmds.objExists(face1) or not cmds.objExists(face2):
+        return False
+    if face_vertex_count(face1) != 3 or face_vertex_count(face2) != 3:
+        return False
+    verts1 = set(face_to_verts(face1))
+    verts2 = set(face_to_verts(face2))
+    shared = verts1.intersection(verts2)
+    all_verts = verts1.union(verts2)
+    return len(shared) == 2 and len(all_verts) == 4
+
+
+def get_triangle_aspect_ratio(face):
+    """Calcule le ratio d'aspect d'un triangle via API."""
+    mesh = edge_to_mesh_name(face)
+    face_id = _parse_component_index(face)
+    if mesh and face_id is not None:
+        try:
+            dag, mfn = _get_dag_and_mfn(mesh)
+            if mfn.polygonVertexCount(face_id) != 3:
+                return 0.0
+            vert_ids = _face_vertex_indices_api(dag, face_id)
+            if len(vert_ids) != 3:
+                return 0.0
+            pts = [mfn.getPoint(vi, om2.MSpace.kWorld) for vi in vert_ids]
+            def dist(a, b):
+                return math.sqrt((a.x-b.x)**2 + (a.y-b.y)**2 + (a.z-b.z)**2)
+            edge_lengths = [dist(pts[0], pts[1]), dist(pts[1], pts[2]), dist(pts[2], pts[0])]
+            mx = max(edge_lengths)
+            mn = min(edge_lengths)
+            return mx / mn if mn > 0.0001 else 999.0
+        except Exception:
+            pass
+    return 0.0
+
+
+# =============================================================================
+# TOPOLOGY TOOLS (multi-mesh) - VERSION API 2.0
+# =============================================================================
+
+def _quadify_tri_pairs_in_scope(mesh, scope_faces_set, check_stretch=False, stretch_threshold=3.0):
+    """
+    Détecte et convertit les paires de triangles en quads via API.
+    Passe unique sur tous les edges du mesh.
+    """
+    try:
+        dag, mfn = _get_dag_and_mfn(mesh)
+    except Exception:
+        return 0
+
+    edges_to_remove = []
+    it = om2.MItMeshEdge(dag)
+
+    while not it.isDone():
+        if it.onBoundary():
+            it.next()
+            continue
+
+        face_ids = it.getConnectedFaces()
+        if len(face_ids) != 2:
+            it.next()
+            continue
+
+        f1_str = "{}.f[{}]".format(mesh, face_ids[0])
+        f2_str = "{}.f[{}]".format(mesh, face_ids[1])
+
+        if f1_str not in scope_faces_set or f2_str not in scope_faces_set:
+            it.next()
+            continue
+
+        c1 = mfn.polygonVertexCount(face_ids[0])
+        c2 = mfn.polygonVertexCount(face_ids[1])
+
+        if c1 != 3 or c2 != 3:
+            it.next()
+            continue
+
+        # Vérification quad valide via API
+        v1 = set(_face_vertex_indices_api(dag, face_ids[0]))
+        v2 = set(_face_vertex_indices_api(dag, face_ids[1]))
+        if len(v1.intersection(v2)) != 2 or len(v1.union(v2)) != 4:
+            it.next()
+            continue
+
+        if check_stretch:
+            r1 = get_triangle_aspect_ratio(f1_str)
+            r2 = get_triangle_aspect_ratio(f2_str)
+            if r1 > stretch_threshold or r2 > stretch_threshold:
+                it.next()
+                continue
+
+        edges_to_remove.append(it.index())
+        it.next()
+
+    if edges_to_remove:
+        edges_str = ["{}.e[{}]".format(mesh, i) for i in edges_to_remove]
+        try:
+            cmds.polyDelEdge(edges_str, cleanVertices=True, constructionHistory=False)
+        except Exception as e:
+            cmds.warning("Erreur suppression edges: {}".format(e))
+            return 0
+
+    return len(edges_to_remove)
+
+
+def mesh_smart_quadrangulate():
+    """
+    Convertit TOUS les triangles adjacents en quads (sur mesh entier ou faces sélectionnées).
+    Utilise polyQuad natif de Maya.
+    """
+    work_on_selection, meshes, faces_by_mesh, sel_faces = get_work_scope()
+
+    if not meshes:
+        cmds.warning("Sélectionne un mesh ou des faces!")
+        show_inview_message("Aucun mesh!", 2.0, "error")
+        return
+
+    cmds.undoInfo(openChunk=True, chunkName="SmartQuadrangulate")
+    try:
+        total_quadded = 0
+
+        for mesh in meshes:
+            if not cmds.objExists(mesh):
+                continue
+
+            scope_faces = _faces_in_scope(mesh, work_on_selection, faces_by_mesh)
+            if not scope_faces:
+                continue
+
+            # Détecter les tris via API (itérateur polygone)
+            tris = []
+            try:
+                dag, mfn = _get_dag_and_mfn(mesh)
+                scope_set = set(scope_faces)
+                it = om2.MItMeshPolygon(dag)
+                while not it.isDone():
+                    f_str = "{}.f[{}]".format(mesh, it.index())
+                    if f_str in scope_set and it.polygonVertexCount() == 3:
+                        tris.append(f_str)
+                    it.next()
+            except Exception:
+                tris = [f for f in scope_faces if cmds.objExists(f) and face_vertex_count(f) == 3]
+
+            if tris:
+                try:
+                    cmds.delete(mesh, constructionHistory=True)
+                except Exception:
+                    pass
+                cmds.select(tris, r=True)
+                cmds.polyQuad(angle=30, keepGroupBorder=True, keepHardEdges=True, constructionHistory=False)
+                total_quadded += len(tris)
+
+        if work_on_selection:
+            valid = [f for f in sel_faces if cmds.objExists(f)]
+            if valid:
+                set_selection_mode("face")
+                cmds.select(valid, r=True)
+        else:
+            valid_meshes = [m for m in meshes if cmds.objExists(m)]
+            if valid_meshes:
+                cmds.select(valid_meshes, r=True)
+
+        if total_quadded > 0:
+            show_inview_message("{} tris->quads".format(total_quadded), 2.0, "success")
+        else:
+            show_inview_message("Aucun triangle a quadranguler", 2.0, "info")
+
+    except Exception as e:
+        cmds.warning("SmartQuad erreur: {}".format(e))
+        show_inview_message("Erreur!", 2.0, "error")
+        import traceback
+        traceback.print_exc()
+    finally:
+        cmds.undoInfo(closeChunk=True)
+
+
+def mesh_smart_triangulate(avoid_stretched=False, stretch_threshold=3.0):
+    """
+    Smart triangulate intelligent (scope-safe, multi-mesh):
+      1) QUAD d'abord : utilise polyQuad sur TOUS les triangles
+      2) TRIANGULATE uniquement les NGONS (>4 vertices)
+      3) RE-QUAD : re-utilise polyQuad sur les nouveaux triangles
+
+    Version API 2.0 : détection des faces par type via itérateur (sans boucle cmds).
+    """
+    work_on_selection, meshes, faces_by_mesh, sel_faces = get_work_scope()
+
+    if work_on_selection and not sel_faces:
+        cmds.warning("Sélectionne des faces!")
+        show_inview_message("Aucune face!", 2.0, "error")
+        return
+    if not work_on_selection and not meshes:
+        cmds.warning("Sélectionne un mesh ou des faces!")
+        show_inview_message("Aucun mesh!", 2.0, "error")
+        return
+
+    def get_edge_length_api(mfn, dag, edge_id):
+        """Longueur d'edge via API."""
+        try:
+            it = om2.MItMeshEdge(dag)
+            util = om2.MScriptUtil()
+            prev = util.asIntPtr()
+            it.setIndex(edge_id, prev)
+            v0 = it.vertexId(0)
+            v1 = it.vertexId(1)
+            p1 = mfn.getPoint(v0, om2.MSpace.kWorld)
+            p2 = mfn.getPoint(v1, om2.MSpace.kWorld)
+            return math.sqrt((p1.x-p2.x)**2 + (p1.y-p2.y)**2 + (p1.z-p2.z)**2)
+        except Exception:
+            return 0.0
+
+    def subdivide_long_edges(mesh, faces, threshold):
+        """Subdivise les edges trop longues via API."""
+        if not faces:
+            return 0
+        try:
+            dag, mfn = _get_dag_and_mfn(mesh)
+            # Collecter toutes les edges des faces via API
+            edge_set = set()
+            for f in faces:
+                fid = _parse_component_index(f)
+                if fid is not None:
+                    edge_set.update(_face_edge_indices_api(dag, fid))
+
+            if not edge_set:
+                return 0
+
+            lengths = [get_edge_length_api(mfn, dag, eid) for eid in edge_set]
+            lengths = [l for l in lengths if l > 0]
+            if not lengths:
+                return 0
+
+            avg = sum(lengths) / len(lengths)
+            max_allowed = avg * threshold
+
+            to_subdivide = [eid for eid in edge_set if get_edge_length_api(mfn, dag, eid) > max_allowed]
+            if to_subdivide:
+                edges_str = ["{}.e[{}]".format(mesh, ei) for ei in to_subdivide]
+                cmds.select(edges_str, r=True)
+                cmds.polySubdivideEdge(divisions=1, constructionHistory=False)
+                return len(to_subdivide)
+        except Exception:
+            pass
+        return 0
+
+    def get_faces_by_type_api(mesh, scope_set):
+        """Retourne (tris, ngons) via itérateur polygone API."""
+        tris, ngons = [], []
+        try:
+            dag, mfn = _get_dag_and_mfn(mesh)
+            it = om2.MItMeshPolygon(dag)
+            while not it.isDone():
+                f_str = "{}.f[{}]".format(mesh, it.index())
+                if f_str in scope_set:
+                    vc = it.polygonVertexCount()
+                    if vc == 3:
+                        tris.append(f_str)
+                    elif vc > 4:
+                        ngons.append(f_str)
+                it.next()
+        except Exception:
+            # Fallback
+            for f in scope_set:
+                if cmds.objExists(f):
+                    vc = face_vertex_count(f)
+                    if vc == 3:
+                        tris.append(f)
+                    elif vc > 4:
+                        ngons.append(f)
+        return tris, ngons
+
+    cmds.undoInfo(openChunk=True, chunkName="SmartTriangulate")
+    try:
+        total_quadded_1 = 0
+        total_ngons = 0
+        total_subdivided = 0
+        total_quadded_2 = 0
+
+        for mesh in meshes:
+            if not cmds.objExists(mesh):
+                continue
+
+            scope_faces = _faces_in_scope(mesh, work_on_selection, faces_by_mesh)
+            if not scope_faces:
+                continue
+            scope_set = set(scope_faces)
+
+            # Phase 1: Quad d'abord
+            tris, _ = get_faces_by_type_api(mesh, scope_set)
+            if tris:
+                cmds.select(tris, r=True)
+                cmds.polyQuad(angle=30, keepGroupBorder=True, keepHardEdges=True, constructionHistory=False)
+                total_quadded_1 += len(tris)
+
+            # Phase 2: Triangulation des ngons
+            scope_faces = _faces_in_scope(mesh, work_on_selection, faces_by_mesh)
+            scope_set = set(scope_faces)
+            _, ngons = get_faces_by_type_api(mesh, scope_set)
+
+            if ngons:
+                total_ngons += len(ngons)
+                try:
+                    cmds.delete(mesh, constructionHistory=True)
+                except Exception:
+                    pass
+
+                if avoid_stretched:
+                    total_subdivided += subdivide_long_edges(mesh, ngons, stretch_threshold)
+                    # Re-scan après subdivision
+                    scope_faces = _faces_in_scope(mesh, work_on_selection, faces_by_mesh)
+                    scope_set = set(scope_faces)
+                    _, ngons = get_faces_by_type_api(mesh, scope_set)
+
+                if ngons:
+                    cmds.select(ngons, r=True)
+                    cmds.polyTriangulate(constructionHistory=False)
+
+                # Phase 3: Re-quad
+                scope_faces = _faces_in_scope(mesh, work_on_selection, faces_by_mesh)
+                scope_set = set(scope_faces)
+                tris2, _ = get_faces_by_type_api(mesh, scope_set)
+                if tris2:
+                    cmds.select(tris2, r=True)
+                    cmds.polyQuad(angle=30, keepGroupBorder=True, keepHardEdges=True, constructionHistory=False)
+                    total_quadded_2 += len(tris2)
+
+        # Restauration
+        if work_on_selection:
+            valid = [f for f in sel_faces if cmds.objExists(f)]
+            if valid:
+                set_selection_mode("face")
+                cmds.select(valid, r=True)
+        else:
+            valid_meshes = [m for m in meshes if cmds.objExists(m)]
+            if valid_meshes:
+                cmds.select(valid_meshes, r=True)
+
+        # Messages
+        if total_ngons == 0 and total_quadded_1 == 0 and total_quadded_2 == 0:
+            show_inview_message("Rien a traiter (deja optimise)!", 2.0, "info")
+        else:
+            msg_parts = []
+            if total_quadded_1 > 0:
+                msg_parts.append("{} tris->quads".format(total_quadded_1))
+            if total_ngons > 0:
+                msg_parts.append("{} ngons tri".format(total_ngons))
+            if total_subdivided > 0:
+                msg_parts.append("{} edges subdiv".format(total_subdivided))
+            if total_quadded_2 > 0:
+                msg_parts.append("{} re-quad".format(total_quadded_2))
+            msg = ", ".join(msg_parts)
+            if avoid_stretched:
+                msg += " (quality)"
+            show_inview_message(msg, 3.0, "success")
+
+    except Exception as e:
+        cmds.warning("SmartTri erreur: {}".format(e))
+        show_inview_message("Erreur!", 2.0, "error")
+        import traceback
+        traceback.print_exc()
+    finally:
+        cmds.undoInfo(closeChunk=True)
+
+
+def mesh_smart_triangulate_ui():
+    """Version UI standard - mode rapide."""
+    mesh_smart_triangulate(avoid_stretched=False, stretch_threshold=3.0)
+
+
+def mesh_smart_triangulate_quality():
+    """Version avec anti-stretch activé - mode qualité."""
+    mesh_smart_triangulate(avoid_stretched=True, stretch_threshold=3.0)
+
+
+# =============================================================================
+# BRIDGE - Smart Bridge Hole (multi-mesh safe)
+# =============================================================================
+def mesh_smart_bridge_hole(corner_threshold=35.0, merge_dist=0.001, debug=True):
+    """
+    Quad Patch pour boucher un trou (loop fermé de border edges).
+    Supporte plusieurs meshes si tu as des edges de plusieurs meshes sélectionnées.
+    """
+    def _clamp(x, a, b):
+        return max(a, min(b, x))
+
+    def _vpos(v):
+        if not cmds.objExists(v):
+            return None
+        return cmds.pointPosition(v, world=True)
+
+    def _sub(a, b):
+        return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+    def _len(v):
+        return math.sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2])
+
+    def _norm(v):
+        l = _len(v)
+        if l < 1e-12:
+            return (0.0, 0.0, 0.0)
+        return (v[0]/l, v[1]/l, v[2]/l)
+
+    def _dot(a, b):
+        return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+
+    def _dist2(a, b):
+        dx = a[0]-b[0]
+        dy = a[1]-b[1]
+        dz = a[2]-b[2]
+        return dx*dx + dy*dy + dz*dz
+
+    def _get_mesh_from_comp(comp):
+        return comp.split(".")[0]
+
+    def _is_border_edge_local(e):
+        """Test bord via API."""
+        mesh = _get_mesh_from_comp(e)
+        edge_id = _parse_component_index(e)
+        if mesh and edge_id is not None:
+            try:
+                dag, _ = _get_dag_and_mfn(mesh)
+                return _is_border_edge_api(dag, edge_id)
+            except Exception:
+                pass
+        if not cmds.objExists(e):
+            return False
+        faces = cmds.polyListComponentConversion(e, toFace=True)
+        faces = cmds.filterExpand(faces, sm=34) or []
+        return len(faces) == 1
+
+    def _edge_verts(e):
+        """Vertices d'une edge via API."""
+        mesh = _get_mesh_from_comp(e)
+        edge_id = _parse_component_index(e)
+        if mesh and edge_id is not None:
+            try:
+                dag, _ = _get_dag_and_mfn(mesh)
+                v0, v1 = _get_edge_vertex_indices_api(dag, edge_id)
+                return ["{}.vtx[{}]".format(mesh, v0), "{}.vtx[{}]".format(mesh, v1)]
+            except Exception:
+                pass
+        if not cmds.objExists(e):
+            return []
+        v = cmds.polyListComponentConversion(e, toVertex=True)
+        return cmds.filterExpand(v, sm=31) or []
+
+    def _order_border_loop_edges(border_edges):
+        edge_set = set(border_edges)
+        if not border_edges:
+            return []
+        v2e = {}
+        for e in border_edges:
+            for vv in _edge_verts(e):
+                v2e.setdefault(vv, []).append(e)
+
+        start = border_edges[0]
+        ordered = [start]
+        used = {start}
+
+        vs = _edge_verts(start)
+        if len(vs) != 2:
+            return ordered
+        cur_v = vs[1]
+
+        for _ in range(len(border_edges) * 4):
+            next_e = None
+            for cand in v2e.get(cur_v, []):
+                if cand in edge_set and cand not in used:
+                    next_e = cand
+                    break
+            if not next_e:
+                break
+
+            ordered.append(next_e)
+            used.add(next_e)
+            nvs = _edge_verts(next_e)
+            if len(nvs) != 2:
+                break
+            cur_v = nvs[0] if nvs[0] != cur_v else nvs[1]
+            if len(used) == len(edge_set):
+                break
+
+        return ordered
+
+    def _ordered_loop_vertices_from_edges(ordered_edges):
+        if not ordered_edges:
+            return []
+        e0 = ordered_edges[0]
+        vs0 = _edge_verts(e0)
+        if len(vs0) != 2:
+            return []
+        verts = [vs0[0], vs0[1]]
+        cur = vs0[1]
+        for e in ordered_edges[1:]:
+            vs = _edge_verts(e)
+            if len(vs) != 2:
+                break
+            nxt = vs[0] if vs[0] != cur else vs[1]
+            verts.append(nxt)
+            cur = nxt
+        if len(verts) > 2 and verts[-1] == verts[0]:
+            verts.pop()
+        return verts
+
+    def _find_corners_from_vertex_loop(v_loop, threshold_deg):
+        n = len(v_loop)
+        if n < 4:
+            return []
+        corners = []
+        for i in range(n):
+            v_prev = v_loop[(i - 1) % n]
+            v_cur = v_loop[i]
+            v_next = v_loop[(i + 1) % n]
+            p_prev = _vpos(v_prev)
+            p_cur = _vpos(v_cur)
+            p_next = _vpos(v_next)
+            if not p_prev or not p_cur or not p_next:
+                continue
+            d1 = _norm(_sub(p_cur, p_prev))
+            d2 = _norm(_sub(p_next, p_cur))
+            dp = abs(_dot(d1, d2))
+            dp = _clamp(dp, 0.0, 1.0)
+            ang = math.degrees(math.acos(dp))
+            if ang > threshold_deg:
+                corners.append(i)
+
+        if len(corners) > 4:
+            cleaned = []
+            for idx in corners:
+                if not cleaned:
+                    cleaned.append(idx)
+                else:
+                    if (idx - cleaned[-1]) % n != 1:
+                        cleaned.append(idx)
+            corners = cleaned
+
+        return corners
+
+    def _fallback_bbox_corners(v_loop):
+        pts = []
+        for v in v_loop:
+            p = _vpos(v)
+            if p:
+                pts.append(p)
+        if len(pts) < 4:
+            return []
+
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        zs = [p[2] for p in pts]
+        rx = max(xs) - min(xs)
+        ry = max(ys) - min(ys)
+        rz = max(zs) - min(zs)
+
+        axes = sorted([(rx, 0), (ry, 1), (rz, 2)], reverse=True)
+        a0 = axes[0][1]
+        a1 = axes[1][1]
+
+        mn0, mx0 = min(p[a0] for p in pts), max(p[a0] for p in pts)
+        mn1, mx1 = min(p[a1] for p in pts), max(p[a1] for p in pts)
+
+        targets = [(mn0, mn1), (mx0, mn1), (mx0, mx1), (mn0, mx1)]
+        picked = []
+        for t0, t1 in targets:
+            best_i = None
+            best_d = 1e30
+            for i, p in enumerate(pts):
+                d = (p[a0] - t0) ** 2 + (p[a1] - t1) ** 2
+                if d < best_d:
+                    best_d = d
+                    best_i = i
+            picked.append(best_i)
+
+        picked = sorted(set(picked))
+        return picked[:4] if len(picked) >= 4 else picked
+
+    def _split_segments(v_loop, corner_ids):
+        corner_ids = sorted(corner_ids)
+        segs = []
+        for i in range(4):
+            a = corner_ids[i]
+            b = corner_ids[(i + 1) % 4]
+            if b > a:
+                seg = v_loop[a:b + 1]
+            else:
+                seg = v_loop[a:] + v_loop[:b + 1]
+            segs.append(seg)
+        return segs
+
+    def _align_opposite_segments(segA, segB):
+        if not segA or not segB:
+            return segA, segB
+        pa0 = _vpos(segA[0])
+        pb0 = _vpos(segB[0])
+        pb1 = _vpos(segB[-1])
+        if not pa0 or not pb0 or not pb1:
+            return segA, segB
+        if _dist2(pa0, pb1) < _dist2(pa0, pb0):
+            return segA, list(reversed(segB))
+        return segA, segB
+
+    def _create_curve_from_verts(verts, name):
+        pts = []
+        for v in verts:
+            p = _vpos(v)
+            if p:
+                pts.append(p)
+        if len(pts) < 2:
+            return None
+        return cmds.curve(d=1, p=pts, name=name)
+
+    # Selection
+    sel = cmds.ls(sl=True, fl=True) or []
+    edges = cmds.filterExpand(sel, sm=32) or []
+    if not edges:
+        cmds.warning("Sélectionne des border edges (closed loop)!")
+        show_inview_message("Sélectionne des border edges!", 2.0, "warning")
+        return
+
+    mesh_edges = defaultdict(list)
+    for e in edges:
+        m = _get_mesh_from_comp(e)
+        if m:
+            mesh_edges[m].append(e)
+
+    cmds.undoInfo(openChunk=True, chunkName="SmartBridgeQuadPatch")
+    try:
+        success = 0
+        fail = 0
+
+        for mesh_name, e_list in mesh_edges.items():
+            border_edges = [e for e in e_list if _is_border_edge_local(e)]
+            if len(border_edges) < 4:
+                fail += 1
+                continue
+
+            try:
+                full_loop = cmds.polySelectSp(border_edges[0], loop=True, q=True) or []
+                full_loop = cmds.ls(full_loop, fl=True) or []
+                full_loop = [e for e in full_loop if _is_border_edge_local(e)]
+                if len(full_loop) >= len(border_edges):
+                    border_edges = full_loop
+            except Exception:
+                pass
+
+            ordered_edges = _order_border_loop_edges(border_edges)
+            v_loop = _ordered_loop_vertices_from_edges(ordered_edges)
+            if len(v_loop) < 4:
+                fail += 1
+                continue
+
+            corners = _find_corners_from_vertex_loop(v_loop, corner_threshold)
+            if len(corners) != 4:
+                corners = _fallback_bbox_corners(v_loop)
+                if len(corners) != 4:
+                    fail += 1
+                    continue
+
+            segs = _split_segments(v_loop, corners)
+            segs[0], segs[2] = _align_opposite_segments(segs[0], segs[2])
+            segs[1], segs[3] = _align_opposite_segments(segs[1], segs[3])
+
+            if debug:
+                print("[SmartBridge] Mesh={} edges={} corners={}".format(mesh_name, len(border_edges), corners))
+
+            curves = []
+            try:
+                cmds.nurbsToPolygonsPref(polyType=1, format=2, uType=3, uNumber=1, vType=3, vNumber=1)
+                curves.append(_create_curve_from_verts(segs[0], "sb_sideA_crv"))
+                curves.append(_create_curve_from_verts(segs[1], "sb_sideB_crv"))
+                curves.append(_create_curve_from_verts(segs[2], "sb_sideC_crv"))
+                curves.append(_create_curve_from_verts(segs[3], "sb_sideD_crv"))
+                curves = [c for c in curves if c]
+
+                if len(curves) != 4:
+                    if curves:
+                        cmds.delete(curves)
+                    fail += 1
+                    continue
+
+                patch = cmds.boundary(curves[0], curves[1], curves[2], curves[3],
+                                      ch=0, ep=0, po=1, order=0)
+                patch_xform = patch[0] if patch else None
+
+                cmds.delete(curves)
+                curves = []
+
+                if not patch_xform or not cmds.objExists(patch_xform):
+                    fail += 1
+                    continue
+
+                cmds.select([mesh_name, patch_xform], r=True)
+                united = cmds.polyUnite(ch=0, mergeUVSets=1, name=mesh_name)[0]
+                if united != mesh_name and cmds.objExists(mesh_name):
+                    try:
+                        cmds.delete(mesh_name)
+                    except Exception:
+                        pass
+                    cmds.rename(united, mesh_name)
+                    united = mesh_name
+
+                cmds.select("{}.vtx[*]".format(united), r=True)
+                cmds.polyMergeVertex(distance=merge_dist, am=True, ch=0)
+
+                try:
+                    cmds.polyNormal(united, normalMode=2, userNormalMode=0, ch=0)
+                    cmds.SetToFaceNormals()
+                except Exception:
+                    pass
+
+                success += 1
+
+            except Exception:
+                try:
+                    if curves:
+                        cmds.delete(curves)
+                except Exception:
+                    pass
+                fail += 1
+
+        final_meshes = [m for m in mesh_edges.keys() if cmds.objExists(m)]
+        if final_meshes:
+            cmds.select(final_meshes, r=True)
+
+        if success > 0:
+            msg = "{} trou(s) bouché(s)".format(success)
+            if fail > 0:
+                msg += " ({} échec)".format(fail)
+            show_inview_message(msg, 2.0, "success")
+        else:
+            show_inview_message("Aucun trou bouché!", 2.0, "error")
+
+    finally:
+        cmds.undoInfo(closeChunk=True)
+
+
+# =============================================================================
+# BRIDGE - Concentric Bridge (faces or edges)
+# =============================================================================
+def bridge_concentric_from_faces_or_edges(divisions=0, twist=0):
+    sel = cmds.ls(selection=True, flatten=True) or []
+    if not sel:
+        cmds.warning("Sélectionne des faces entre 2 loops OU les edges des 2 loops.")
+        show_inview_message("Aucune sélection!", 2.0, "warning")
+        return
+
+    mesh = get_selected_mesh()
+    if not mesh:
+        cmds.warning("Sélectionne un mesh / composants.")
+        show_inview_message("Aucun mesh!", 2.0, "warning")
+        return
+
+    faces = filter_faces(sel)
+    edges = filter_edges(sel)
+
+    if faces:
+        boundary = boundary_edges_from_faces(faces)
+        comps = connected_edge_components(boundary)
+        if len(comps) < 2:
+            cmds.warning("Je ne trouve pas 2 loops de bordure sur ces faces.")
+            show_inview_message("2 loops requis!", 2.0, "warning")
+            return
+
+        comps = sorted(comps, key=lambda c: len(c), reverse=True)
+        loop1 = comps[0]
+        loop2 = comps[1]
+
+        cmds.undoInfo(openChunk=True, chunkName="ConcentricBridgeFaces")
+        try:
+            cmds.delete(faces)
+            cmds.select(loop1 + loop2, r=True)
+            cmds.polyBridgeEdge(divisions=divisions, twist=twist)
+            cmds.select(mesh, r=True)
+            show_inview_message("Bridge: {} + {} edges".format(len(loop1), len(loop2)), 2.0, "success")
+        except Exception as e:
+            cmds.warning("ConcentricBridgeFaces erreur: {}".format(e))
+            show_inview_message("Erreur Bridge!", 2.0, "error")
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        return
+
+    if edges:
+        comps = connected_edge_components(edges)
+        if len(comps) != 2:
+            cmds.warning("Sélectionne exactement 2 loops d'edges.")
+            show_inview_message("2 loops d'edges requis!", 2.0, "warning")
+            return
+
+        loop1 = comps[0]
+        loop2 = comps[1]
+
+        cmds.undoInfo(openChunk=True, chunkName="ConcentricBridgeEdges")
+        try:
+            cmds.select(loop1 + loop2, r=True)
+            cmds.polyBridgeEdge(divisions=divisions, twist=twist)
+            cmds.select(mesh, r=True)
+            show_inview_message("Bridge: {} + {} edges".format(len(loop1), len(loop2)), 2.0, "success")
+        except Exception as e:
+            cmds.warning("ConcentricBridgeEdges erreur: {}".format(e))
+            show_inview_message("Erreur Bridge!", 2.0, "error")
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        return
+
+    cmds.warning("Sélectionne des faces OU des edges.")
+    show_inview_message("Sélectionne faces ou edges!", 2.0, "warning")
+
+
+# =============================================================================
+# SMART CONCENTRIC (Bridge OR Connect)
+# =============================================================================
+corner_angle_threshold = 45.0
+clean_after_connect = True
+clean_after_connect_angle = 1.0
+clean_after_connect_allow_ngons = True
+clean_after_connect_max_ngon = 6
+clean_after_connect_passes = 10
+
+angle_threshold_value = 5.0
+allow_ngons_value = True
+max_ngon_value = 6
+only_selected_faces_value = False
+
+do_concentric_face_bridge = True
+do_concentric_edge_bridge = True
+concentric_bridge_divisions = 0
+concentric_bridge_twist = 0
+
+merge_threshold_value = 0.001
+
+
+def smart_concentric_bridge_or_connect():
+    sel = cmds.ls(selection=True, flatten=True) or []
+    if not sel:
+        cmds.warning("Sélectionne des faces ou des edges.")
+        show_inview_message("Aucune sélection!", 2.0, "warning")
+        return
+
+    mesh = get_selected_mesh()
+    if not mesh:
+        cmds.warning("Sélectionne un mesh / composants.")
+        show_inview_message("Aucun mesh!", 2.0, "warning")
+        return
+
+    faces = filter_faces(sel)
+    edges = filter_edges(sel)
+
+    cmds.undoInfo(openChunk=True, chunkName="SmartConcentric")
+    try:
+        if faces:
+            boundary = boundary_edges_from_faces(faces)
+            comps = connected_edge_components(boundary)
+
+            if len(comps) >= 2:
+                comps = sorted(comps, key=lambda c: len(c), reverse=True)
+                loop1 = comps[0]
+                loop2 = comps[1]
+                if do_concentric_face_bridge:
+                    cmds.delete(faces)
+                    cmds.select(loop1 + loop2, r=True)
+                    cmds.polyBridgeEdge(divisions=concentric_bridge_divisions, twist=concentric_bridge_twist)
+                    cmds.select(mesh, r=True)
+                    show_inview_message("Bridge: {} + {} edges".format(len(loop1), len(loop2)), 2.0, "success")
+                    return
+
+            chains = split_boundary_by_angle(boundary, angle_threshold=corner_angle_threshold)
+            if len(chains) < 2:
+                cmds.warning("Je ne trouve pas 2 côtés à connecter.")
+                cmds.select(mesh, r=True)
+                show_inview_message("2 côtés requis!", 2.0, "warning")
+                return
+
+            chains = sorted(chains, key=lambda c: len(c), reverse=True)
+            side1, side2 = chains[0], chains[1]
+
+            v1 = ordered_chain_vertices(side1)
+            v2 = ordered_chain_vertices(side2)
+            v1, v2 = best_align_vertex_lists(v1, v2)
+
+            cmds.select(v1 + v2, r=True)
+            cmds.polyConnectComponents()
+            show_inview_message("Connect: {} + {} vertices".format(len(v1), len(v2)), 2.0, "success")
+
+            if clean_after_connect:
+                cmds.select(faces, r=True)
+                auto_clean(
+                    angle_threshold=clean_after_connect_angle,
+                    allow_ngons=clean_after_connect_allow_ngons,
+                    max_passes=clean_after_connect_passes,
+                    only_selected_faces=True,
+                )
+
+            cmds.select(mesh, r=True)
+            return
+
+        if edges:
+            comps = connected_edge_components(edges)
+
+            if len(comps) == 2 and do_concentric_edge_bridge:
+                cmds.select(comps[0] + comps[1], r=True)
+                cmds.polyBridgeEdge(divisions=concentric_bridge_divisions, twist=concentric_bridge_twist)
+                cmds.select(mesh, r=True)
+                show_inview_message("Bridge: {} + {} edges".format(len(comps[0]), len(comps[1])), 2.0, "success")
+                return
+
+            if len(comps) == 2:
+                vA = ordered_chain_vertices(comps[0])
+                vB = ordered_chain_vertices(comps[1])
+                vA, vB = best_align_vertex_lists(vA, vB)
+                cmds.select(vA + vB, r=True)
+                cmds.polyConnectComponents()
+                cmds.select(mesh, r=True)
+                show_inview_message("Connect effectué!", 2.0, "success")
+                return
+
+            cmds.warning("Sélectionne 2 groupes d'edges.")
+            show_inview_message("2 groupes d'edges requis!", 2.0, "warning")
+            return
+
+        cmds.warning("Sélectionne des faces ou des edges.")
+        show_inview_message("Sélectionne faces ou edges!", 2.0, "warning")
+
+    except Exception as e:
+        cmds.warning("SmartConcentric erreur: {}".format(e))
+        show_inview_message("Erreur SmartConcentric!", 2.0, "error")
+        import traceback
+        traceback.print_exc()
+    finally:
+        cmds.undoInfo(closeChunk=True)
+
+
+# =============================================================================
+# MeshToolkit - CUSTOM WIDGETS (namespaced)
+# =============================================================================
+class MTK_ColorBtn(QtWidgets.QPushButton):
+    def __init__(self, text="", tip="", bg="#2d2d2d", fg="#a0a0a0", w=None, h=26, parent=None):
+        super(MTK_ColorBtn, self).__init__(text, parent)
+        if w:
+            self.setFixedSize(w, h)
+        else:
+            self.setFixedHeight(h)
+        self.setToolTip(tip)
+        self._bg = bg
+        self._fg = fg
+        self._update_style()
+
+    def _update_style(self):
+        self.setStyleSheet(
+            """
+            QPushButton {{
+                background-color: {bg}; color: {fg};
+                border: 1px solid #222; border-radius: 3px;
+                font-weight: bold; font-size: 10px;
+                padding: 2px 8px;
+            }}
+            QPushButton:hover {{ background-color: {bgh}; border-color: #444; }}
+            QPushButton:pressed {{ background-color: #1a1a1a; }}
+        """.format(bg=self._bg, fg=self._fg, bgh=QtGui.QColor(self._bg).lighter(130).name())
+        )
+
+
+class MTK_SectionLabel(QtWidgets.QLabel):
+    def __init__(self, text, parent=None):
+        super(MTK_SectionLabel, self).__init__(text, parent)
+        self.setStyleSheet(
+            """
+            color: #555555;
+            font-size: 9px;
+            font-weight: bold;
+            padding: 4px 0 2px 0;
+            border-bottom: 1px solid #2a2a2a;
+        """
+        )
+
+
+class MTK_ParamSlider(QtWidgets.QWidget):
+    valueChanged = QtCore.Signal(float)
+
+    def __init__(self, label, min_val, max_val, default, decimals=1, parent=None):
+        super(MTK_ParamSlider, self).__init__(parent)
+        self._decimals = decimals
+        self._multiplier = 10 ** decimals
+
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        self._label = QtWidgets.QLabel(label)
+        self._label.setFixedWidth(70)
+        self._label.setStyleSheet("color: #707070; font-size: 9px;")
+
+        self._slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self._slider.setRange(int(min_val * self._multiplier), int(max_val * self._multiplier))
+        self._slider.setValue(int(default * self._multiplier))
+
+        self._spin = QtWidgets.QDoubleSpinBox()
+        self._spin.setRange(min_val, max_val)
+        self._spin.setDecimals(decimals)
+        self._spin.setValue(default)
+        self._spin.setFixedWidth(50)
+        self._spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+
+        layout.addWidget(self._label)
+        layout.addWidget(self._slider)
+        layout.addWidget(self._spin)
+
+        self._slider.valueChanged.connect(self._on_slider)
+        self._spin.valueChanged.connect(self._on_spin)
+
+    def _on_slider(self, val):
+        real_val = val / self._multiplier
+        self._spin.blockSignals(True)
+        self._spin.setValue(real_val)
+        self._spin.blockSignals(False)
+        self.valueChanged.emit(real_val)
+
+    def _on_spin(self, val):
+        self._slider.blockSignals(True)
+        self._slider.setValue(int(val * self._multiplier))
+        self._slider.blockSignals(False)
+        self.valueChanged.emit(val)
+
+    def value(self):
+        return self._spin.value()
+
+
+# =============================================================================
+# MeshToolkit - WIDGET (as Tab content)
+# =============================================================================
+class MeshToolkitWidget(QtWidgets.QWidget):
+    def __init__(self, parent=None):
+        super(MeshToolkitWidget, self).__init__(parent)
+        self._build_ui()
+        self._apply_style()
+        self._connect_signals()
+
+    def _build_ui(self):
+        main_layout = QtWidgets.QVBoxLayout(self)
+        main_layout.setContentsMargins(8, 8, 8, 8)
+        main_layout.setSpacing(6)
+
+        # ===== BRIDGE / CONNECT =====
+        main_layout.addWidget(MTK_SectionLabel("BRIDGE / CONNECT"))
+
+        bridge_row = QtWidgets.QHBoxLayout()
+        bridge_row.setSpacing(3)
+
+        self.smart_concentric_btn = MTK_ColorBtn("? Smart", "Smart Concentric: Bridge or Connect", "#1e3a50", "#70b0ff", 70, 28)
+        self.bridge_hole_btn = MTK_ColorBtn("?? Hole", "Fill hole from border loop", "#1e4a30", "#70ff90", 65, 28)
+        self.bridge_loops_btn = MTK_ColorBtn("?? Bridge", "Bridge 2 edge loops", "#1e3a50", "#70b0ff", 65, 28)
+
+        bridge_row.addWidget(self.smart_concentric_btn)
+        bridge_row.addWidget(self.bridge_hole_btn)
+        bridge_row.addWidget(self.bridge_loops_btn)
+        main_layout.addLayout(bridge_row)
+
+        self.bridge_settings = QtWidgets.QWidget()
+        bs_layout = QtWidgets.QVBoxLayout(self.bridge_settings)
+        bs_layout.setContentsMargins(0, 4, 0, 0)
+        bs_layout.setSpacing(3)
+
+        self.corner_slider = MTK_ParamSlider("Corner °", 5, 120, corner_angle_threshold, 0)
+        bs_layout.addWidget(self.corner_slider)
+
+        self.clean_after_chk = QtWidgets.QCheckBox("Auto-clean after connect")
+        self.clean_after_chk.setChecked(clean_after_connect)
+        bs_layout.addWidget(self.clean_after_chk)
+
+        self.bridge_settings.setVisible(False)
+        main_layout.addWidget(self.bridge_settings)
+
+        self.bridge_settings_btn = QtWidgets.QPushButton("? Settings")
+        self.bridge_settings_btn.setFixedHeight(16)
+        self.bridge_settings_btn.setStyleSheet(
+            """
+            QPushButton {
+                background: transparent; color: #404040;
+                border: none; font-size: 9px;
+            }
+            QPushButton:hover { color: #606060; }
+        """
+        )
+        main_layout.addWidget(self.bridge_settings_btn)
+
+        # ===== DETECT =====
+        main_layout.addWidget(MTK_SectionLabel("DETECT"))
+
+        detect_row = QtWidgets.QHBoxLayout()
+        detect_row.setSpacing(3)
+
+        self.ngon_btn = MTK_ColorBtn("? NGon", "Detect N-gons", "#50301e", "#ffaa70", 58, 26)
+        self.tri_btn = MTK_ColorBtn("? Tri", "Detect triangles", "#50301e", "#ffaa70", 50, 26)
+        self.quad_btn = MTK_ColorBtn("¦ Quad", "Detect quads", "#1e4030", "#70c080", 55, 26)
+        self.stuck_btn = MTK_ColorBtn("? Stuck", "Stuck extrusions", "#50301e", "#ffaa70", 55, 26)
+        self.lamina_btn = MTK_ColorBtn("? Lam", "Lamina faces", "#50301e", "#ffaa70", 50, 26)
+
+        detect_row.addWidget(self.ngon_btn)
+        detect_row.addWidget(self.tri_btn)
+        detect_row.addWidget(self.quad_btn)
+        detect_row.addWidget(self.stuck_btn)
+        detect_row.addWidget(self.lamina_btn)
+        main_layout.addLayout(detect_row)
+
+        # ===== VERTICES =====
+        main_layout.addWidget(MTK_SectionLabel("VERTICES"))
+
+        vert_row = QtWidgets.QHBoxLayout()
+        vert_row.setSpacing(3)
+
+        self.remove_verts_btn = MTK_ColorBtn("? Remove Useless", "Remove unnecessary vertices", "#3a2a2a", "#ff9090", 110, 26)
+        self.merge_verts_btn = MTK_ColorBtn("? Merge", "Merge overlapping vertices", "#3a2a2a", "#ff9090", 70, 26)
+
+        vert_row.addWidget(self.remove_verts_btn)
+        vert_row.addWidget(self.merge_verts_btn)
+        vert_row.addStretch()
+        main_layout.addLayout(vert_row)
+
+        self.merge_slider = MTK_ParamSlider("Threshold", 0, 0.1, merge_threshold_value, 4)
+        main_layout.addWidget(self.merge_slider)
+
+        # ===== TOPOLOGY =====
+        main_layout.addWidget(MTK_SectionLabel("TOPOLOGY"))
+
+        topo_row = QtWidgets.QHBoxLayout()
+        topo_row.setSpacing(3)
+
+        self.quadrangulate_btn = MTK_ColorBtn("? Quadrangulate", "Convert triangle pairs to quads", "#1e4030", "#70c080", 105, 26)
+        self.triangulate_btn = MTK_ColorBtn("? Triangulate", "Smart: Quad->Tri->Quad", "#1e3050", "#7090c0", 100, 26)
+        self.triangulate_quality_btn = MTK_ColorBtn("? Tri Quality", "Anti-stretch triangulation", "#2e4050", "#80a0d0", 90, 26)
+
+        topo_row.addWidget(self.quadrangulate_btn)
+        topo_row.addWidget(self.triangulate_btn)
+        topo_row.addWidget(self.triangulate_quality_btn)
+        main_layout.addLayout(topo_row)
+
+        # ===== CLEAN =====
+        main_layout.addWidget(MTK_SectionLabel("CLEAN  [API 2.0]"))
+
+        self.angle_slider = MTK_ParamSlider("Coplanar °", 0, 45, angle_threshold_value, 1)
+        main_layout.addWidget(self.angle_slider)
+
+        clean_opts = QtWidgets.QHBoxLayout()
+        clean_opts.setSpacing(8)
+
+        self.local_chk = QtWidgets.QCheckBox("Local only")
+        self.local_chk.setChecked(only_selected_faces_value)
+        self.local_chk.setToolTip("Only operate on selected faces")
+
+        self.ngons_chk = QtWidgets.QCheckBox("Allow N-gons")
+        self.ngons_chk.setChecked(allow_ngons_value)
+        self.ngons_chk.setToolTip("Allow creating N-gons (more aggressive)")
+
+        clean_opts.addWidget(self.local_chk)
+        clean_opts.addWidget(self.ngons_chk)
+        clean_opts.addStretch()
+        main_layout.addLayout(clean_opts)
+
+        clean_row = QtWidgets.QHBoxLayout()
+        clean_row.setSpacing(3)
+
+        self.select_edges_btn = MTK_ColorBtn("?? Select Edges", "Select removable edges", "#3a3a20", "#c0c070", 100, 28)
+        self.auto_clean_btn = MTK_ColorBtn("? Auto Clean", "Automatically clean mesh", "#4a3a10", "#ffc040", 100, 28)
+
+        clean_row.addWidget(self.select_edges_btn)
+        clean_row.addWidget(self.auto_clean_btn)
+        main_layout.addLayout(clean_row)
+
+        main_layout.addStretch()
+
+    def _apply_style(self):
+        self.setStyleSheet(
+            """
+            QWidget { background-color: #1e1e1e; }
+            QSlider::groove:horizontal { height: 4px; background: #2a2a2a; border-radius: 2px; }
+            QSlider::handle:horizontal { background: #5a8a5a; width: 12px; margin: -4px 0; border-radius: 6px; }
+            QSlider::handle:horizontal:hover { background: #70a070; }
+            QSlider::sub-page:horizontal { background: #3a5a3a; border-radius: 2px; }
+            QSpinBox, QDoubleSpinBox {
+                background: #252525; color: #a0a0a0;
+                border: 1px solid #303030; border-radius: 3px;
+                padding: 2px; font-size: 10px;
+            }
+            QCheckBox { color: #707070; font-size: 10px; spacing: 4px; }
+            QCheckBox::indicator {
+                width: 14px; height: 14px; border-radius: 3px;
+                border: 1px solid #3a3a3a; background: #252525;
+            }
+            QCheckBox::indicator:checked { background: #5a8a5a; border-color: #70a070; }
+            QCheckBox::indicator:hover { border-color: #505050; }
+        """
+        )
+
+    def _connect_signals(self):
+        self.smart_concentric_btn.clicked.connect(smart_concentric_bridge_or_connect)
+        self.bridge_hole_btn.clicked.connect(lambda: mesh_smart_bridge_hole())
+        self.bridge_loops_btn.clicked.connect(lambda: bridge_concentric_from_faces_or_edges(
+            divisions=concentric_bridge_divisions, twist=concentric_bridge_twist
+        ))
+
+        self.bridge_settings_btn.clicked.connect(self._toggle_bridge_settings)
+        self.corner_slider.valueChanged.connect(self._on_corner_changed)
+        self.clean_after_chk.stateChanged.connect(self._on_clean_after_changed)
+
+        self.ngon_btn.clicked.connect(mesh_detect_ngons)
+        self.tri_btn.clicked.connect(mesh_detect_triangles)
+        self.quad_btn.clicked.connect(mesh_detect_quads)
+        self.stuck_btn.clicked.connect(mesh_detect_stuck_extrusions)
+        self.lamina_btn.clicked.connect(mesh_detect_lamina_faces)
+
+        self.remove_verts_btn.clicked.connect(mesh_remove_useless_vertices)
+        self.merge_verts_btn.clicked.connect(lambda: mesh_merge_vertices(threshold=merge_threshold_value))
+        self.merge_slider.valueChanged.connect(self._on_merge_threshold)
+
+        self.quadrangulate_btn.clicked.connect(mesh_smart_quadrangulate)
+        self.triangulate_btn.clicked.connect(mesh_smart_triangulate_ui)
+        self.triangulate_quality_btn.clicked.connect(mesh_smart_triangulate_quality)
+
+        self.angle_slider.valueChanged.connect(self._on_angle_changed)
+        self.local_chk.stateChanged.connect(self._on_local_changed)
+        self.ngons_chk.stateChanged.connect(self._on_ngons_changed)
+
+        self.select_edges_btn.clicked.connect(self._on_select_edges)
+        self.auto_clean_btn.clicked.connect(self._on_auto_clean)
+
+    def _toggle_bridge_settings(self):
+        self.bridge_settings.setVisible(not self.bridge_settings.isVisible())
+
+    def _on_corner_changed(self, val):
+        global corner_angle_threshold
+        corner_angle_threshold = float(val)
+
+    def _on_clean_after_changed(self, state):
+        global clean_after_connect
+        clean_after_connect = (state == QtCore.Qt.Checked)
+
+    def _on_merge_threshold(self, val):
+        global merge_threshold_value
+        merge_threshold_value = float(val)
+
+    def _on_angle_changed(self, val):
+        global angle_threshold_value
+        angle_threshold_value = float(val)
+
+    def _on_local_changed(self, state):
+        global only_selected_faces_value
+        only_selected_faces_value = (state == QtCore.Qt.Checked)
+
+    def _on_ngons_changed(self, state):
+        global allow_ngons_value
+        allow_ngons_value = (state == QtCore.Qt.Checked)
+
+    def _on_select_edges(self):
+        select_removable_edges(
+            angle_threshold=angle_threshold_value,
+            allow_ngons=allow_ngons_value,
+            only_selected_faces=only_selected_faces_value,
+        )
+
+    def _on_auto_clean(self):
+        auto_clean(
+            angle_threshold=angle_threshold_value,
+            allow_ngons=allow_ngons_value,
+            max_passes=50,
+            only_selected_faces=only_selected_faces_value,
+        )
+
+
+# =============================================================================
+# =============================================================================
+#                               TAB 2 - PR SELECT TOOLS v3.8
+# =============================================================================
+# =============================================================================
+
+def pr_ensure_face_component_mode():
+    try:
+        cmds.selectMode(component=True)
+    except Exception:
+        pass
+    try:
+        cmds.selectType(facet=True)
+    except Exception:
+        pass
+
+
+def pr_force_selection_faces_only():
+    try:
+        cmds.ConvertSelectionToFaces()
+    except Exception:
+        pass
+    try:
+        sel = cmds.ls(sl=True, fl=True) or []
+        only_faces = [c for c in sel if ".f[" in c]
+        cmds.select(only_faces, replace=True)
+    except Exception:
+        pass
+    pr_ensure_face_component_mode()
+
+
+def pr_get_mesh_from_selection():
+    sel = cmds.ls(selection=True, long=True) or []
+    if not sel:
+        return None
+    obj = sel[0].split(".")[0] if "." in sel[0] else sel[0]
+    shapes = cmds.listRelatives(obj, shapes=True, fullPath=True) or []
+    for s in shapes:
+        if cmds.nodeType(s) == "mesh":
+            return obj
+    if cmds.nodeType(obj) == "mesh":
+        p = cmds.listRelatives(obj, parent=True, fullPath=True)
+        return p[0] if p else None
+    return None
+
+
+def pr_get_camera_direction():
+    try:
+        panel = cmds.getPanel(withFocus=True)
+        if not panel or cmds.getPanel(typeOf=panel) != "modelPanel":
+            panels = cmds.getPanel(type="modelPanel") or []
+            panel = panels[0] if panels else None
+        if panel:
+            camera = cmds.modelPanel(panel, q=True, camera=True)
+            cam_matrix = cmds.xform(camera, q=True, m=True, ws=True)
+            direction = [cam_matrix[8], cam_matrix[9], cam_matrix[10]]
+            return direction
+    except Exception:
+        pass
+    return [0, 0, 1]
+
+
+def pr_parse_face_index(comp):
+    m = re.search(r"\.f\[(\d+)\]", comp)
+    if not m:
+        return None
+    return int(m.group(1))
+
+
+def pr_get_dagpath_and_fnmesh(mesh_transform):
+    """Version API 2.0 (plus de test om2 is None)."""
+    try:
+        dag, mfn = _get_dag_and_mfn(mesh_transform)
+        return dag, mfn
+    except Exception:
+        return None, None
+
+
+# =============================================================================
+# PR SELECT TOOLS WIDGET (placeholder)
+# =============================================================================
+class PRSelectToolsWidget(QtWidgets.QWidget):
+    def __init__(self, parent=None):
+        super(PRSelectToolsWidget, self).__init__(parent)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        label = QtWidgets.QLabel("PR Select Tools v3.8\n(Placeholder - ajoute ton code ici)")
+        label.setStyleSheet("color: #888; font-size: 12px;")
+        label.setAlignment(QtCore.Qt.AlignCenter)
+        layout.addWidget(label)
+        layout.addStretch()
+
+
+# =============================================================================
+# MAIN WINDOW (2 TABS)
+# =============================================================================
+class QDMegaToolsWindow(QtWidgets.QDialog):
+    WINDOW_TITLE = "SmartCleaner  [OM2]"
+
+    def __init__(self, parent=None):
+        super(QDMegaToolsWindow, self).__init__(parent or get_maya_main_window())
+        self.setWindowTitle(self.WINDOW_TITLE)
+        self.setWindowFlags(QtCore.Qt.Window)
+        self.setMinimumSize(320, 400)
+        self.resize(320, 450)
+
+        self._build_ui()
+        self._apply_global_style()
+
+    def _build_ui(self):
+        main_layout = QtWidgets.QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        self.tab_widget = QtWidgets.QTabWidget()
+        self.tab_widget.setTabPosition(QtWidgets.QTabWidget.North)
+
+        self.mesh_toolkit_widget = MeshToolkitWidget()
+        self.tab_widget.addTab(self.mesh_toolkit_widget, "Mesh Toolkit")
+
+        main_layout.addWidget(self.tab_widget)
+
+    def _apply_global_style(self):
+        self.setStyleSheet(
+            """
+            QDialog {
+                background-color: #1e1e1e;
+            }
+            QTabWidget::pane {
+                border: 1px solid #2a2a2a;
+                background: #1e1e1e;
+            }
+            QTabBar::tab {
+                background: #2a2a2a;
+                color: #707070;
+                padding: 6px 16px;
+                border: 1px solid #222;
+                border-bottom: none;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+                margin-right: 2px;
+            }
+            QTabBar::tab:selected {
+                background: #1e1e1e;
+                color: #aaaaaa;
+                border-bottom: 1px solid #1e1e1e;
+            }
+            QTabBar::tab:hover {
+                background: #333;
+            }
+        """
+        )
+
+
+# =============================================================================
+# SHOW UI
+# =============================================================================
+def show_ui():
+    global qd_mega_tools_window
+    try:
+        qd_mega_tools_window.close()
+        qd_mega_tools_window.deleteLater()
+    except Exception:
+        pass
+
+    qd_mega_tools_window = QDMegaToolsWindow()
+    qd_mega_tools_window.show()
+
+
+# Auto-launch
+if __name__ == "__main__":
+    show_ui()

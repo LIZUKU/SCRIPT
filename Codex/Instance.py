@@ -1664,22 +1664,34 @@ class InstanceCleanerUI(QDialog):
         filter_row.addWidget(filter_label)
         filter_row.addWidget(self.filter_combo)
         right.addLayout(filter_row)
-
         self.groups_scroll = QScrollArea()
         self.groups_scroll.setWidgetResizable(True)
-        self.groups_scroll.setFrameShape(QFrame.NoFrame)
-
+        self.groups_scroll.setFrameShape(QFrame.NoFrame)      
+        self.groups_scroll.setStyleSheet("""
+            QScrollArea {
+                background-color:#1e1e1e;
+                border:none;
+            }
+            QScrollArea > QWidget > QWidget {
+                background-color:#1e1e1e;
+            }
+        """)
+        self.groups_scroll.viewport().setStyleSheet("background-color:#1e1e1e;")
+        
         self.groups_container = QWidget()
+        self.groups_container.setStyleSheet("background-color:#1e1e1e;")
+        
         self.groups_layout = QVBoxLayout(self.groups_container)
         self.groups_layout.setContentsMargins(0, 0, 0, 0)
         self.groups_layout.setSpacing(4)
-
+        
         self.groups_empty = QLabel("No groups yet.\nClick REFRESH SCAN to populate the list.")
         self.groups_empty.setAlignment(Qt.AlignCenter)
         self.groups_empty.setStyleSheet("color:#606060; font-size:10px;")
+        
         self.groups_layout.addWidget(self.groups_empty)
         self.groups_layout.addStretch()
-
+        
         self.groups_scroll.setWidget(self.groups_container)
         right.addWidget(self.groups_scroll)
 
@@ -1760,21 +1772,19 @@ class InstanceCleanerUI(QDialog):
 
     def _update_window_compactness(self, visible_count):
         compact_mode = visible_count == 0
-
+    
+        FIXED_HEIGHT = 380  # hauteur toujours identique
+    
         if compact_mode:
-            self.right_col.setMinimumWidth(240)
-            self.right_col.setMaximumWidth(300)
+            self.right_col.setVisible(False)
+            self.setMinimumWidth(300)
+            self.resize(350, FIXED_HEIGHT)
         else:
-            self.right_col.setMinimumWidth(340)
-            self.right_col.setMaximumWidth(16777215)
-
-        base_height = 360
-        row_height = 66
-        target_height = base_height + min(max(visible_count, 0), 6) * row_height
-        target_height = max(380, min(target_height, 760))
-
-        current_width = self.width()
-        self.resize(current_width, target_height)
+            self.right_col.setVisible(True)
+            self.right_col.setMinimumWidth(400)
+            self.right_col.setMaximumWidth(420)
+            self.setMinimumWidth(760)
+            self.resize(900, FIXED_HEIGHT)
 
     def _refresh_item(self, label):
         if label in self.group_items:

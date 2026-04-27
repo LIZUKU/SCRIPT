@@ -50,12 +50,18 @@ ATTR_IC_GROUP = "ic_group_id"
 ATTR_IC_SOURCE = "ic_source"
 ATTR_IC_PROCESSED = "ic_processed"
 ATTR_IC_GROUP_NAME = "ic_group_name"
+ATTR_IC_BATCH = "ic_batch_id"
+ATTR_IC_ORIG_PARENT = "ic_original_parent"
+ATTR_IC_ORIG_NAME = "ic_original_name"
 
 MATCH_EXACT = "exact"
 MATCH_SIMILAR = "similar"
 MATCH_PROCESSED = "processed"
 
 
+# ------------------------------------------------------------
+# Maya / Qt helpers
+# ------------------------------------------------------------
 def maya_main_window():
     ptr = omui.MQtUtil.mainWindow()
     return wrapInstance(int(ptr), QWidget) if ptr else None
@@ -80,6 +86,9 @@ class UndoChunk(object):
         return False
 
 
+# ------------------------------------------------------------
+# Basic utils
+# ------------------------------------------------------------
 def _short(obj):
     return obj.split("|")[-1] if obj else obj
 
@@ -146,8 +155,16 @@ def _apply_world_matrix(node, matrix):
 def _world_bbox(node):
     try:
         bb = cmds.exactWorldBoundingBox(node, calculateExactly=True)
-        center = ((bb[0] + bb[3]) * 0.5, (bb[1] + bb[4]) * 0.5, (bb[2] + bb[5]) * 0.5)
-        size = (max(abs(bb[3] - bb[0]), 1e-8), max(abs(bb[4] - bb[1]), 1e-8), max(abs(bb[5] - bb[2]), 1e-8))
+        center = (
+            (bb[0] + bb[3]) * 0.5,
+            (bb[1] + bb[4]) * 0.5,
+            (bb[2] + bb[5]) * 0.5,
+        )
+        size = (
+            max(abs(bb[3] - bb[0]), 1e-8),
+            max(abs(bb[4] - bb[1]), 1e-8),
+            max(abs(bb[5] - bb[2]), 1e-8),
+        )
         return center, size
     except Exception:
         return (0.0, 0.0, 0.0), (1.0, 1.0, 1.0)
@@ -252,6 +269,9 @@ def _get_selected_transforms():
     return out
 
 
+# ------------------------------------------------------------
+# Groups / layers / attrs
+# ------------------------------------------------------------
 def _ensure_group(name, parent=None):
     if cmds.objExists(name):
         group = cmds.ls(name, long=True)[0]
@@ -304,6 +324,21 @@ def _add_to_layer(layer_name, nodes):
         cmds.editDisplayLayerMembers(layer_name, *nodes, noRecurse=True)
     except Exception as error:
         cmds.warning("[IC] Add to layer failed {}: {}".format(layer_name, error))
+
+
+def _remove_from_display_layers(nodes):
+    nodes = cmds.ls(nodes, long=True) or []
+    for node in nodes:
+        try:
+            layers = cmds.listConnections(node, type="displayLayer") or []
+            for layer in layers:
+                if layer != "defaultLayer":
+                    try:
+                        cmds.editDisplayLayerMembers(layer, node, remove=True)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
 
 def _ensure_ic_layers():
@@ -367,6 +402,42 @@ def _tag_node(node, ic_type, group_id, source="", group_name=""):
     _add_ic_attr(node, ATTR_IC_GROUP_NAME, group_name, "string")
 
 
+def _clear_ic_attrs(node):
+    for attr in (
+        ATTR_IC_TYPE,
+        ATTR_IC_GROUP,
+        ATTR_IC_SOURCE,
+        ATTR_IC_PROCESSED,
+        ATTR_IC_GROUP_NAME,
+        ATTR_IC_BATCH,
+        ATTR_IC_ORIG_PARENT,
+        ATTR_IC_ORIG_NAME,
+    ):
+        try:
+            if cmds.objExists(node) and cmds.attributeQuery(attr, node=node, exists=True):
+                cmds.deleteAttr(node + "." + attr)
+        except Exception:
+            pass
+
+
+def _make_clean_group_name(reference_mesh, used_names):
+    base = _safe_name(_short(reference_mesh))
+    if not base.upper().endswith("_GRP"):
+        base = base + "_GRP"
+
+    candidate = base
+    idx = 2
+    while candidate in used_names:
+        candidate = "{}_{:02d}".format(base, idx)
+        idx += 1
+
+    used_names.add(candidate)
+    return candidate
+
+
+# ------------------------------------------------------------
+# Signature / scan
+# ------------------------------------------------------------
 class MeshSignature(object):
     __slots__ = ("transform", "vertex_count", "face_count", "edge_count", "shape_hash")
 
@@ -442,8 +513,8 @@ def find_groups(signatures, use_shape_hash=True):
 
         for key, transforms in buckets.items():
             if len(transforms) > 1:
-                label = "group_{}".format(key[3][:8])
-                groups_exact[label] = transforms
+                internal_id = "sig_{}".format(key[3])
+                groups_exact[internal_id] = transforms
             else:
                 uniques.extend(transforms)
         return groups_exact, groups_similar, uniques
@@ -455,8 +526,8 @@ def find_groups(signatures, use_shape_hash=True):
 
     for transforms in buckets.values():
         if len(transforms) > 1:
-            label = "group_{:03d}".format(gid)
-            groups_similar[label] = transforms
+            internal_id = "similar_{:03d}".format(gid)
+            groups_similar[internal_id] = transforms
             gid += 1
         else:
             uniques.extend(transforms)
@@ -464,6 +535,9 @@ def find_groups(signatures, use_shape_hash=True):
     return groups_exact, groups_similar, uniques
 
 
+# ------------------------------------------------------------
+# Alignment
+# ------------------------------------------------------------
 def _compute_alignment_from_geometry(master_transform, original_transform):
     if np is None:
         cmds.warning("[IC] NumPy not available. Complex alignment disabled.")
@@ -482,7 +556,10 @@ def _compute_alignment_from_geometry(master_transform, original_transform):
     tgt_world = target_dag.inclusiveMatrix()
 
     src = np.array([[p.x, p.y, p.z] for p in src_pts], dtype=np.float64)
-    dst = np.array([[(p * tgt_world).x, (p * tgt_world).y, (p * tgt_world).z] for p in tgt_pts], dtype=np.float64)
+    dst = np.array(
+        [[(p * tgt_world).x, (p * tgt_world).y, (p * tgt_world).z] for p in tgt_pts],
+        dtype=np.float64,
+    )
 
     if src.shape[0] < 3:
         return None
@@ -528,26 +605,39 @@ def _fallback_align(instance, original):
         pass
 
 
+# ------------------------------------------------------------
+# Process manager
+# ------------------------------------------------------------
 class MasterManager(object):
     def __init__(self):
         self.masters = {}
 
-    def find_existing_master(self, group_label):
-        found = cmds.ls("MASTER_{}*".format(group_label), long=True) or []
-        return found[0] if found else None
+    def find_existing_master(self, internal_id):
+        if not cmds.objExists(MASTERS_GROUP):
+            return None
 
-    def create_master(self, group_label, reference_mesh, group_id, spacing=200.0, index=0):
+        root = cmds.ls(MASTERS_GROUP, long=True)
+        if not root:
+            return None
+
+        meshes = _iter_mesh_transforms(root[0], include_ic=True)
+        for mesh in meshes:
+            if _get_ic_attr(mesh, ATTR_IC_TYPE, "") == "master":
+                if _get_ic_attr(mesh, ATTR_IC_SOURCE, "") == internal_id:
+                    return mesh
+        return None
+
+    def create_master(self, internal_id, display_name, reference_mesh, group_id, spacing=10.0, index=0, batch_id=None):
         _, masters_group, _, _, _ = _ensure_ic_groups()
         layer_masters, _, _, _ = _ensure_ic_layers()
 
-        existing = self.find_existing_master(group_label)
+        existing = self.find_existing_master(internal_id)
         if existing and cmds.objExists(existing):
-            self.masters[group_label] = existing
+            self.masters[internal_id] = existing
             _add_to_layer(layer_masters, [existing])
             return existing
 
-        base = _safe_name(_short(reference_mesh))
-        master_name = "MASTER_{}_{}".format(group_label, base)
+        master_name = "MASTER_{}".format(display_name)
 
         duplicate = cmds.duplicate(reference_mesh, rr=True)[0]
         duplicate = cmds.rename(duplicate, master_name)
@@ -565,27 +655,28 @@ class MasterManager(object):
             pass
 
         duplicate = cmds.ls(duplicate, long=True)[0]
-
-        _tag_node(duplicate, "master", group_id, reference_mesh, group_label)
+        _tag_node(duplicate, "master", group_id, internal_id, display_name)
         _add_ic_attr(duplicate, ATTR_IC_PROCESSED, True, "bool")
+        if batch_id is not None:
+            _add_ic_attr(duplicate, ATTR_IC_BATCH, batch_id, "int")
         _add_to_layer(layer_masters, [duplicate])
 
-        self.masters[group_label] = duplicate
+        self.masters[internal_id] = duplicate
         return duplicate
 
-    def replace_with_instances(self, group_label, group_meshes, group_id, keep_hidden_backups=True, delete_originals=False):
-        if group_label not in self.masters:
+    def replace_with_instances(self, internal_id, display_name, group_meshes, group_id, keep_hidden_backups=True, delete_originals=False, batch_id=None):
+        if internal_id not in self.masters:
             return [], [], []
 
-        master_path = self.masters[group_label]
+        master_path = self.masters[internal_id]
         if not cmds.objExists(master_path):
             return [], [], []
 
         _, _, instances_root, backups_root, _ = _ensure_ic_groups()
         layer_masters, layer_instances, layer_backups, _ = _ensure_ic_layers()
 
-        instances_group = _ensure_group("{}_INSTANCES".format(group_label), instances_root)
-        backups_group = _ensure_group("{}_BACKUPS".format(group_label), backups_root)
+        instances_group = _ensure_group("{}_INSTANCES".format(display_name), instances_root)
+        backups_group = _ensure_group("{}_BACKUPS".format(display_name), backups_root)
 
         instances_created = []
         backups_created = []
@@ -609,7 +700,7 @@ class MasterManager(object):
 
             try:
                 instance = cmds.instance(master_path)[0]
-                instance = cmds.rename(instance, "{}_INST_{:03d}".format(group_label, idx))
+                instance = cmds.rename(instance, "{}_INST_{:03d}".format(display_name, idx))
                 instance = cmds.parent(instance, instances_group, absolute=True)[0]
 
                 align_matrix = _compute_alignment_from_geometry(master_path, full_mesh)
@@ -625,8 +716,10 @@ class MasterManager(object):
                 except Exception:
                     pass
 
-                _tag_node(instance, "instance", group_id, master_path, group_label)
+                _tag_node(instance, "instance", group_id, internal_id, display_name)
                 _add_ic_attr(instance, ATTR_IC_PROCESSED, True, "bool")
+                if batch_id is not None:
+                    _add_ic_attr(instance, ATTR_IC_BATCH, batch_id, "int")
                 _add_to_layer(layer_instances, [instance])
                 instances_created.append(instance)
 
@@ -639,8 +732,12 @@ class MasterManager(object):
                     cmds.delete(full_mesh)
 
                 elif keep_hidden_backups:
+                    original_parent = cmds.listRelatives(full_mesh, parent=True, fullPath=True) or []
+                    original_parent = original_parent[0] if original_parent else ""
+                    original_name = _short(full_mesh)
+
                     backup = cmds.parent(full_mesh, backups_group, absolute=True)[0]
-                    backup = cmds.rename(backup, "{}_BACKUP_{:03d}".format(group_label, idx))
+                    backup = cmds.rename(backup, "{}_BACKUP_{:03d}".format(display_name, idx))
                     backup = cmds.ls(backup, long=True)[0]
 
                     try:
@@ -648,8 +745,12 @@ class MasterManager(object):
                     except Exception:
                         pass
 
-                    _tag_node(backup, "backup", group_id, master_path, group_label)
+                    _tag_node(backup, "backup", group_id, internal_id, display_name)
                     _add_ic_attr(backup, ATTR_IC_PROCESSED, True, "bool")
+                    _add_ic_attr(backup, ATTR_IC_ORIG_PARENT, original_parent, "string")
+                    _add_ic_attr(backup, ATTR_IC_ORIG_NAME, original_name, "string")
+                    if batch_id is not None:
+                        _add_ic_attr(backup, ATTR_IC_BATCH, batch_id, "int")
                     _add_to_layer(layer_backups, [backup])
                     backups_created.append(backup)
 
@@ -659,8 +760,10 @@ class MasterManager(object):
                     except Exception:
                         pass
 
-                    _tag_node(full_mesh, "original_visible", group_id, master_path, group_label)
+                    _tag_node(full_mesh, "original_visible", group_id, internal_id, display_name)
                     _add_ic_attr(full_mesh, ATTR_IC_PROCESSED, True, "bool")
+                    if batch_id is not None:
+                        _add_ic_attr(full_mesh, ATTR_IC_BATCH, batch_id, "int")
                     _add_to_layer(layer_backups, [full_mesh])
                     originals_visible.append(full_mesh)
 
@@ -681,6 +784,9 @@ class MasterManager(object):
         return instances_created, backups_created, originals_visible
 
 
+# ------------------------------------------------------------
+# Core cleaner
+# ------------------------------------------------------------
 class InstanceCleaner(object):
     def __init__(self):
         self.master_manager = MasterManager()
@@ -689,6 +795,23 @@ class InstanceCleaner(object):
         self.groups_similar = {}
         self.uniques = []
         self.validated_groups = {}
+        self.last_process_batch = None
+        self._batch_counter = 0
+
+    def _all_ic_meshes(self):
+        if not cmds.objExists(ROOT_GROUP):
+            return []
+        root = cmds.ls(ROOT_GROUP, long=True)[0]
+        return _iter_mesh_transforms(root, include_ic=True)
+
+    def _existing_display_names_by_internal_id(self):
+        data = {}
+        for mesh in self._all_ic_meshes():
+            internal_id = _get_ic_attr(mesh, ATTR_IC_SOURCE, "")
+            display_name = _get_ic_attr(mesh, ATTR_IC_GROUP_NAME, "")
+            if internal_id and display_name:
+                data[internal_id] = display_name
+        return data
 
     def _append_processed_groups(self):
         if not cmds.objExists(INSTANCES_GROUP):
@@ -700,17 +823,22 @@ class InstanceCleaner(object):
 
         processed_meshes = _iter_mesh_transforms(instance_root[0], include_ic=True)
         buckets = defaultdict(list)
+        display_names = {}
 
         for mesh in processed_meshes:
-            ic_type = _get_ic_attr(mesh, ATTR_IC_TYPE, "")
-            if ic_type != "instance":
+            if _get_ic_attr(mesh, ATTR_IC_TYPE, "") != "instance":
                 continue
 
-            group_name = _get_ic_attr(mesh, ATTR_IC_GROUP_NAME, "") or "processed"
-            buckets[group_name].append(mesh)
+            internal_id = _get_ic_attr(mesh, ATTR_IC_SOURCE, "")
+            display_name = _get_ic_attr(mesh, ATTR_IC_GROUP_NAME, "") or "Processed_GRP"
+            if not internal_id:
+                continue
 
-        for group_name, meshes in buckets.items():
-            label = "{}_DONE".format(group_name)
+            buckets[internal_id].append(mesh)
+            display_names[internal_id] = display_name
+
+        for internal_id, meshes in buckets.items():
+            label = internal_id + "_DONE"
             if label in self.validated_groups:
                 continue
 
@@ -720,7 +848,8 @@ class InstanceCleaner(object):
                 "accepted": False,
                 "group_id": -1,
                 "processed": True,
-                "base_label": group_name,
+                "internal_id": internal_id,
+                "display_name": display_names.get(internal_id, "Processed_GRP"),
             }
 
     def scan(self, root=None, use_shape_hash=True, hash_tol=0.05, progress_cb=None):
@@ -768,27 +897,34 @@ class InstanceCleaner(object):
             self.uniques = []
 
         self.validated_groups = {}
+
+        existing_names = self._existing_display_names_by_internal_id()
+        used_display_names = set(existing_names.values())
         gid = 0
 
-        for label, meshes in self.groups_exact.items():
-            self.validated_groups[label] = {
+        for internal_id, meshes in self.groups_exact.items():
+            display_name = existing_names.get(internal_id) or _make_clean_group_name(meshes[0], used_display_names)
+            self.validated_groups[internal_id] = {
                 "meshes": meshes,
                 "type": MATCH_EXACT,
                 "accepted": True,
                 "group_id": gid,
                 "processed": False,
-                "base_label": label,
+                "internal_id": internal_id,
+                "display_name": display_name,
             }
             gid += 1
 
-        for label, meshes in self.groups_similar.items():
-            self.validated_groups[label] = {
+        for internal_id, meshes in self.groups_similar.items():
+            display_name = existing_names.get(internal_id) or _make_clean_group_name(meshes[0], used_display_names)
+            self.validated_groups[internal_id] = {
                 "meshes": meshes,
                 "type": MATCH_SIMILAR,
                 "accepted": None,
                 "group_id": gid,
                 "processed": False,
-                "base_label": label,
+                "internal_id": internal_id,
+                "display_name": display_name,
             }
             gid += 1
 
@@ -810,38 +946,51 @@ class InstanceCleaner(object):
         if meshes:
             cmds.select(meshes, r=True)
 
-    def _base_label(self, label):
-        if label not in self.validated_groups:
-            return label
-        return self.validated_groups[label].get("base_label", label)
+    def _info(self, label):
+        return self.validated_groups.get(label, {})
+
+    def _internal_id(self, label):
+        return self._info(label).get("internal_id", label)
 
     def select_master(self, label):
-        base_label = self._base_label(label)
-        masters = cmds.ls("MASTER_{}*".format(base_label), long=True) or []
-        if masters:
-            cmds.select(masters, r=True)
+        internal_id = self._internal_id(label)
+        found = []
+
+        if cmds.objExists(MASTERS_GROUP):
+            root = cmds.ls(MASTERS_GROUP, long=True)[0]
+            meshes = _iter_mesh_transforms(root, include_ic=True)
+            for mesh in meshes:
+                if _get_ic_attr(mesh, ATTR_IC_TYPE, "") == "master" and _get_ic_attr(mesh, ATTR_IC_SOURCE, "") == internal_id:
+                    found.append(mesh)
+
+        if found:
+            cmds.select(found, r=True)
 
     def select_instances(self, label):
-        base_label = self._base_label(label)
+        internal_id = self._internal_id(label)
         found = []
+
         if cmds.objExists(INSTANCES_GROUP):
             root = cmds.ls(INSTANCES_GROUP, long=True)[0]
             meshes = _iter_mesh_transforms(root, include_ic=True)
             for mesh in meshes:
-                if _get_ic_attr(mesh, ATTR_IC_TYPE, "") == "instance" and _get_ic_attr(mesh, ATTR_IC_GROUP_NAME, "") == base_label:
+                if _get_ic_attr(mesh, ATTR_IC_TYPE, "") == "instance" and _get_ic_attr(mesh, ATTR_IC_SOURCE, "") == internal_id:
                     found.append(mesh)
+
         if found:
             cmds.select(found, r=True)
 
     def select_backups(self, label):
-        base_label = self._base_label(label)
+        internal_id = self._internal_id(label)
         found = []
+
         if cmds.objExists(BACKUP_GROUP):
             root = cmds.ls(BACKUP_GROUP, long=True)[0]
             meshes = _iter_mesh_transforms(root, include_ic=True)
             for mesh in meshes:
-                if _get_ic_attr(mesh, ATTR_IC_TYPE, "") == "backup" and _get_ic_attr(mesh, ATTR_IC_GROUP_NAME, "") == base_label:
+                if _get_ic_attr(mesh, ATTR_IC_TYPE, "") == "backup" and _get_ic_attr(mesh, ATTR_IC_SOURCE, "") == internal_id:
                     found.append(mesh)
+
         if found:
             cmds.select(found, r=True)
 
@@ -849,7 +998,10 @@ class InstanceCleaner(object):
         masters = []
         if cmds.objExists(MASTERS_GROUP):
             root = cmds.ls(MASTERS_GROUP, long=True)[0]
-            masters = _iter_mesh_transforms(root, include_ic=True)
+            meshes = _iter_mesh_transforms(root, include_ic=True)
+            for mesh in meshes:
+                if _get_ic_attr(mesh, ATTR_IC_TYPE, "") == "master":
+                    masters.append(mesh)
         if masters:
             cmds.select(masters, r=True)
         return len(masters)
@@ -875,11 +1027,9 @@ class InstanceCleaner(object):
         count = len(masters)
         cols = max(1, int(math.ceil(math.sqrt(count))))
 
-        centers = []
         sizes = []
         for m in masters:
-            c, s = self._bbox_dims_center(m)
-            centers.append(c)
+            _, s = self._bbox_dims_center(m)
             sizes.append(s)
 
         col_widths = [0.0] * cols
@@ -947,7 +1097,7 @@ class InstanceCleaner(object):
             except Exception:
                 pass
 
-    def create_masters_and_replace(self, master_spacing=200.0, keep_hidden_backups=True, delete_originals=False):
+    def create_masters_and_replace(self, master_spacing=10.0, keep_hidden_backups=True, delete_originals=False):
         accepted = {
             label: info
             for label, info in self.validated_groups.items()
@@ -957,6 +1107,10 @@ class InstanceCleaner(object):
         if not accepted:
             cmds.warning("[IC] No accepted group.")
             return {}
+
+        self._batch_counter += 1
+        batch_id = self._batch_counter
+        self.last_process_batch = batch_id
 
         stats = {
             "masters_created": 0,
@@ -979,27 +1133,33 @@ class InstanceCleaner(object):
                     stats["groups_skipped"] += 1
                     continue
 
+                internal_id = info["internal_id"]
+                display_name = info["display_name"]
                 group_id = info["group_id"]
                 reference_mesh = meshes[0]
-                existed = self.master_manager.find_existing_master(label)
+                existed = self.master_manager.find_existing_master(internal_id)
 
                 self.master_manager.create_master(
-                    label,
+                    internal_id,
+                    display_name,
                     reference_mesh,
                     group_id,
                     spacing=master_spacing,
                     index=process_index,
+                    batch_id=None if existed else batch_id,
                 )
 
                 if not existed:
                     stats["masters_created"] += 1
 
                 instances, backups, originals = self.master_manager.replace_with_instances(
-                    label,
+                    internal_id,
+                    display_name,
                     meshes,
                     group_id,
                     keep_hidden_backups=keep_hidden_backups,
                     delete_originals=delete_originals,
+                    batch_id=batch_id,
                 )
 
                 stats["instances_created"] += len(instances)
@@ -1008,6 +1168,97 @@ class InstanceCleaner(object):
                 process_index += 1
 
         return stats
+
+    def cancel_last_process(self):
+        batch_id = self.last_process_batch
+        if batch_id is None:
+            cmds.warning("[IC] No process batch to cancel.")
+            return {"restored": 0, "deleted_instances": 0, "deleted_masters": 0}
+
+        restored = []
+        deleted_instances = 0
+        deleted_masters = 0
+
+        with UndoChunk("InstanceCleanerCancelProcess"):
+            all_ic_meshes = self._all_ic_meshes()
+
+            for node in list(all_ic_meshes):
+                if not cmds.objExists(node):
+                    continue
+                if int(_get_ic_attr(node, ATTR_IC_BATCH, -1) or -1) != int(batch_id):
+                    continue
+                if _get_ic_attr(node, ATTR_IC_TYPE, "") == "instance":
+                    try:
+                        cmds.delete(node)
+                        deleted_instances += 1
+                    except Exception:
+                        pass
+
+            if cmds.objExists(BACKUP_GROUP):
+                root = cmds.ls(BACKUP_GROUP, long=True)[0]
+                backups = _iter_mesh_transforms(root, include_ic=True)
+
+                for backup in backups:
+                    if not cmds.objExists(backup):
+                        continue
+                    if int(_get_ic_attr(backup, ATTR_IC_BATCH, -1) or -1) != int(batch_id):
+                        continue
+                    if _get_ic_attr(backup, ATTR_IC_TYPE, "") != "backup":
+                        continue
+
+                    original_parent = _get_ic_attr(backup, ATTR_IC_ORIG_PARENT, "")
+                    original_name = _get_ic_attr(backup, ATTR_IC_ORIG_NAME, _short(backup))
+
+                    _remove_from_display_layers([backup])
+
+                    try:
+                        if original_parent and cmds.objExists(original_parent):
+                            backup = cmds.parent(backup, original_parent, absolute=True)[0]
+                        else:
+                            backup = cmds.parent(backup, world=True)[0]
+                    except Exception:
+                        pass
+
+                    try:
+                        backup = cmds.rename(backup, original_name)
+                    except Exception:
+                        pass
+
+                    backup = cmds.ls(backup, long=True)[0]
+
+                    try:
+                        cmds.setAttr(backup + ".visibility", 1)
+                    except Exception:
+                        pass
+
+                    _clear_ic_attrs(backup)
+                    restored.append(backup)
+
+            if cmds.objExists(MASTERS_GROUP):
+                root = cmds.ls(MASTERS_GROUP, long=True)[0]
+                masters = _iter_mesh_transforms(root, include_ic=True)
+
+                for master in masters:
+                    if not cmds.objExists(master):
+                        continue
+                    if int(_get_ic_attr(master, ATTR_IC_BATCH, -1) or -1) != int(batch_id):
+                        continue
+                    if _get_ic_attr(master, ATTR_IC_TYPE, "") != "master":
+                        continue
+                    try:
+                        cmds.delete(master)
+                        deleted_masters += 1
+                    except Exception:
+                        pass
+
+            try:
+                if restored:
+                    cmds.select(restored, r=True)
+            except Exception:
+                pass
+
+        self.last_process_batch = None
+        return {"restored": len(restored), "deleted_instances": deleted_instances, "deleted_masters": deleted_masters}
 
     def convert_instances_to_geometry(self):
         if not cmds.objExists(INSTANCES_GROUP):
@@ -1033,7 +1284,8 @@ class InstanceCleaner(object):
 
                 try:
                     matrix = _get_world_matrix(inst)
-                    new_name = "GEO_{:03d}_{}".format(idx, _safe_name(_short(inst)))
+                    display_name = _get_ic_attr(inst, ATTR_IC_GROUP_NAME, "Converted")
+                    new_name = "GEO_{:03d}_{}".format(idx, _safe_name(display_name))
                     geo = cmds.duplicate(inst, rr=True, name=new_name)[0]
                     geo = cmds.parent(geo, converted_root, absolute=True)[0]
                     _apply_world_matrix(geo, matrix)
@@ -1073,6 +1325,9 @@ class InstanceCleaner(object):
         }
 
 
+# ------------------------------------------------------------
+# UI widgets
+# ------------------------------------------------------------
 class ColorBtn(QPushButton):
     def __init__(self, text="", tip="", bg="#2d2d2d", fg="#a0a0a0", w=None, h=28, parent=None):
         super(ColorBtn, self).__init__(text, parent)
@@ -1154,6 +1409,9 @@ class ParamSlider(QWidget):
 
 
 class GroupItem(QWidget):
+    def __init__(self, *args, **kwargs):
+        super(GroupItem, self).__init__(*args, **kwargs)
+        self.setAttribute(Qt.WA_StyledBackground, True)
     if PYSIDE_VERSION == 6:
         accept_clicked = Signal(str)
         reject_clicked = Signal(str)
@@ -1171,6 +1429,8 @@ class GroupItem(QWidget):
 
     def __init__(self, label, info, parent=None):
         super(GroupItem, self).__init__(parent)
+        self.setObjectName("GroupItemCard")
+        self.setAttribute(Qt.WA_StyledBackground, True)
         self.label = label
         self.info = info
         self._build()
@@ -1178,36 +1438,25 @@ class GroupItem(QWidget):
 
     def _build(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(5, 4, 5, 4)
-        layout.setSpacing(3)
+        layout.setContentsMargins(6, 5, 6, 5)
+        layout.setSpacing(4)
 
         header = QHBoxLayout()
 
-        if self.info["type"] == MATCH_EXACT:
-            badge_text = "EXACT"
-            badge_color = "#1e6e30"
-        elif self.info["type"] == MATCH_PROCESSED:
-            badge_text = "DONE"
-            badge_color = "#2a5a7a"
-        else:
-            badge_text = "CHECK"
-            badge_color = "#7a4000"
+        self.badge = QLabel("")
+        self.badge.setFixedSize(54, 18)
+        self.badge.setAlignment(Qt.AlignCenter)
 
-        badge = QLabel(badge_text)
-        badge.setFixedSize(48, 16)
-        badge.setAlignment(Qt.AlignCenter)
-        badge.setStyleSheet("background:{}; color:#e0e0e0; font-size:8px; font-weight:bold; border-radius:2px;".format(badge_color))
+        self.name_label = QLabel(self.info.get("display_name", self.label))
+        self.name_label.setStyleSheet("color:#e0e0e0; font-size:10px; font-weight:bold;")
 
-        name_label = QLabel(self.label)
-        name_label.setStyleSheet("color:#909090; font-size:10px; font-weight:bold;")
+        self.count_label = QLabel("{} copies".format(len(self.info["meshes"])))
+        self.count_label.setStyleSheet("color:#d0d0d0; font-size:9px;")
 
-        count_label = QLabel("{} copies".format(len(self.info["meshes"])))
-        count_label.setStyleSheet("color:#606060; font-size:9px;")
-
-        header.addWidget(badge)
-        header.addWidget(name_label)
+        header.addWidget(self.badge)
+        header.addWidget(self.name_label)
         header.addStretch()
-        header.addWidget(count_label)
+        header.addWidget(self.count_label)
 
         actions = QHBoxLayout()
         actions.setSpacing(3)
@@ -1237,44 +1486,61 @@ class GroupItem(QWidget):
             actions.addWidget(self.rej_btn)
 
         self.status_lbl = QLabel("")
-
         layout.addLayout(header)
         layout.addLayout(actions)
         layout.addWidget(self.status_lbl)
 
+    def _set_badge(self, text, bg, fg="#ffffff"):
+        self.badge.setText(text)
+        self.badge.setStyleSheet("background:{}; color:{}; font-size:8px; font-weight:bold; border-radius:2px;".format(bg, fg))
+
     def refresh(self):
         accepted = self.info["accepted"]
         processed = self.info.get("processed")
+        group_type = self.info.get("type")
 
         self.master_btn.setEnabled(bool(processed))
         self.instances_btn.setEnabled(bool(processed))
         self.backups_btn.setEnabled(bool(processed))
 
         if processed:
+            self._set_badge("DONE", "#2a6f9e")
             self.status_lbl.setText("Processed")
-            bg, border, color = "#1e242a", "#2a3a4a", "#60a0d0"
-        elif accepted is True:
-            self.status_lbl.setText("✓ Accepted")
-            bg, border, color = "#1e2a1e", "#2a4a2a", "#50c050"
-        elif accepted is False:
-            self.status_lbl.setText("✗ Rejected")
-            bg, border, color = "#2a1e1e", "#4a2a2a", "#c05050"
-        else:
+            bg, border, color = "#102638", "#2a6f9e", "#80c0ff"
+        elif group_type == MATCH_SIMILAR:
+            self._set_badge("CHECK", "#a05a00")
             self.status_lbl.setText("Check")
-            bg, border, color = "#232323", "#2e2e2e", "#707070"
+            bg, border, color = "#3a2106", "#a05a00", "#ffb060"
+        elif accepted is True:
+            self._set_badge("EXACT", "#1e7a35")
+            self.status_lbl.setText("✓ Accepted")
+            bg, border, color = "#102c16", "#1e7a35", "#70ff90"
+        elif accepted is False:
+            self._set_badge("REJECT", "#7a2424")
+            self.status_lbl.setText("✗ Rejected")
+            bg, border, color = "#321515", "#7a2424", "#ff8080"
+        else:
+            self._set_badge("WAIT", "#555555")
+            self.status_lbl.setText("Waiting")
+            bg, border, color = "#202020", "#444444", "#aaaaaa"
 
         self.status_lbl.setStyleSheet("color:{}; font-size:8px;".format(color))
-        self.setStyleSheet("QWidget {{ background:{}; border:1px solid {}; border-radius:3px; }}".format(bg, border))
+        self.setStyleSheet(
+            "#GroupItemCard {{ background-color:{}; border:1px solid {}; border-radius:4px; }}".format(bg, border)
+        )
 
 
+# ------------------------------------------------------------
+# Main UI
+# ------------------------------------------------------------
 class InstanceCleanerUI(QDialog):
     def __init__(self, parent=maya_main_window()):
         super(InstanceCleanerUI, self).__init__(parent)
         self.cleaner = InstanceCleaner()
         self.group_items = {}
-        self.setWindowTitle("Instance Cleaner V1.8")
+        self.setWindowTitle("Instance Cleaner V2.0")
         self.setMinimumWidth(460)
-        self.setMinimumHeight(580)
+        self.setMinimumHeight(0)
         self.setWindowFlags(Qt.Window | Qt.WindowCloseButtonHint)
         self._build_ui()
         self._apply_stylesheet()
@@ -1302,9 +1568,7 @@ class InstanceCleanerUI(QDialog):
         main.setContentsMargins(8, 8, 8, 8)
         main.setSpacing(6)
 
-        title = QLabel("⚡ INSTANCE CLEANER")
-        title.setStyleSheet("color:#d32f2f; font-size:14px; font-weight:bold; padding-bottom:4px;")
-        main.addWidget(title)
+        
 
         main.addWidget(SectionLabel("SCAN"))
 
@@ -1333,19 +1597,17 @@ class InstanceCleanerUI(QDialog):
         bulk = QHBoxLayout()
         accept_all_btn = ColorBtn("ACCEPT ALL", "", "#1a3a1a", "#60d060", h=24)
         reject_all_btn = ColorBtn("REJECT ALL", "", "#3a1a1a", "#d06060", h=24)
-        select_masters_btn = ColorBtn("SELECT ALL MASTERS", "", "#253525", "#90d090", h=24)
-        organize_masters_btn = ColorBtn("ORGANIZE MASTERS", "", "#2a2a3a", "#a0c0ff", h=24)
-
         accept_all_btn.clicked.connect(self.do_accept_all)
         reject_all_btn.clicked.connect(self.do_reject_all)
-        select_masters_btn.clicked.connect(self.do_select_all_masters)
-        organize_masters_btn.clicked.connect(self.do_organize_masters)
-
         bulk.addWidget(accept_all_btn)
         bulk.addWidget(reject_all_btn)
         main.addLayout(bulk)
 
         master_tools = QHBoxLayout()
+        select_masters_btn = ColorBtn("SELECT ALL MASTERS", "", "#253525", "#90d090", h=24)
+        organize_masters_btn = ColorBtn("ORGANIZE MASTERS", "", "#2a2a3a", "#a0c0ff", h=24)
+        select_masters_btn.clicked.connect(self.do_select_all_masters)
+        organize_masters_btn.clicked.connect(self.do_organize_masters)
         master_tools.addWidget(select_masters_btn)
         master_tools.addWidget(organize_masters_btn)
         main.addLayout(master_tools)
@@ -1353,46 +1615,44 @@ class InstanceCleanerUI(QDialog):
         filter_row = QHBoxLayout()
         filter_label = QLabel("Filter")
         filter_label.setFixedWidth(50)
-
         self.filter_combo = QComboBox()
         self.filter_combo.addItems(["All", "Exact", "Check", "Accepted", "Rejected", "Processed"])
         self.filter_combo.currentIndexChanged.connect(self.refresh_group_list)
-
         filter_row.addWidget(filter_label)
         filter_row.addWidget(self.filter_combo)
         main.addLayout(filter_row)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
+        self.groups_scroll = QScrollArea()
+        self.groups_scroll.setWidgetResizable(True)
+        self.groups_scroll.setFrameShape(QFrame.NoFrame)
 
         self.groups_container = QWidget()
         self.groups_layout = QVBoxLayout(self.groups_container)
         self.groups_layout.setContentsMargins(0, 0, 0, 0)
         self.groups_layout.setSpacing(3)
+
         self.groups_layout.addStretch()
 
-        scroll.setWidget(self.groups_container)
-        main.addWidget(scroll, 1)
+        self.groups_scroll.setWidget(self.groups_container)
+        self.groups_scroll.setVisible(False)
+        main.addWidget(self.groups_scroll)
 
         main.addWidget(SectionLabel("PROCESS"))
 
         self.master_spacing_spin = QDoubleSpinBox()
         self.master_spacing_spin.setRange(0, 5000)
-        self.master_spacing_spin.setValue(10)
+        self.master_spacing_spin.setValue(20)
         self.master_spacing_spin.setDecimals(0)
         self.master_spacing_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
         main.addLayout(self._row("Spacing", self.master_spacing_spin))
 
         process_row = QHBoxLayout()
         process_btn = ColorBtn("PROCESS ACCEPTED", "", "#1e3a1a", "#80e060", h=34)
-        undo_btn = ColorBtn("UNDO PROCESS", "", "#3a2a1a", "#e0a060", h=34)
-
+        cancel_btn = ColorBtn("CANCEL PROCESS", "Restore before last Process Accepted", "#3a2a1a", "#e0a060", h=34)
         process_btn.clicked.connect(self.do_process)
-        undo_btn.clicked.connect(self.do_undo_process)
-
+        cancel_btn.clicked.connect(self.do_cancel_process)
         process_row.addWidget(process_btn)
-        process_row.addWidget(undo_btn)
+        process_row.addWidget(cancel_btn)
         main.addLayout(process_row)
 
         convert_btn = ColorBtn("CONVERT INSTANCES TO GEO", "", "#3a1e3a", "#e080e0", h=34)
@@ -1420,7 +1680,12 @@ class InstanceCleanerUI(QDialog):
             QApplication.processEvents()
 
         self.progress_bar.setValue(0)
-        group_count = self.cleaner.scan(root=root, use_shape_hash=True, hash_tol=self.hash_tol_slider.value(), progress_cb=progress_cb)
+        group_count = self.cleaner.scan(
+            root=root,
+            use_shape_hash=True,
+            hash_tol=self.hash_tol_slider.value(),
+            progress_cb=progress_cb,
+        )
         self.progress_bar.setValue(100)
 
         report = self.cleaner.get_report()
@@ -1436,6 +1701,7 @@ class InstanceCleanerUI(QDialog):
         self.group_items = {}
         filter_text = self.filter_combo.currentText()
         insert_index = 0
+        has_items = False
 
         for label, info in self.cleaner.validated_groups.items():
             if filter_text == "Exact" and info["type"] != MATCH_EXACT:
@@ -1449,6 +1715,7 @@ class InstanceCleanerUI(QDialog):
             if filter_text == "Processed" and not info.get("processed"):
                 continue
 
+            has_items = True
             item_widget = GroupItem(label, info)
             item_widget.accept_clicked.connect(self.on_accept_group)
             item_widget.reject_clicked.connect(self.on_reject_group)
@@ -1460,6 +1727,8 @@ class InstanceCleanerUI(QDialog):
             self.groups_layout.insertWidget(insert_index, item_widget)
             self.group_items[label] = item_widget
             insert_index += 1
+
+        self.groups_scroll.setVisible(has_items)
 
     def _refresh_item(self, label):
         if label in self.group_items:
@@ -1505,12 +1774,30 @@ class InstanceCleanerUI(QDialog):
         self.status_label.setText("Organized {} masters".format(stats.get("organized", 0)))
 
     def do_process(self):
-        stats = self.cleaner.create_masters_and_replace(master_spacing=self.master_spacing_spin.value(), keep_hidden_backups=True, delete_originals=False)
+        stats = self.cleaner.create_masters_and_replace(
+            master_spacing=self.master_spacing_spin.value(),
+            keep_hidden_backups=True,
+            delete_originals=False,
+        )
         if not stats:
             return
         self.status_label.setText(
             "Done | masters {} | instances {} | backups {} | skipped {}".format(
-                stats["masters_created"], stats["instances_created"], stats["backups_created"], stats["groups_skipped"]
+                stats["masters_created"],
+                stats["instances_created"],
+                stats["backups_created"],
+                stats["groups_skipped"],
+            )
+        )
+        self.do_scan()
+
+    def do_cancel_process(self):
+        stats = self.cleaner.cancel_last_process()
+        self.status_label.setText(
+            "Canceled | restored {} | deleted inst {} | deleted masters {}".format(
+                stats.get("restored", 0),
+                stats.get("deleted_instances", 0),
+                stats.get("deleted_masters", 0),
             )
         )
         self.do_scan()
@@ -1520,14 +1807,6 @@ class InstanceCleanerUI(QDialog):
         self.status_label.setText("Converted {} instances to geo".format(stats.get("converted", 0)))
         self.do_scan()
 
-    def do_undo_process(self):
-        try:
-            cmds.undo()
-            self.status_label.setText("Undo done | refreshing scan...")
-            self.do_scan()
-        except Exception as error:
-            cmds.warning("[IC] Undo failed: {}".format(error))
-
     def closeEvent(self, event):
         try:
             self.cleaner.exit_isolate()
@@ -1536,6 +1815,9 @@ class InstanceCleanerUI(QDialog):
         super(InstanceCleanerUI, self).closeEvent(event)
 
 
+# ------------------------------------------------------------
+# Launch
+# ------------------------------------------------------------
 def launch():
     global _instance_cleaner_ui
     try:

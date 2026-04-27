@@ -1539,12 +1539,13 @@ class InstanceCleanerUI(QDialog):
         self.cleaner = InstanceCleaner()
         self.group_items = {}
         self.setWindowTitle("Instance Cleaner V2.0")
-        self.setMinimumWidth(980)
-        self.resize(1180, 760)
-        self.setMinimumHeight(0)
+        self.setMinimumWidth(720)
+        self.resize(980, 520)
+        self.setMinimumHeight(320)
         self.setWindowFlags(Qt.Window | Qt.WindowCloseButtonHint)
         self._build_ui()
         self._apply_stylesheet()
+        self._update_window_compactness(0)
 
     def _apply_stylesheet(self):
         self.setStyleSheet(
@@ -1575,14 +1576,17 @@ class InstanceCleanerUI(QDialog):
         left.setSpacing(6)
 
         right_col = QWidget()
-        right_col.setMinimumWidth(420)
-        right_col.setMaximumWidth(540)
+        right_col.setMinimumWidth(260)
+        right_col.setMaximumWidth(16777215)
         right = QVBoxLayout(right_col)
         right.setContentsMargins(0, 0, 0, 0)
         right.setSpacing(6)
 
         root.addWidget(left_col, 3)
         root.addWidget(right_col, 2)
+
+        self.left_col = left_col
+        self.right_col = right_col
 
         left.addWidget(SectionLabel("SCAN"))
 
@@ -1751,6 +1755,26 @@ class InstanceCleanerUI(QDialog):
             insert_index += 1
 
         self.groups_empty.setVisible(not has_items)
+        self._update_window_compactness(insert_index)
+
+
+    def _update_window_compactness(self, visible_count):
+        compact_mode = visible_count == 0
+
+        if compact_mode:
+            self.right_col.setMinimumWidth(240)
+            self.right_col.setMaximumWidth(300)
+        else:
+            self.right_col.setMinimumWidth(340)
+            self.right_col.setMaximumWidth(16777215)
+
+        base_height = 360
+        row_height = 66
+        target_height = base_height + min(max(visible_count, 0), 6) * row_height
+        target_height = max(380, min(target_height, 760))
+
+        current_width = self.width()
+        self.resize(current_width, target_height)
 
     def _refresh_item(self, label):
         if label in self.group_items:

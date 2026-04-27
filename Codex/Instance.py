@@ -1539,7 +1539,8 @@ class InstanceCleanerUI(QDialog):
         self.cleaner = InstanceCleaner()
         self.group_items = {}
         self.setWindowTitle("Instance Cleaner V2.0")
-        self.setMinimumWidth(460)
+        self.setMinimumWidth(980)
+        self.resize(1180, 760)
         self.setMinimumHeight(0)
         self.setWindowFlags(Qt.Window | Qt.WindowCloseButtonHint)
         self._build_ui()
@@ -1564,35 +1565,48 @@ class InstanceCleanerUI(QDialog):
         )
 
     def _build_ui(self):
-        main = QVBoxLayout(self)
-        main.setContentsMargins(8, 8, 8, 8)
-        main.setSpacing(6)
+        root = QHBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(10)
 
-        
+        left_col = QWidget()
+        left = QVBoxLayout(left_col)
+        left.setContentsMargins(0, 0, 0, 0)
+        left.setSpacing(6)
 
-        main.addWidget(SectionLabel("SCAN"))
+        right_col = QWidget()
+        right_col.setMinimumWidth(420)
+        right_col.setMaximumWidth(540)
+        right = QVBoxLayout(right_col)
+        right.setContentsMargins(0, 0, 0, 0)
+        right.setSpacing(6)
+
+        root.addWidget(left_col, 3)
+        root.addWidget(right_col, 2)
+
+        left.addWidget(SectionLabel("SCAN"))
 
         self.scan_mode_combo = QComboBox()
         self.scan_mode_combo.addItems(["Selection", "Scene"])
-        main.addLayout(self._row("Source", self.scan_mode_combo))
+        left.addLayout(self._row("Source", self.scan_mode_combo))
 
         self.hash_tol_slider = ParamSlider("Hash tol", 0.0001, 0.05, 0.05, 4, 90)
-        main.addWidget(self.hash_tol_slider)
+        left.addWidget(self.hash_tol_slider)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setValue(0)
         self.progress_bar.setFixedHeight(16)
-        main.addWidget(self.progress_bar)
+        left.addWidget(self.progress_bar)
 
         self.status_label = QLabel("Ready")
         self.status_label.setStyleSheet("color:#505050; font-size:9px;")
-        main.addWidget(self.status_label)
+        left.addWidget(self.status_label)
 
         scan_btn = ColorBtn("REFRESH SCAN", "Rescan scene or selection", "#1a2a3a", "#60a0d0", h=32)
         scan_btn.clicked.connect(self.do_scan)
-        main.addWidget(scan_btn)
+        left.addWidget(scan_btn)
 
-        main.addWidget(SectionLabel("GROUPS"))
+        left.addWidget(SectionLabel("GROUPS"))
 
         bulk = QHBoxLayout()
         accept_all_btn = ColorBtn("ACCEPT ALL", "", "#1a3a1a", "#60d060", h=24)
@@ -1601,7 +1615,7 @@ class InstanceCleanerUI(QDialog):
         reject_all_btn.clicked.connect(self.do_reject_all)
         bulk.addWidget(accept_all_btn)
         bulk.addWidget(reject_all_btn)
-        main.addLayout(bulk)
+        left.addLayout(bulk)
 
         master_tools = QHBoxLayout()
         select_masters_btn = ColorBtn("SELECT ALL MASTERS", "", "#253525", "#90d090", h=24)
@@ -1610,7 +1624,32 @@ class InstanceCleanerUI(QDialog):
         organize_masters_btn.clicked.connect(self.do_organize_masters)
         master_tools.addWidget(select_masters_btn)
         master_tools.addWidget(organize_masters_btn)
-        main.addLayout(master_tools)
+        left.addLayout(master_tools)
+
+        left.addWidget(SectionLabel("PROCESS"))
+
+        self.master_spacing_spin = QDoubleSpinBox()
+        self.master_spacing_spin.setRange(0, 5000)
+        self.master_spacing_spin.setValue(20)
+        self.master_spacing_spin.setDecimals(0)
+        self.master_spacing_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        left.addLayout(self._row("Spacing", self.master_spacing_spin))
+
+        process_row = QHBoxLayout()
+        process_btn = ColorBtn("PROCESS ACCEPTED", "", "#1e3a1a", "#80e060", h=34)
+        cancel_btn = ColorBtn("CANCEL PROCESS", "Restore before last Process Accepted", "#3a2a1a", "#e0a060", h=34)
+        process_btn.clicked.connect(self.do_process)
+        cancel_btn.clicked.connect(self.do_cancel_process)
+        process_row.addWidget(process_btn)
+        process_row.addWidget(cancel_btn)
+        left.addLayout(process_row)
+
+        convert_btn = ColorBtn("CONVERT INSTANCES TO GEO", "", "#3a1e3a", "#e080e0", h=34)
+        convert_btn.clicked.connect(self.do_convert_instances)
+        left.addWidget(convert_btn)
+        left.addStretch()
+
+        right.addWidget(SectionLabel("GROUP LIST"))
 
         filter_row = QHBoxLayout()
         filter_label = QLabel("Filter")
@@ -1620,7 +1659,7 @@ class InstanceCleanerUI(QDialog):
         self.filter_combo.currentIndexChanged.connect(self.refresh_group_list)
         filter_row.addWidget(filter_label)
         filter_row.addWidget(self.filter_combo)
-        main.addLayout(filter_row)
+        right.addLayout(filter_row)
 
         self.groups_scroll = QScrollArea()
         self.groups_scroll.setWidgetResizable(True)
@@ -1629,35 +1668,16 @@ class InstanceCleanerUI(QDialog):
         self.groups_container = QWidget()
         self.groups_layout = QVBoxLayout(self.groups_container)
         self.groups_layout.setContentsMargins(0, 0, 0, 0)
-        self.groups_layout.setSpacing(3)
+        self.groups_layout.setSpacing(4)
 
+        self.groups_empty = QLabel("No groups yet.\nClick REFRESH SCAN to populate the list.")
+        self.groups_empty.setAlignment(Qt.AlignCenter)
+        self.groups_empty.setStyleSheet("color:#606060; font-size:10px;")
+        self.groups_layout.addWidget(self.groups_empty)
         self.groups_layout.addStretch()
 
         self.groups_scroll.setWidget(self.groups_container)
-        self.groups_scroll.setVisible(False)
-        main.addWidget(self.groups_scroll)
-
-        main.addWidget(SectionLabel("PROCESS"))
-
-        self.master_spacing_spin = QDoubleSpinBox()
-        self.master_spacing_spin.setRange(0, 5000)
-        self.master_spacing_spin.setValue(20)
-        self.master_spacing_spin.setDecimals(0)
-        self.master_spacing_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
-        main.addLayout(self._row("Spacing", self.master_spacing_spin))
-
-        process_row = QHBoxLayout()
-        process_btn = ColorBtn("PROCESS ACCEPTED", "", "#1e3a1a", "#80e060", h=34)
-        cancel_btn = ColorBtn("CANCEL PROCESS", "Restore before last Process Accepted", "#3a2a1a", "#e0a060", h=34)
-        process_btn.clicked.connect(self.do_process)
-        cancel_btn.clicked.connect(self.do_cancel_process)
-        process_row.addWidget(process_btn)
-        process_row.addWidget(cancel_btn)
-        main.addLayout(process_row)
-
-        convert_btn = ColorBtn("CONVERT INSTANCES TO GEO", "", "#3a1e3a", "#e080e0", h=34)
-        convert_btn.clicked.connect(self.do_convert_instances)
-        main.addWidget(convert_btn)
+        right.addWidget(self.groups_scroll)
 
     def _row(self, label_text, widget, label_width=90):
         row = QHBoxLayout()
@@ -1693,10 +1713,12 @@ class InstanceCleanerUI(QDialog):
         self.refresh_group_list()
 
     def refresh_group_list(self):
-        while self.groups_layout.count() > 1:
-            item = self.groups_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+        for i in range(self.groups_layout.count() - 1, -1, -1):
+            item = self.groups_layout.itemAt(i)
+            widget = item.widget()
+            if isinstance(widget, GroupItem):
+                self.groups_layout.takeAt(i)
+                widget.deleteLater()
 
         self.group_items = {}
         filter_text = self.filter_combo.currentText()
@@ -1728,7 +1750,7 @@ class InstanceCleanerUI(QDialog):
             self.group_items[label] = item_widget
             insert_index += 1
 
-        self.groups_scroll.setVisible(has_items)
+        self.groups_empty.setVisible(not has_items)
 
     def _refresh_item(self, label):
         if label in self.group_items:

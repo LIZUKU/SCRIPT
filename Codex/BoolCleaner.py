@@ -827,6 +827,7 @@ class BevelSnapWeldCleaner:
         self.snap_map = []
         self.dag_path = None
         self.component = None
+        self.original_positions = {}
 
         selected_faces = mc.filterExpand(sm=34)
 
@@ -850,7 +851,16 @@ class BevelSnapWeldCleaner:
             mc.warning("No valid bevel snap points found.")
             return
 
+        self.cache_original_positions()
         self.is_valid = True
+
+    def cache_original_positions(self):
+        vtx_it = om2.MItMeshVertex(self.dag_path)
+        mobile_ids = {item["mobile_id"] for item in self.snap_map}
+
+        for v_id in mobile_ids:
+            vtx_it.setIndex(v_id)
+            self.original_positions[v_id] = vtx_it.position(om2.MSpace.kWorld)
 
     def get_selection_border_vertices(self):
         face_it = om2.MItMeshPolygon(self.dag_path, self.component)
@@ -916,17 +926,14 @@ class BevelSnapWeldCleaner:
         if not self.is_valid:
             return
 
-        if self.is_previewing:
-            mc.undo()
-            self.is_previewing = False
-
         threshold = getThresholdValue()
 
-        if threshold <= 0.0001:
-            return
+        self.reset_preview_positions()
 
-        mc.undoInfo(openChunk=True)
-        self.is_previewing = True
+        if threshold <= 0.0001:
+            self.is_previewing = False
+            mc.refresh(f=True)
+            return
 
         for item in self.snap_map:
             if item["dist"] <= threshold:
@@ -934,13 +941,20 @@ class BevelSnapWeldCleaner:
                 p = item["target_pos"]
                 mc.xform(v_name, ws=True, t=(p.x, p.y, p.z))
 
-        mc.undoInfo(closeChunk=True)
+        self.is_previewing = True
         mc.refresh(f=True)
 
+    def reset_preview_positions(self):
+        if not self.original_positions:
+            return
+
+        for v_id, p in self.original_positions.items():
+            v_name = "{}.vtx[{}]".format(self.mesh_name, v_id)
+            mc.xform(v_name, ws=True, t=(p.x, p.y, p.z))
+
     def cancel(self):
-        if self.is_previewing:
-            mc.undo()
-            self.is_previewing = False
+        self.reset_preview_positions()
+        self.is_previewing = False
         self.is_valid = False
 
     def validate(self):
@@ -951,6 +965,7 @@ class BevelSnapWeldCleaner:
         threshold = getThresholdValue()
         verts_to_merge = []
 
+        self.reset_preview_positions()
         self.is_previewing = False
 
         for item in self.snap_map:
@@ -959,6 +974,7 @@ class BevelSnapWeldCleaner:
                 verts_to_merge.append("{}.vtx[{}]".format(self.mesh_name, item["target_id"]))
 
         if verts_to_merge:
+            verts_to_merge = list(dict.fromkeys(verts_to_merge))
             mc.undoInfo(openChunk=True)
             mc.polyMergeVertex(verts_to_merge, d=0.01, am=False, ch=False)
             mc.polySoftEdge(self.mesh_name, angle=30, ch=False)

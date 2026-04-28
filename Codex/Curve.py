@@ -1454,8 +1454,7 @@ def _expand_selection_to_edge_loops(edges):
 
 def edge_to_curve():
     sel = cmds.ls(sl=True, fl=True, long=True) or []
-    raw_edges = list(dict.fromkeys([c for c in sel if ".e[" in c]))
-    edges = _expand_selection_to_edge_loops(raw_edges)
+    edges = list(dict.fromkeys([c for c in sel if ".e[" in c]))
     if not edges:
         cmds.warning("[PR] Select edges.")
         return

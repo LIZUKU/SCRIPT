@@ -153,6 +153,19 @@ def extract_kit_name_from_string(name):
     return "_".join(upper)
 
 
+def extract_fallback_asset_name(name):
+    """
+    Fallback for scene nodes that don't follow ARC_*_A style naming.
+    Example:
+        OOLAN_OLD_TEMPLE_FLOOR_low -> OOLAN_OLD_TEMPLE
+    """
+    name = strip_ns(short_name(name)).upper()
+    parts = [p for p in name.split("_") if re.match(r"^[A-Z0-9]+$", p)]
+    if len(parts) < 3:
+        return None
+    return "_".join(parts[:3])
+
+
 def is_probable_texture_name(asset_name):
     """
     Avoid listing texture-like families as reused assets.
@@ -300,6 +313,8 @@ def scan_reused_assets(scan_all=True, include_kits=True, current_asset=None):
 
     for node in nodes:
         main_name = extract_main_name_from_string(node)
+        if not main_name:
+            main_name = extract_fallback_asset_name(node)
         if main_name:
             if is_probable_texture_name(main_name):
                 continue
@@ -626,7 +641,7 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
         self.kit_cb.setChecked(True)
 
         self.skip_existing_cb = QtWidgets.QCheckBox("Skip If In Scene")
-        self.skip_existing_cb.setChecked(True)
+        self.skip_existing_cb.setChecked(False)
         self.skip_existing_cb.setToolTip(
             "When enabled, loading is skipped for asset names already detected in outliner."
         )
@@ -949,7 +964,11 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
         if not nodes:
             raw_nodes = cmds.ls(type="transform", long=True) or []
             for node in raw_nodes:
-                detected = extract_main_name_from_string(node) or extract_kit_name_from_string(node)
+                detected = (
+                    extract_main_name_from_string(node)
+                    or extract_fallback_asset_name(node)
+                    or extract_kit_name_from_string(node)
+                )
                 if detected == asset_name:
                     nodes.append(node)
 
@@ -1028,7 +1047,11 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
     def _scan_asset_names_from_outliner(self):
         names = set()
         for node in cmds.ls(type="transform", long=True) or []:
-            detected = extract_main_name_from_string(node) or extract_kit_name_from_string(node)
+            detected = (
+                extract_main_name_from_string(node)
+                or extract_fallback_asset_name(node)
+                or extract_kit_name_from_string(node)
+            )
             if detected:
                 names.add(detected.upper())
         return names

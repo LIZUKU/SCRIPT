@@ -153,17 +153,40 @@ def extract_kit_name_from_string(name):
     return "_".join(upper)
 
 
+FALLBACK_STOP_TOKENS = {
+    "LOW", "MID", "HIGH", "LOD", "LOD0", "LOD1", "LOD2", "LOD3", "LOD4",
+    "GEO", "MESH", "GRP", "GROUP", "ROOT", "RIG", "CTRL", "CTRLs", "PROXY",
+    "INST", "INSTANCE", "COL", "COLLISION", "UCX", "SM", "SK", "TMP", "TEMP",
+    "V", "VER", "VERSION", "FINAL", "WIP", "BAKE", "TEXTURE", "TEXTURES"
+}
+
+
 def extract_fallback_asset_name(name):
     """
-    Fallback for scene nodes that don't follow ARC_*_A style naming.
+    Flexible fallback for scene nodes that don't follow ARC_*_A naming.
+    It keeps a variable number of prefix tokens (1..N) and drops typical
+    technical suffixes (LOD, LOW/HIGH, GEO, GRP, etc).
     Example:
-        OOLAN_OLD_TEMPLE_FLOOR_low -> OOLAN_OLD_TEMPLE
+        OOLAN_OLD_TEMPLE_FLOOR_low -> OOLAN_OLD_TEMPLE_FLOOR
     """
-    name = strip_ns(short_name(name)).upper()
-    parts = [p for p in name.split("_") if re.match(r"^[A-Z0-9]+$", p)]
-    if len(parts) < 3:
+    raw_name = strip_ns(short_name(name)).upper()
+    tokens = [t for t in raw_name.split("_") if re.match(r"^[A-Z0-9]+$", t)]
+    if not tokens:
         return None
-    return "_".join(parts[:3])
+
+    while tokens:
+        last = tokens[-1]
+        if last in FALLBACK_STOP_TOKENS or re.match(r"^(?:L|LOD)?\d+$", last):
+            tokens.pop()
+            continue
+        break
+
+    if not tokens:
+        return None
+
+    # Keep up to 5 tokens to avoid huge names while still supporting long assets.
+    core = tokens[:5]
+    return "_".join(core)
 
 
 def is_probable_texture_name(asset_name):
@@ -810,6 +833,7 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
         self.tabs.setTabText(0, "Reused Assets (0)")
         self.tabs.setTabText(1, "KIT (0)")
         self.tabs.setTabText(2, "Textures (0)")
+        self.skip_existing_cb.setChecked(False)
         self._set_status("Ready. Click Scan to analyze scene.")
 
     def _log(self, text=""):

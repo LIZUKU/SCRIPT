@@ -42,6 +42,7 @@ camera_far_clip = 10000
 
 original_parent_path = ""
 current_mesh_name = ""
+current_mesh_path = ""
 
 current_mode = "move"
 mode_start_x = 0
@@ -135,6 +136,45 @@ def clear_temp():
                 mc.delete(n)
             except Exception:
                 pass
+
+
+def update_boolean_cutter_path(path):
+    global boolean_cutter_mesh, current_mesh_name, current_mesh_path
+    path = ln(path) or ln(sn(path))
+    if not path:
+        return ""
+    boolean_cutter_mesh = path
+    current_mesh_path = path
+    current_mesh_name = sn(path)
+    return path
+
+
+def finalize_temp_drag_transform():
+    global original_parent_path
+
+    if not mc.objExists("instPicker"):
+        return update_boolean_cutter_path(boolean_cutter_mesh or current_mesh_path or current_mesh_name)
+
+    mesh_in_temp = "instPicker|instFlip|instRot|" + current_mesh_name
+    full_mesh_in_temp = "|" + mesh_in_temp
+    source = full_mesh_in_temp if mc.objExists(full_mesh_in_temp) else mesh_in_temp
+
+    if not mc.objExists(source):
+        return update_boolean_cutter_path(boolean_cutter_mesh or current_mesh_path or current_mesh_name)
+
+    if original_parent_path:
+        parented = mc.parent(source, original_parent_path) or []
+    else:
+        parented = mc.parent(source, world=True) or []
+
+    final_path = parented[0] if parented else source
+    final_path = update_boolean_cutter_path(final_path)
+
+    if final_path and mc.objExists(final_path):
+        set_flip(final_path, orientation_flip_enabled)
+        apply_visibility_for_boolean_mode(cutter=final_path)
+
+    return final_path
 
 
 def cleanup_empty():
@@ -716,7 +756,10 @@ def create_boolean(restart=True):
             if restart and AUTO_RESTART_DRAG_AFTER_BOOLEAN:
                 restart_drag_on_cutter(cutter)
 
-        return cutter
+        r = result_from_bool_node(existing_nodes[0])
+        if r:
+            boolean_result_mesh = ln(r)
+        return boolean_result_mesh or cutter
 
     if boolean_created and restart:
         return boolean_result_mesh
@@ -856,9 +899,14 @@ def plug_bool_validate_hotkey():
 
     tool_job = None
 
-    clear_temp()
+    cutter = finalize_temp_drag_transform()
 
-    create_boolean(restart=False)
+    if bool_nodes_from_cutter(cutter):
+        update_current_cutter_boolean_operation()
+    else:
+        create_boolean(restart=False)
+
+    clear_temp()
     bake_boolean_result()
 
     drag_session_active = False
@@ -985,7 +1033,7 @@ def start_drag():
 
 def on_press():
     global picked_mesh_transform, visible_mesh_shapes, camera_position, camera_far_clip
-    global original_parent_path, current_mesh_name, current_mode, mode_start_x, mode_start_y
+    global original_parent_path, current_mesh_name, current_mesh_path, current_mode, mode_start_x, mode_start_y
     global initial_scale_x, initial_scale_y, initial_scale_z, initial_rotate_y
     global hit_face, duplicate_done, orientation_flip_enabled, invert_combo_was_down
     global drag_session_active
@@ -1036,11 +1084,12 @@ def on_press():
 
     original_parent_path = "|".join(picked_mesh_transform[0].split("|")[0:-1])
     current_mesh_name = picked_mesh_transform[0].split("|")[-1]
+    current_mesh_path = picked_mesh_transform[0]
 
     drag_session_active = True
 
-    saved_rot = mc.getAttr(current_mesh_name + ".rotate")[0]
-    saved_scl = mc.getAttr(current_mesh_name + ".scale")[0]
+    saved_rot = mc.getAttr(current_mesh_path + ".rotate")[0]
+    saved_scl = mc.getAttr(current_mesh_path + ".scale")[0]
 
     mesh_shape = first_mesh_shape(picked_mesh_transform[0])
 
@@ -1060,15 +1109,15 @@ def on_press():
     px = sum(p.x for p in bottoms) / len(bottoms) if bottoms else 0.0
     pz = sum(p.z for p in bottoms) / len(bottoms) if bottoms else 0.0
 
-    wm = oma.MMatrix(mc.xform(current_mesh_name, query=True, worldSpace=True, matrix=True))
+    wm = oma.MMatrix(mc.xform(current_mesh_path, query=True, worldSpace=True, matrix=True))
     pw = oma.MPoint(px, min_y, pz) * wm
 
     mc.move(
         pw.x,
         pw.y,
         pw.z,
-        current_mesh_name + ".scalePivot",
-        current_mesh_name + ".rotatePivot",
+        current_mesh_path + ".scalePivot",
+        current_mesh_path + ".rotatePivot",
         worldSpace=True,
         absolute=True,
     )
@@ -1086,7 +1135,9 @@ def on_press():
     mc.select("instPicker", picked_mesh_transform[0])
     mc.matchTransform(position=True, rotation=True)
 
-    mc.parent(picked_mesh_transform[0], "instRot")
+    parented = mc.parent(picked_mesh_transform[0], "instRot") or []
+    if parented:
+        update_boolean_cutter_path(parented[0])
 
     mc.setAttr("instPicker.rotate", saved_rot[0], saved_rot[1], saved_rot[2])
     mc.setAttr("instFlip.rotate", 0, 0, 0)
@@ -1099,10 +1150,11 @@ def on_press():
     mc.setAttr(mesh_path + ".scaleY", saved_scl[1])
     mc.setAttr(mesh_path + ".scaleZ", saved_scl[2])
 
-    try:
-        mc.delete(constructionHistory=True)
-    except Exception:
-        pass
+    if not reuse_selected_cutter_once:
+        try:
+            mc.delete(mesh_path, constructionHistory=True)
+        except Exception:
+            pass
 
     for n in children:
         if n in visible_mesh_shapes:
@@ -1128,18 +1180,7 @@ def on_release():
     current_mode = "move"
     duplicate_done = False
 
-    if mc.objExists("instPicker"):
-        mesh_path = "instPicker|instFlip|instRot|" + current_mesh_name
-        full_mesh_path = "|instPicker|instFlip|instRot|" + current_mesh_name
-
-        if original_parent_path:
-            if mc.objExists(full_mesh_path):
-                mc.parent(full_mesh_path, original_parent_path)
-        elif mc.objExists(mesh_path):
-            mc.parent(mesh_path, world=True)
-
-    final_path = current_mesh_name if not original_parent_path else original_parent_path + "|" + current_mesh_name
-    final_path = ln(final_path) or final_path
+    final_path = finalize_temp_drag_transform()
 
     if mc.objExists(final_path):
         set_flip(final_path, orientation_flip_enabled)
@@ -1174,6 +1215,7 @@ def on_tool_changed():
     tool_job = None
 
     if drag_session_active:
+        finalize_temp_drag_transform()
         clear_temp()
         create_boolean(restart=True)
 
@@ -1374,7 +1416,7 @@ def drag_scale(vx):
 
 
 def duplicate_continue():
-    global current_mesh_name, initial_scale_x, initial_scale_y, initial_scale_z
+    global current_mesh_name, current_mesh_path, initial_scale_x, initial_scale_y, initial_scale_z
     global initial_rotate_y, hit_face, duplicate_done, boolean_cutter_mesh
 
     if not picked_mesh_transform:
@@ -1404,20 +1446,20 @@ def duplicate_continue():
     set_flip(old_path, orientation_flip_enabled)
 
     if original_parent_path:
-        mc.parent(old_path, original_parent_path)
+        old_parented = mc.parent(old_path, original_parent_path) or []
     else:
-        mc.parent(old_path, world=True)
+        old_parented = mc.parent(old_path, world=True) or []
 
-    old_cutter = ln(current_mesh_name)
+    old_cutter = ln(old_parented[0]) if old_parented else ln(current_mesh_path) or ln(current_mesh_name)
 
     if old_cutter:
         boolean_cutter_mesh = old_cutter
         create_boolean(restart=False)
         reset_state(True)
 
-    current_mesh_name = dup_name
-
-    boolean_cutter_mesh = ln("|instPicker|instFlip|instRot|" + current_mesh_name) or current_mesh_name
+    current_mesh_name = sn(dup_name)
+    current_mesh_path = ln(dup_name) or dup_name
+    boolean_cutter_mesh = ln("|instPicker|instFlip|instRot|" + current_mesh_name) or current_mesh_path
 
     set_flip(boolean_cutter_mesh, orientation_flip_enabled)
 

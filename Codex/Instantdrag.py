@@ -211,13 +211,10 @@ def on_drag_press():
     original_parent_path = "|".join(picked_mesh_transform[0].split("|")[0:-1])
     current_mesh_name = picked_mesh_transform[0].split("|")[-1]
 
-    # ------------------------------------------------------------
-    # Read persistent flip state from the picked mesh.
-    # This is the important part that prevents the next drag from
-    # re-flipping the object incorrectly.
-    # ------------------------------------------------------------
-    orientation_flip_enabled = get_mesh_flip_state(picked_mesh_transform[0])
-    current_orientation_inverted = orientation_flip_enabled
+    # Flip state is per-drag interaction only.
+    # A Ctrl+Shift flip should not persist to the next drag.
+    orientation_flip_enabled = False
+    current_orientation_inverted = False
 
     saved_rotation = mc.getAttr(current_mesh_name + ".rotate")[0]
     saved_scale = mc.getAttr(current_mesh_name + ".scale")[0]
@@ -314,20 +311,6 @@ def on_drag_release():
             if mc.objExists(full_mesh_path):
                 mc.parent(full_mesh_path, original_parent_path)
 
-    # ------------------------------------------------------------
-    # Store the current flip state back onto the real mesh
-    # after it has been unparented from the temporary rig.
-    # ------------------------------------------------------------
-    final_mesh_path = ""
-
-    if len(original_parent_path) == 0:
-        final_mesh_path = current_mesh_name
-    else:
-        final_mesh_path = original_parent_path + "|" + current_mesh_name
-
-    if mc.objExists(final_mesh_path):
-        set_mesh_flip_state(final_mesh_path, orientation_flip_enabled)
-
     clear_temp_nodes()
 
     final_path = (original_parent_path + "|" + current_mesh_name).lstrip("|")
@@ -391,12 +374,6 @@ def set_orientation_inverted(inverted):
     current_orientation_inverted = inverted
 
     apply_orientation_flip()
-
-    # Save the state immediately on the current dragged mesh too.
-    mesh_path = "instPicker|instFlip|instRot|" + current_mesh_name
-
-    if mc.objExists(mesh_path):
-        set_mesh_flip_state(mesh_path, inverted)
 
     if mc.objExists("instRot"):
         initial_rotate_y = mc.getAttr("instRot.rotateY")
@@ -556,9 +533,6 @@ def duplicate_and_continue_drag():
     duplicated_nodes = mc.duplicate(original_mesh_path, rr=True)
     duplicated_name = duplicated_nodes[0]
 
-    # Save flip state on the original before it leaves the temporary rig.
-    set_mesh_flip_state(original_mesh_path, orientation_flip_enabled)
-
     if len(original_parent_path) == 0:
         mc.parent(original_mesh_path, w=True)
     else:
@@ -575,9 +549,6 @@ def duplicate_and_continue_drag():
         initial_scale_x = mc.getAttr(mesh_path + ".scaleX")
         initial_scale_y = mc.getAttr(mesh_path + ".scaleY")
         initial_scale_z = mc.getAttr(mesh_path + ".scaleZ")
-
-        # Save flip state on the duplicated mesh too.
-        set_mesh_flip_state(mesh_path, orientation_flip_enabled)
 
     if mc.objExists("instRot"):
         initial_rotate_y = mc.getAttr("instRot.rotateY")

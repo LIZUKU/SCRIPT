@@ -283,9 +283,9 @@ def on_drag_press():
         if node in visible_mesh_shapes:
             visible_mesh_shapes.remove(node)
 
-    initial_scale_x = mc.getAttr(mesh_path + ".scaleX")
-    initial_scale_y = mc.getAttr(mesh_path + ".scaleY")
-    initial_scale_z = mc.getAttr(mesh_path + ".scaleZ")
+    initial_scale_x = mc.getAttr("instRot.scaleX")
+    initial_scale_y = mc.getAttr("instRot.scaleY")
+    initial_scale_z = mc.getAttr("instRot.scaleZ")
 
     initial_rotate_y = mc.getAttr("instRot.rotateY")
 
@@ -401,12 +401,10 @@ def switch_drag_mode(new_mode, vp_x, vp_y):
     mode_start_x = vp_x
     mode_start_y = vp_y
 
-    mesh_path = "instPicker|instFlip|instRot|" + current_mesh_name
-
-    if mc.objExists(mesh_path):
-        initial_scale_x = mc.getAttr(mesh_path + ".scaleX")
-        initial_scale_y = mc.getAttr(mesh_path + ".scaleY")
-        initial_scale_z = mc.getAttr(mesh_path + ".scaleZ")
+    if mc.objExists("instRot"):
+        initial_scale_x = mc.getAttr("instRot.scaleX")
+        initial_scale_y = mc.getAttr("instRot.scaleY")
+        initial_scale_z = mc.getAttr("instRot.scaleZ")
 
     if mc.objExists("instRot"):
         initial_rotate_y = mc.getAttr("instRot.rotateY")
@@ -495,14 +493,12 @@ def drag_scale(vp_x):
     delta_x = vp_x - mode_start_x
     factor = max(0.01, 1.0 + (delta_x * 0.01))
 
-    mesh_path = "instPicker|instFlip|instRot|" + current_mesh_name
-
-    if not mc.objExists(mesh_path):
+    if not mc.objExists("instRot"):
         return
 
-    mc.setAttr(mesh_path + ".scaleX", max(0.01, initial_scale_x * factor))
-    mc.setAttr(mesh_path + ".scaleY", max(0.01, initial_scale_y * factor))
-    mc.setAttr(mesh_path + ".scaleZ", max(0.01, initial_scale_z * factor))
+    mc.setAttr("instRot.scaleX", max(0.01, initial_scale_x * factor))
+    mc.setAttr("instRot.scaleY", max(0.01, initial_scale_y * factor))
+    mc.setAttr("instRot.scaleZ", max(0.01, initial_scale_z * factor))
 
 
 def duplicate_and_continue_drag():
@@ -543,12 +539,10 @@ def duplicate_and_continue_drag():
 
     mc.select(current_mesh_name)
 
-    mesh_path = "instPicker|instFlip|instRot|" + current_mesh_name
-
-    if mc.objExists(mesh_path):
-        initial_scale_x = mc.getAttr(mesh_path + ".scaleX")
-        initial_scale_y = mc.getAttr(mesh_path + ".scaleY")
-        initial_scale_z = mc.getAttr(mesh_path + ".scaleZ")
+    if mc.objExists("instRot"):
+        initial_scale_x = mc.getAttr("instRot.scaleX")
+        initial_scale_y = mc.getAttr("instRot.scaleY")
+        initial_scale_z = mc.getAttr("instRot.scaleZ")
 
     if mc.objExists("instRot"):
         initial_rotate_y = mc.getAttr("instRot.rotateY")

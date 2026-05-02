@@ -19,6 +19,7 @@ camera_position = [0, 0, 0]
 camera_far_clip = 10000
 original_parent_path = ""
 current_mesh_name = ""
+current_mesh_path = ""
 
 current_mode = "move"
 mode_start_x = 0
@@ -100,6 +101,7 @@ def on_drag_press():
     global picked_mesh_transform
     global original_parent_path
     global current_mesh_name
+    global current_mesh_path
     global camera_far_clip
     global current_mode
     global mode_start_x, mode_start_y
@@ -209,6 +211,7 @@ def on_drag_press():
     child_nodes = mc.listRelatives(picked_mesh_transform[0], fullPath=True, ad=True) or []
 
     original_parent_path = "|".join(picked_mesh_transform[0].split("|")[0:-1])
+    current_mesh_path = picked_mesh_transform[0]
     current_mesh_name = picked_mesh_transform[0].split("|")[-1]
 
     # Flip state is per-drag interaction only.
@@ -216,8 +219,8 @@ def on_drag_press():
     orientation_flip_enabled = False
     current_orientation_inverted = False
 
-    saved_rotation = mc.getAttr(current_mesh_name + ".rotate")[0]
-    saved_scale = mc.getAttr(current_mesh_name + ".scale")[0]
+    saved_rotation = mc.getAttr(current_mesh_path + ".rotate")[0]
+    saved_scale = mc.getAttr(current_mesh_path + ".scale")[0]
 
     selection_list = oma.MSelectionList()
     selection_list.add(picked_mesh_transform[0])
@@ -233,7 +236,7 @@ def on_drag_press():
     pivot_x = sum(point.x for point in bottom_points) / len(bottom_points)
     pivot_z = sum(point.z for point in bottom_points) / len(bottom_points)
 
-    world_matrix = oma.MMatrix(mc.xform(current_mesh_name, q=True, ws=True, matrix=True))
+    world_matrix = oma.MMatrix(mc.xform(current_mesh_path, q=True, ws=True, matrix=True))
 
     pivot_object = oma.MPoint(pivot_x, min_y, pivot_z)
     pivot_world = pivot_object * world_matrix
@@ -242,8 +245,8 @@ def on_drag_press():
         pivot_world.x,
         pivot_world.y,
         pivot_world.z,
-        current_mesh_name + ".scalePivot",
-        current_mesh_name + ".rotatePivot",
+        current_mesh_path + ".scalePivot",
+        current_mesh_path + ".rotatePivot",
         ws=True,
         a=True,
     )
@@ -277,7 +280,6 @@ def on_drag_press():
     mc.setAttr(mesh_path + ".scaleY", saved_scale[1])
     mc.setAttr(mesh_path + ".scaleZ", saved_scale[2])
 
-    mc.delete(constructionHistory=True)
 
     for node in child_nodes:
         if node in visible_mesh_shapes:
@@ -293,6 +295,7 @@ def on_drag_press():
 def on_drag_release():
     global original_parent_path
     global current_mesh_name
+    global current_mesh_path
     global current_mode
     global duplicate_done
     global orientation_flip_enabled
@@ -314,6 +317,7 @@ def on_drag_release():
     clear_temp_nodes()
 
     final_path = (original_parent_path + "|" + current_mesh_name).lstrip("|")
+    current_mesh_path = "|" + final_path if final_path else "|" + current_mesh_name
 
     if mc.objExists(final_path):
         mc.select(final_path)
@@ -503,6 +507,7 @@ def drag_scale(vp_x):
 
 def duplicate_and_continue_drag():
     global current_mesh_name
+    global current_mesh_path
     global initial_scale_x, initial_scale_y, initial_scale_z
     global initial_rotate_y
     global hit_face
@@ -534,7 +539,8 @@ def duplicate_and_continue_drag():
     else:
         mc.parent(original_mesh_path, original_parent_path)
 
-    current_mesh_name = duplicated_name
+    current_mesh_name = duplicated_name.split("|")[-1]
+    current_mesh_path = duplicated_name
     duplicate_done = True
 
     mc.select(current_mesh_name)

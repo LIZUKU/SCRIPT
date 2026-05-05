@@ -171,6 +171,13 @@ FALLBACK_STOP_TOKENS = {
     "SHAPE", "GEOGRP", "MESHGRP"
 }
 
+ASSET_PART_HINTS = {
+    "WALL", "WALLS", "FLOOR", "FLOORS", "ROOF", "ROOFS", "CEILING", "CEILINGS",
+    "PILLAR", "PILLARS", "BEAM", "BEAMS", "TRIM", "DOOR", "DOORWAY", "WINDOW",
+    "WINDOWS", "STAIR", "STAIRS", "CORNER", "ARCH", "ARCHES", "ROOM", "DESTROYED",
+    "BROKEN", "DETAIL", "DETAILS", "PROP", "PROPS"
+}
+
 
 def extract_fallback_asset_name(name):
     """
@@ -552,8 +559,22 @@ def build_catalog_candidates(asset_name, category, prefixes):
     asset_name = asset_name.upper().strip()
     candidates = [asset_name]
 
+    parts = [p for p in asset_name.split("_") if p]
+    if len(parts) >= 4 and parts[-1] in {"A", "B", "C", "D", "E", "F"}:
+        if parts[-2] in ASSET_PART_HINTS:
+            candidates.append("_".join(parts[:-2]))
+        candidates.append("_".join(parts[:-1]))
+    elif len(parts) >= 3 and parts[-1] in ASSET_PART_HINTS:
+        candidates.append("_".join(parts[:-1]))
+
     if re.match(r"^[A-Z]{3,4}_", asset_name):
-        return candidates
+        out = []
+        seen = set()
+        for c in candidates:
+            if c and c not in seen:
+                seen.add(c)
+                out.append(c)
+        return out
 
     ordered = list(prefixes)
     if category.lower() == "props" and "ACC" in ordered:

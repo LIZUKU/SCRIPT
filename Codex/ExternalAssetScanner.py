@@ -43,6 +43,8 @@ TEXTURE_ATTR_CANDIDATES = [
     "texture",
 ]
 
+DEFAULT_CAMERA_TRANSFORMS = {"PERSP", "TOP", "FRONT", "SIDE"}
+
 
 def maya_main_window():
     ptr = omui.MQtUtil.mainWindow()
@@ -57,6 +59,14 @@ def short_name(node):
 
 def strip_ns(name):
     return name.split(":")[-1]
+
+
+def normalize_asset_token(name):
+    return strip_ns(short_name(name)).upper().strip()
+
+
+def is_default_camera_transform(node):
+    return normalize_asset_token(node) in DEFAULT_CAMERA_TRANSFORMS
 
 
 def copy_to_clipboard(text):
@@ -304,7 +314,7 @@ def scan_textures():
         family = extract_texture_family_from_path(tex_path)
 
         if not family:
-            node_short = strip_ns(node).upper()
+            node_short = normalize_asset_token(node)
             family = extract_texture_family_from_path(node_short)
 
         if not family:
@@ -335,6 +345,8 @@ def scan_reused_assets(scan_all=True, include_kits=True, current_asset=None):
         nodes = cmds.ls(assemblies=True, long=True) or []
 
     for node in nodes:
+        if is_default_camera_transform(node):
+            continue
         main_name = extract_main_name_from_string(node)
         if not main_name:
             main_name = extract_fallback_asset_name(node)
@@ -879,7 +891,7 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
         return tree.selected_names()
 
     def _normalized_asset_name_from_field(self):
-        return self.asset_name_edit.text().strip().upper()
+        return normalize_asset_token(self.asset_name_edit.text())
 
     def _set_asset_name_field(self, name):
         if not name:
@@ -1081,7 +1093,7 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
         return names
 
     def _is_asset_already_in_scene(self, asset_name):
-        asset_name = asset_name.upper()
+        asset_name = normalize_asset_token(asset_name)
         existing = {x.upper() for x in self._scene_known_asset_names()}
         existing.update(self._scan_asset_names_from_outliner())
         return asset_name in existing
@@ -1178,7 +1190,14 @@ class ExternalAssetScannerUI(QtWidgets.QDialog):
         self.last_failed_loads = [src for src, _err in failed]
         self.select_failed_btn.setEnabled(bool(self.last_failed_loads))
         self.retry_failed_btn.setEnabled(bool(self.last_failed_loads))
-        self._scan()
+        self._set_status(
+            "{} done | OK:{} SKIP:{} FAIL:{} | Click Scan to refresh lists.".format(
+                title,
+                len(ok),
+                len(skipped),
+                len(failed),
+            )
+        )
 
     def select_failed_assets_in_ui(self):
         if not self.last_failed_loads:

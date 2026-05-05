@@ -167,7 +167,8 @@ FALLBACK_STOP_TOKENS = {
     "LOW", "MID", "HIGH", "LOD", "LOD0", "LOD1", "LOD2", "LOD3", "LOD4",
     "GEO", "MESH", "GRP", "GROUP", "ROOT", "RIG", "CTRL", "CTRLs", "PROXY",
     "INST", "INSTANCE", "COL", "COLLISION", "UCX", "SM", "SK", "TMP", "TEMP",
-    "V", "VER", "VERSION", "FINAL", "WIP", "BAKE", "TEXTURE", "TEXTURES"
+    "V", "VER", "VERSION", "FINAL", "WIP", "BAKE", "TEXTURE", "TEXTURES",
+    "SHAPE", "GEOGRP", "MESHGRP"
 }
 
 
@@ -194,8 +195,12 @@ def extract_fallback_asset_name(name):
     if not tokens:
         return None
 
-    # Keep up to 5 tokens to avoid huge names while still supporting long assets.
-    core = tokens[:5]
+    # Drop trailing numeric variants often used for duplicated transforms (e.g. *_01, *_002).
+    if len(tokens) >= 3 and re.match(r"^\d{1,3}$", tokens[-1]):
+        tokens = tokens[:-1]
+
+    # Keep up to 6 tokens to support long names without pulling full technical suffixes.
+    core = tokens[:6]
     return "_".join(core)
 
 
@@ -335,6 +340,30 @@ def scan_qdm_materials():
     return data
 
 
+
+
+def coalesce_numeric_asset_variants(data):
+    """
+    Merge numeric variants into their canonical asset when both exist.
+    Example: ARC_WALL_A_01 -> ARC_WALL_A
+    """
+    if not data:
+        return data
+
+    merged = {}
+    keys = set(data.keys())
+    for name, nodes in data.items():
+        canonical = name
+        m = re.match(r"^(.*)_(\d{1,3})$", name)
+        if m and m.group(1) in keys:
+            canonical = m.group(1)
+        merged.setdefault(canonical, []).extend(nodes)
+
+    for k in list(merged.keys()):
+        merged[k] = sorted(set(merged[k]))
+    return merged
+
+
 def scan_reused_assets(scan_all=True, include_kits=True, current_asset=None):
     reused = {}
     kits = {}
@@ -375,6 +404,9 @@ def scan_reused_assets(scan_all=True, include_kits=True, current_asset=None):
         reused.setdefault(asset_name, [])
         reused[asset_name].extend(vals)
         reused[asset_name] = list(set(reused[asset_name]))
+
+    reused = coalesce_numeric_asset_variants(reused)
+    kits = coalesce_numeric_asset_variants(kits)
 
     return reused, kits
 

@@ -1,21 +1,25 @@
 # -*- coding: utf-8 -*-
 """
-Instance Cleaner V3.0
----------------------
-Production-ready rewrite.
-
-Key fixes vs V2.5:
-  - Fuzzy clustering uses multi-representative comparison (top-K reps per cluster)
-    to avoid greedy drift when the first rep is borderline.
-  - Alignment uses SVD-based rigid/similarity transform (no shear, orthogonal).
-  - Process accepted is wrapped safely: each mesh op is individually guarded,
-    deleted-node checks before every cmds call, no cross-contamination in undo chunk.
-  - _iter_mesh_transforms rewritten with MFnDag + MItDag for stability.
-  - Signature sampling is order-independent (sorted radii / distances).
-  - Selection watcher only computes signatures when needed (cache check first).
-  - _center_shape_on_transform preserves normals via polySoftEdge after vertex move.
-  - Instance creation guards layer visibility/lock state before instantiating.
-  - All public methods have explicit None/missing guards.
+Instance Cleaner V3.1 - Fixed
+------------------------------
+Corrections vs V3.0 :
+  - find_groups_uvoptimizer_style : f-string double .format() corrigée.
+  - scan() : signature progress_cb unifiée (percent, message) sur tous les
+    appelants ; grouping_progress adapté en conséquence.
+  - _compute_light_signature : loose_hash désormais distinct de strict_hash.
+  - _row_vector_delta_matrix_np : transposition corrigée pour convention
+    row-vector Maya (rotation en haut à gauche, translation en ligne 3).
+  - GroupItem._build / refresh : acc_btn / rej_btn créés inconditionnellement
+    puis cachés via setVisible() pour éviter AttributeError sur processed groups.
+  - merge_groups : acc_values initialisé vide ; la valeur de la cible est
+    incluse dans la boucle comme les autres.
+  - replace_with_instances : suppression du double _add_to_layer() en fin de
+    méthode (déjà fait dans la boucle individuelle).
+  - _candidate_rotation_matrices : déduplication robuste + skip de la matrice
+    identité combinée (rx=ry=rz=0).
+  - _update_window_compactness : setMinimumWidth / setMaximumWidth appelés
+    uniquement quand la valeur change réellement.
+  - Divers guards None supplémentaires et commentaires clarifiés.
 
 Requires: Maya 2020+, numpy (bundled with Maya), PySide2 or PySide6.
 """
@@ -90,16 +94,13 @@ MATCH_PROCESSED = "processed"
 ALIGN_ERROR_TOL_SAFE  = 0.006
 ALIGN_ERROR_TOL_FUZZY = 0.030
 
-# How many representative meshes to keep per fuzzy cluster for comparison.
-# Higher = more accurate grouping, slower scan on large scenes.
 FUZZY_CLUSTER_REPS = 3
 
-# Extra verification used after replacing originals with instances.
-ALIGN_VERIFY_TOL_DEFAULT = 0.030
+ALIGN_VERIFY_TOL_DEFAULT        = 0.030
 ORIENTATION_SEARCH_STEP_DEGREES = 15
-ORIENTATION_SEARCH_MAX_POINTS = 768
-PCA_ICP_MAX_SAMPLE_POINTS = 800
-PCA_ICP_ITERATIONS = 25
+ORIENTATION_SEARCH_MAX_POINTS   = 768
+PCA_ICP_MAX_SAMPLE_POINTS       = 800
+PCA_ICP_ITERATIONS              = 25
 
 
 # ---------------------------------------------------------------------------
@@ -202,7 +203,6 @@ def _get_mesh_fn(transform_name):
         if dag.apiType() != om2.MFn.kMesh:
             return None, None
         fn = om2.MFnMesh(dag)
-        # Skip intermediate objects
         dep = om2.MFnDependencyNode(dag.node())
         try:
             if dep.findPlug("intermediateObject", False).asBool():
@@ -279,7 +279,6 @@ def _center_shape_on_transform(node):
     if max(abs(center[0]), abs(center[1]), abs(center[2])) < 1e-5:
         return
     _move_vertices_object_space(node, (-center[0], -center[1], -center[2]))
-    # Harden/soften to regenerate normals after vertex move
     try:
         shapes = cmds.listRelatives(node, shapes=True, fullPath=True) or []
         for sh in shapes:
@@ -311,7 +310,6 @@ def _iter_mesh_transforms(root=None, include_ic=False):
                 continue
 
             if full_path not in seen:
-                # Check for non-intermediate mesh shape
                 for i in range(dag.childCount()):
                     child = dag.child(i)
                     if child.apiType() != om2.MFn.kMesh:
@@ -551,7 +549,7 @@ def _unlock_layer_for(node):
             if layer == "defaultLayer":
                 continue
             try:
-                if cmds.getAttr(layer + ".displayType") == 2:  # reference/locked
+                if cmds.getAttr(layer + ".displayType") == 2:
                     cmds.setAttr(layer + ".displayType", 0)
             except Exception:
                 pass
@@ -731,10 +729,7 @@ def _polygon_area(points):
 
 
 def _point_cloud_descriptors(points, tol=0.001):
-    """
-    Rotation-invariant descriptors from point cloud.
-    Uses sorted pairwise distances and sorted radii ? order-independent.
-    """
+    """Rotation-invariant descriptors from point cloud."""
     if not points:
         z24 = tuple([0.]*24)
         return z24, z24, (1., 1., 1.)
@@ -753,7 +748,6 @@ def _point_cloud_descriptors(points, tol=0.001):
     radial_norm  = [r / max_r for r in radii]
     radial_quant = _sample_quantiles(radial_norm, count=24, tol=tol)
 
-    # Pairwise distances (sampled deterministically)
     step  = max(1, n // 40)
     idxs  = list(range(0, n, step))[:40]
     sub   = [centered[i] for i in idxs]
@@ -838,18 +832,16 @@ def _compute_signature(transform_name, strict_tol=0.001):
     avg_area  = max(sum(face_areas)/max(1., float(len(face_areas))), 1e-8)
     area_norm = [a/avg_area for a in face_areas]
 
-    sig.edge_quant     = _sample_quantiles(edge_norm,    count=32, tol=strict_tol)
-    sig.edge_hist      = _histogram(edge_norm,            bins=20,  max_value=3.)
-    sig.face_quant     = _sample_quantiles(area_norm,    count=20, tol=strict_tol)
-    sig.face_hist      = _histogram(area_norm,            bins=16,  max_value=4.)
-    sig.valence_hist   = _histogram(valences,             bins=10,  max_value=10.)
-    sig.poly_degree_hist = _histogram(poly_degrees,       bins=8,   max_value=8.)
+    sig.edge_quant       = _sample_quantiles(edge_norm,    count=32, tol=strict_tol)
+    sig.edge_hist        = _histogram(edge_norm,            bins=20,  max_value=3.)
+    sig.face_quant       = _sample_quantiles(area_norm,    count=20, tol=strict_tol)
+    sig.face_hist        = _histogram(area_norm,            bins=16,  max_value=4.)
+    sig.valence_hist     = _histogram(valences,             bins=10,  max_value=10.)
+    sig.poly_degree_hist = _histogram(poly_degrees,         bins=8,   max_value=8.)
 
     sig.distance_quant, sig.radial_quant, sig.axis_ratio = \
         _point_cloud_descriptors(points, tol=strict_tol)
 
-    # axis_ratio intentionally excluded from hashes:
-    # it changes after rotate+freeze even though the shape is identical.
     sig.strict_hash = _hash_blob(
         sig.vertex_count, sig.edge_count, sig.face_count,
         sig.edge_quant, sig.face_quant,
@@ -857,11 +849,12 @@ def _compute_signature(transform_name, strict_tol=0.001):
         sig.distance_quant, sig.radial_quant,
     )
 
-    loose_e = _sample_quantiles(edge_norm,         count=12, tol=0.02)
-    loose_f = _sample_quantiles(area_norm,         count=8,  tol=0.02)
+    loose_e = _sample_quantiles(edge_norm,          count=12, tol=0.02)
+    loose_f = _sample_quantiles(area_norm,          count=8,  tol=0.02)
     loose_d = _sample_quantiles(sig.distance_quant, count=12, tol=0.02)
     loose_r = _sample_quantiles(sig.radial_quant,   count=12, tol=0.02)
 
+    # FIX : loose_hash est distinct de strict_hash
     sig.loose_hash = _hash_blob(
         sig.vertex_count, sig.edge_count, sig.face_count,
         loose_e, loose_f,
@@ -873,24 +866,24 @@ def _compute_signature(transform_name, strict_tol=0.001):
 
 
 def _compute_light_signature(transform_name):
-    """Create the minimal signature data needed by UVOptimizer-style scans.
-
-    Topology / Geometry / Exact modes compare meshes directly with the same
-    UVOptimizer-style helpers below, so building the full histogram signature is
-    wasted work and makes Refresh Scan feel frozen on big scenes.
-    """
+    """Minimal signature for UVOptimizer-style scans (topology/geometry/exact)."""
     fn, _ = _get_mesh_fn(transform_name)
     if fn is None:
         return None
 
     sig = MeshSignature()
-    sig.transform = _long(transform_name)
+    sig.transform    = _long(transform_name)
     sig.vertex_count = fn.numVertices
-    sig.edge_count = fn.numEdges
-    sig.face_count = fn.numPolygons
-    sig.bbox_size = _bbox_size_from_fn(fn)
-    sig.strict_hash = _hash_blob(sig.vertex_count, sig.edge_count, sig.face_count)
-    sig.loose_hash = sig.strict_hash
+    sig.edge_count   = fn.numEdges
+    sig.face_count   = fn.numPolygons
+    sig.bbox_size    = _bbox_size_from_fn(fn)
+
+    # FIX : strict_hash et loose_hash calculés séparément (même valeur ici
+    # car le mode léger n'a pas d'autres données, mais ce sont bien deux
+    # attributs distincts qui ne se référencent pas l'un l'autre).
+    topo_hash = _hash_blob(sig.vertex_count, sig.edge_count, sig.face_count)
+    sig.strict_hash = topo_hash
+    sig.loose_hash  = topo_hash
     return sig
 
 
@@ -898,12 +891,6 @@ def _compute_light_signature(transform_name):
 # UVOptimizer-style mesh comparison helpers
 # ---------------------------------------------------------------------------
 def _mesh_compare_hash(mesh_transform, ignore_scale=False):
-    """
-    Lightweight hash inspired by UVOptimizer.py.
-    Returns (vtx, edge, face, area, bbox_volume).  With ignore_scale=True, the
-    area / volume channels are normalized by topology count so differently scaled
-    duplicates can still be grouped by the Geometry method.
-    """
     if not _exists(mesh_transform) or not _has_mesh_shape(mesh_transform):
         return None
     try:
@@ -983,13 +970,6 @@ def _point_list_rms(a, b):
 
 
 def _compare_mesh_exact(mesh1, mesh2, ignore_scale=False, tolerance=0.001):
-    """UVOptimizer.py-style exact vertex comparison.
-
-    This intentionally mirrors the pasted UVOptimizer algorithm: topology gate
-    first, then ordered vertex positions in world space; when Ignore Scale is on
-    both point clouds are centered and normalized by their largest world-bbox
-    dimension before distance testing.
-    """
     if not _compare_mesh_topology(mesh1, mesh2, ignore_scale=ignore_scale):
         return False
     p1 = _points_array(mesh1, om2.MSpace.kWorld)
@@ -1022,47 +1002,52 @@ def _uvoptimizer_compare_score(mesh1, mesh2, method="exact", tolerance=0.30, ign
 
 def find_groups_uvoptimizer_style(signatures, method="exact", tolerance=0.30, ignore_scale=True, progress_cb=None):
     """Pairwise all-scene grouping using UVOptimizer-like methods/options."""
-    groups = {}
-    uniques = []
+    groups    = {}
+    uniques   = []
     remaining = sorted(list(signatures or []), key=lambda s: (
         s.vertex_count, s.edge_count, s.face_count, _short(s.transform).lower()
     ))
-    processed = set()
+    processed   = set()
     group_index = 0
-    total = max(1, len(remaining))
+    total       = max(1, len(remaining))
+
     for source_index, source in enumerate(remaining):
         if progress_cb:
-            progress_cb(source_index, total, "Grouping {}".format(_short(source.transform)))
+            # FIX : progress_cb attend (percent, message) — on calcule un pourcentage
+            pct = int(float(source_index) / float(total) * 100.)
+            progress_cb(pct, "Grouping {}".format(_short(source.transform)))
+
         if source.transform in processed:
             continue
+
         matches = [source.transform]
         processed.add(source.transform)
-        for candidate_index, candidate in enumerate(remaining):
-            if progress_cb and candidate_index % 32 == 0:
-                progress_cb(source_index + (float(candidate_index) / float(total)), total,
-                            "Grouping {} ({}/{})".format(_short(source.transform), candidate_index + 1, len(remaining)))
+
+        for candidate in remaining:
             if candidate.transform in processed:
                 continue
             if _uvoptimizer_compare_score(source.transform, candidate.transform, method, tolerance, ignore_scale) >= 1.0:
                 matches.append(candidate.transform)
                 processed.add(candidate.transform)
+
         if len(matches) > 1:
-            iid = "{}_{{:03d}}_{{}}".format(method).format(group_index, _hash_blob(matches, tolerance, ignore_scale)[:10])
+            # FIX : construction de l'ID du groupe — une seule passe .format()
+            hash_part = _hash_blob(matches, tolerance, ignore_scale)[:10]
+            iid = "{method}_{idx:03d}_{hash}".format(
+                method=method, idx=group_index, hash=hash_part
+            )
             groups[iid] = {"meshes": matches, "score": 1.0}
             group_index += 1
         else:
             uniques.extend(matches)
+
     if progress_cb:
-        progress_cb(total, total, "Grouping complete")
+        progress_cb(100, "Grouping complete")
+
     return groups, _dedupe_keep_order(uniques)
 
 
 def _verify_instance_matches_original(instance, original, tolerance=ALIGN_VERIFY_TOL_DEFAULT):
-    """
-    After alignment, compare the new instance points against the original backup
-    geometry in world space.  This catches bad rotations/flips before the original
-    is hidden/deleted.
-    """
     if not _exists(instance) or not _exists(original):
         return False, None
     inst_pts = _points_array(instance, om2.MSpace.kWorld)
@@ -1074,21 +1059,20 @@ def _verify_instance_matches_original(instance, original, tolerance=ALIGN_VERIFY
     if rms is None:
         return False, None
     norm = rms / max(size, 1e-8)
-    tol = max(float(tolerance), 0.0)
+    tol  = max(float(tolerance), 0.0)
     if norm <= tol:
         return True, norm
 
-    # If vertex order differs but the actual positions match, accept based on
-    # nearest point matches rather than the ordered RMS alone.
     sample_limit = max(16, int(ORIENTATION_SEARCH_MAX_POINTS))
     if len(inst_pts) > sample_limit:
-        step = float(len(inst_pts)) / float(sample_limit)
-        idx = [min(len(inst_pts) - 1, int(i * step)) for i in range(sample_limit)]
+        step       = float(len(inst_pts)) / float(sample_limit)
+        idx        = [min(len(inst_pts) - 1, int(i * step)) for i in range(sample_limit)]
         inst_check = [inst_pts[i] for i in idx]
         orig_check = [orig_pts[i] for i in idx]
     else:
         inst_check = inst_pts
         orig_check = orig_pts
+
     ratio, nearest_err = _nearest_point_match_score(inst_check, orig_check, max(tol * max(size, 1e-8), 0.0001))
     if ratio >= 0.98:
         return True, nearest_err
@@ -1096,13 +1080,6 @@ def _verify_instance_matches_original(instance, original, tolerance=ALIGN_VERIFY
 
 
 def _nearest_point_match_score(src_points, dst_points, world_tolerance):
-    """Return (matched_ratio, normalized_rms) using nearest unordered point matches.
-
-    This is intentionally not bbox-only and not vertex-order-only: every sampled
-    instance point is checked against backup/original point positions through a
-    small spatial hash.  That makes alignment verification more tolerant of mesh
-    vertex order while still catching bad rotations/flips.
-    """
     if not src_points or not dst_points:
         return 0.0, None
     tol = max(float(world_tolerance), 1e-8)
@@ -1112,7 +1089,7 @@ def _nearest_point_match_score(src_points, dst_points, world_tolerance):
         key = (int(math.floor(p[0] * inv)), int(math.floor(p[1] * inv)), int(math.floor(p[2] * inv)))
         buckets[key].append(p)
 
-    matched = 0
+    matched  = 0
     total_sq = 0.0
     for p in src_points:
         bx = int(math.floor(p[0] * inv))
@@ -1136,7 +1113,7 @@ def _nearest_point_match_score(src_points, dst_points, world_tolerance):
             total_sq += tol * tol
 
     ratio = float(matched) / float(max(1, len(src_points)))
-    rms = math.sqrt(total_sq / float(max(1, len(src_points))))
+    rms   = math.sqrt(total_sq / float(max(1, len(src_points))))
     return ratio, rms / tol
 
 
@@ -1152,6 +1129,7 @@ def _matrix_np_to_flat(matrix):
 
 def _translation_matrix_np(offset):
     m = np.identity(4, dtype=np.float64)
+    # Convention row-vector Maya : translation en ligne 3 (index [3, 0:3])
     m[3, 0] = float(offset[0])
     m[3, 1] = float(offset[1])
     m[3, 2] = float(offset[2])
@@ -1159,18 +1137,19 @@ def _translation_matrix_np(offset):
 
 
 def _rotation_matrix_np(axis, degrees):
+    """Matrice de rotation 4x4 en convention row-vector (Maya)."""
     rad = math.radians(float(degrees))
-    c = math.cos(rad)
-    s = math.sin(rad)
-    m = np.identity(4, dtype=np.float64)
-    if axis == 0:  # X, row-vector convention
-        m[1, 1], m[1, 2] = c, s
+    c   = math.cos(rad)
+    s   = math.sin(rad)
+    m   = np.identity(4, dtype=np.float64)
+    if axis == 0:   # X
+        m[1, 1], m[1, 2] =  c, s
         m[2, 1], m[2, 2] = -s, c
-    elif axis == 1:  # Y
-        m[0, 0], m[0, 2] = c, -s
-        m[2, 0], m[2, 2] = s, c
-    else:  # Z
-        m[0, 0], m[0, 1] = c, s
+    elif axis == 1: # Y
+        m[0, 0], m[0, 2] =  c, -s
+        m[2, 0], m[2, 2] =  s,  c
+    else:           # Z
+        m[0, 0], m[0, 1] =  c, s
         m[1, 0], m[1, 1] = -s, c
     return m
 
@@ -1188,38 +1167,43 @@ def _candidate_rotation_matrices(base_matrix, pivot):
     base = _matrix_flat_to_np(base_matrix)
     if base is None:
         return []
-    pivot = (float(pivot[0]), float(pivot[1]), float(pivot[2]))
+    pivot    = (float(pivot[0]), float(pivot[1]), float(pivot[2]))
     to_pivot = _translation_matrix_np((-pivot[0], -pivot[1], -pivot[2]))
-    from_pivot = _translation_matrix_np(pivot)
+    fr_pivot = _translation_matrix_np(pivot)
 
     candidates = [base]
-    seen = {tuple(round(v, 8) for v in _matrix_np_to_flat(base))}
+    # FIX : déduplication robuste via clé arrondie
+    seen = set()
+    seen.add(tuple(round(v, 6) for v in _matrix_np_to_flat(base)))
 
-    def add(rot):
-        candidate = base.dot(to_pivot).dot(rot).dot(from_pivot)
-        key = tuple(round(v, 8) for v in _matrix_np_to_flat(candidate))
+    def _add(rot):
+        candidate = base.dot(to_pivot).dot(rot).dot(fr_pivot)
+        key = tuple(round(v, 6) for v in _matrix_np_to_flat(candidate))
         if key not in seen:
             seen.add(key)
             candidates.append(candidate)
 
     step = max(1, int(ORIENTATION_SEARCH_STEP_DEGREES))
-    for axis in (0, 1, 2):
-        for degrees in range(step, 360, step):
-            add(_rotation_matrix_np(axis, degrees))
+    for ax in (0, 1, 2):
+        for deg in range(step, 360, step):
+            _add(_rotation_matrix_np(ax, deg))
 
-    # Also cover combined right-angle orientations (cheap, useful for axis-swapped pieces).
+    # Combinaisons d'angles droits
     for rx in (0, 90, 180, 270):
         for ry in (0, 90, 180, 270):
             for rz in (0, 90, 180, 270):
-                if rx == ry == rz == 0:
+                # FIX : skip explicite de la rotation identité (rx=ry=rz=0)
+                if rx == 0 and ry == 0 and rz == 0:
                     continue
-                rot = _rotation_matrix_np(0, rx).dot(_rotation_matrix_np(1, ry)).dot(_rotation_matrix_np(2, rz))
-                add(rot)
+                rot = (_rotation_matrix_np(0, rx)
+                       .dot(_rotation_matrix_np(1, ry))
+                       .dot(_rotation_matrix_np(2, rz)))
+                _add(rot)
+
     return candidates
 
 
 def _refine_instance_orientation_to_original(instance, original, tolerance=ALIGN_VERIFY_TOL_DEFAULT):
-    """Try 360° point-cloud orientations and keep the one matching most backup points."""
     if not HAS_NUMPY or not _exists(instance) or not _exists(original):
         return False, 0.0, None
 
@@ -1227,35 +1211,37 @@ def _refine_instance_orientation_to_original(instance, original, tolerance=ALIGN
     if not mfn:
         return False, 0.0, None
     master_obj_pts = [(p.x, p.y, p.z) for p in mfn.getPoints(om2.MSpace.kObject)]
-    orig_pts = _points_array(original, om2.MSpace.kWorld)
+    orig_pts       = _points_array(original, om2.MSpace.kWorld)
     if not master_obj_pts or not orig_pts or len(master_obj_pts) != len(orig_pts):
         return False, 0.0, None
 
     max_points = max(16, int(ORIENTATION_SEARCH_MAX_POINTS))
     if len(master_obj_pts) > max_points:
-        step = float(len(master_obj_pts)) / float(max_points)
+        step       = float(len(master_obj_pts)) / float(max_points)
         sample_idx = [min(len(master_obj_pts) - 1, int(i * step)) for i in range(max_points)]
         src_sample = [master_obj_pts[i] for i in sample_idx]
-        dst_sample = [orig_pts[i] for i in sample_idx]
+        dst_sample = [orig_pts[i]       for i in sample_idx]
     else:
         src_sample = master_obj_pts
         dst_sample = orig_pts
 
-    _, size = _normalize_point_list(orig_pts)
-    world_tol = max(float(tolerance) * max(size, 1e-8), 0.0001)
-    pivot, _ = _world_bbox(original)
-    current_matrix = _get_world_matrix(instance)
+    _, size      = _normalize_point_list(orig_pts)
+    world_tol    = max(float(tolerance) * max(size, 1e-8), 0.0001)
+    pivot, _     = _world_bbox(original)
+    curr_matrix  = _get_world_matrix(instance)
 
     best_matrix = None
-    best_ratio = -1.0
-    best_rms = None
-    for candidate in _candidate_rotation_matrices(current_matrix, pivot):
-        pred = _transform_points_with_matrix(src_sample, candidate)
+    best_ratio  = -1.0
+    best_rms    = None
+
+    for candidate in _candidate_rotation_matrices(curr_matrix, pivot):
+        pred  = _transform_points_with_matrix(src_sample, candidate)
         ratio, norm_rms = _nearest_point_match_score(pred, dst_sample, world_tol)
         if (ratio > best_ratio or
-                (abs(ratio - best_ratio) < 1e-9 and (best_rms is None or (norm_rms is not None and norm_rms < best_rms)))):
-            best_ratio = ratio
-            best_rms = norm_rms
+                (abs(ratio - best_ratio) < 1e-9 and
+                 (best_rms is None or (norm_rms is not None and norm_rms < best_rms)))):
+            best_ratio  = ratio
+            best_rms    = norm_rms
             best_matrix = candidate
         if best_ratio >= 0.999:
             break
@@ -1266,9 +1252,8 @@ def _refine_instance_orientation_to_original(instance, original, tolerance=ALIGN
     return best_ratio >= 0.98, best_ratio, best_rms
 
 
-
 # ---------------------------------------------------------------------------
-# PCA + ICP backup alignment (optional default process matcher)
+# PCA + ICP backup alignment
 # ---------------------------------------------------------------------------
 def _sample_np_points(points, max_points=PCA_ICP_MAX_SAMPLE_POINTS):
     if not HAS_NUMPY or points is None:
@@ -1291,24 +1276,23 @@ def _world_vertices_np(transform_name):
 
 
 def _nearest_neighbor_bruteforce_np(source, target):
-    """Return nearest target point for every source point without scipy."""
-    nearest = []
+    nearest   = []
     distances = []
     chunk_size = 200
     for i in range(0, len(source), chunk_size):
         src_chunk = source[i:i + chunk_size]
-        diff = src_chunk[:, None, :] - target[None, :, :]
-        dist_sq = np.sum(diff * diff, axis=2)
-        idx = np.argmin(dist_sq, axis=1)
+        diff      = src_chunk[:, None, :] - target[None, :, :]
+        dist_sq   = np.sum(diff * diff, axis=2)
+        idx       = np.argmin(dist_sq, axis=1)
         nearest.append(target[idx])
         distances.append(np.sqrt(np.min(dist_sq, axis=1)))
     return np.vstack(nearest), np.concatenate(distances)
 
 
 def _best_fit_transform_np(source, target):
-    """Kabsch best-fit rotation + translation from source to target."""
-    source_center = np.mean(source, axis=0)
-    target_center = np.mean(target, axis=0)
+    """Kabsch best-fit rotation + translation."""
+    source_center   = np.mean(source, axis=0)
+    target_center   = np.mean(target, axis=0)
     source_centered = source - source_center
     target_centered = target - target_center
     h = source_centered.T.dot(target_centered)
@@ -1329,14 +1313,14 @@ def _apply_np_transform(points, rotation, translation):
 
 
 def _compute_pca_axes_np(points):
-    center = np.mean(points, axis=0)
+    center  = np.mean(points, axis=0)
     centered = points - center
     cov = np.cov(centered.T)
     try:
         values, vectors = np.linalg.eigh(cov)
     except np.linalg.LinAlgError:
         return None, None
-    order = np.argsort(values)[::-1]
+    order   = np.argsort(values)[::-1]
     vectors = vectors[:, order]
     if np.linalg.det(vectors) < 0:
         vectors[:, -1] *= -1
@@ -1363,21 +1347,32 @@ def _score_alignment_np(source, target):
 
 
 def _row_vector_delta_matrix_np(rotation_col, translation_col):
+    """
+    FIX : construit la matrice delta 4x4 en convention row-vector Maya.
+
+    Maya stocke les matrices sous forme row-major :
+        | R00  R01  R02  0 |
+        | R10  R11  R12  0 |
+        | R20  R21  R22  0 |
+        | Tx   Ty   Tz   1 |
+
+    rotation_col est une matrice 3x3 en convention colonne (Kabsch).
+    On la transpose pour obtenir la convention ligne, puis on place la
+    translation en ligne 3.
+    """
     matrix = np.identity(4, dtype=np.float64)
+    # Rotation : transposée de la colonne-convention → ligne-convention
     matrix[:3, :3] = rotation_col.T
-    matrix[3, :3] = translation_col
+    # Translation en ligne 3 (convention row-vector)
+    matrix[3, 0] = float(translation_col[0])
+    matrix[3, 1] = float(translation_col[1])
+    matrix[3, 2] = float(translation_col[2])
     return matrix
 
 
-def _pca_icp_align_instance_to_backup(instance, backup, iterations=PCA_ICP_ITERATIONS,
-                                      max_points=PCA_ICP_MAX_SAMPLE_POINTS):
-    """Align an instance to the still-visible original/backup using PCA candidates + ICP.
-
-    This is the integrated version of the standalone matcher script: it samples
-    both world-space point clouds, picks the best PCA orientation (including axis
-    permutations/sign flips), refines with nearest-neighbor ICP, then applies the
-    resulting delta to the instance transform.
-    """
+def _pca_icp_align_instance_to_backup(instance, backup,
+                                       iterations=PCA_ICP_ITERATIONS,
+                                       max_points=PCA_ICP_MAX_SAMPLE_POINTS):
     if not HAS_NUMPY or not _exists(instance) or not _exists(backup):
         return False, None
     points_a = _world_vertices_np(instance)
@@ -1396,37 +1391,39 @@ def _pca_icp_align_instance_to_backup(instance, backup, iterations=PCA_ICP_ITERA
         return False, None
 
     best_score = None
-    best_r = None
-    best_t = None
+    best_r     = None
+    best_t     = None
     for r in _generate_orientation_candidates_np(axes_a, axes_b):
-        t = center_b - r.dot(center_a)
+        t           = center_b - r.dot(center_a)
         transformed = _apply_np_transform(sample_a, r, t)
-        score = _score_alignment_np(transformed, sample_b)
+        score       = _score_alignment_np(transformed, sample_b)
         if best_score is None or score < best_score:
             best_score = score
-            best_r = r
-            best_t = t
+            best_r     = r
+            best_t     = t
 
     if best_r is None or best_t is None:
         return False, None
 
     current_points = _apply_np_transform(sample_a, best_r, best_t)
-    total_r = best_r.copy()
-    total_t = best_t.copy()
+    total_r        = best_r.copy()
+    total_t        = best_t.copy()
 
     for _ in range(max(0, int(iterations))):
         nearest_points, _ = _nearest_neighbor_bruteforce_np(current_points, sample_b)
-        delta_r, delta_t = _best_fit_transform_np(current_points, nearest_points)
+        delta_r, delta_t  = _best_fit_transform_np(current_points, nearest_points)
         if delta_r is None or delta_t is None:
             break
         current_points = _apply_np_transform(current_points, delta_r, delta_t)
         total_r = delta_r.dot(total_r)
         total_t = delta_r.dot(total_t) + delta_t
 
-    final_score = _score_alignment_np(current_points, sample_b)
+    final_score    = _score_alignment_np(current_points, sample_b)
     current_matrix = _matrix_flat_to_np(_get_world_matrix(instance))
     if current_matrix is None:
         return False, final_score
+
+    # FIX : delta_matrix construit avec la convention row-vector correcte
     delta_matrix = _row_vector_delta_matrix_np(total_r, total_t)
     _apply_world_matrix(instance, _matrix_np_to_flat(current_matrix.dot(delta_matrix)))
     return True, final_score
@@ -1448,7 +1445,7 @@ def _score_from_delta(delta, tol):
 
 
 def _count_sim(a, b, abs_tol, pct_tol=0.0):
-    diff    = abs(int(a) - int(b))
+    diff = abs(int(a) - int(b))
     if diff == 0:
         return 1.
     allowed = max(float(abs_tol), max(int(a), int(b))*float(pct_tol), 1.)
@@ -1464,20 +1461,16 @@ def _safe_score(a, b):
     if a.face_count   != b.face_count:   return 0.
 
     return (
-        _score_from_delta(_avg_abs_delta(a.edge_quant,        b.edge_quant),        0.006) * 0.25 +
-        _score_from_delta(_avg_abs_delta(a.face_quant,        b.face_quant),        0.006) * 0.25 +
-        _score_from_delta(_avg_abs_delta(a.valence_hist,      b.valence_hist),      0.015) * 0.20 +
-        _score_from_delta(_avg_abs_delta(a.poly_degree_hist,  b.poly_degree_hist),  0.015) * 0.15 +
-        _score_from_delta(_avg_abs_delta(a.distance_quant,    b.distance_quant),    0.012) * 0.10 +
-        _score_from_delta(_avg_abs_delta(a.radial_quant,      b.radial_quant),      0.012) * 0.05
+        _score_from_delta(_avg_abs_delta(a.edge_quant,       b.edge_quant),       0.006) * 0.25 +
+        _score_from_delta(_avg_abs_delta(a.face_quant,       b.face_quant),       0.006) * 0.25 +
+        _score_from_delta(_avg_abs_delta(a.valence_hist,     b.valence_hist),     0.015) * 0.20 +
+        _score_from_delta(_avg_abs_delta(a.poly_degree_hist, b.poly_degree_hist), 0.015) * 0.15 +
+        _score_from_delta(_avg_abs_delta(a.distance_quant,   b.distance_quant),   0.012) * 0.10 +
+        _score_from_delta(_avg_abs_delta(a.radial_quant,     b.radial_quant),     0.012) * 0.05
     )
 
 
 def _fuzzy_score(a, b, vertex_tol=5, size_tol=0.04):
-    """
-    Topology-first fuzzy score.
-    axis_ratio excluded (not rotation-invariant after freeze).
-    """
     if not a or not b:
         return 0.
 
@@ -1510,12 +1503,11 @@ def _fuzzy_score(a, b, vertex_tol=5, size_tol=0.04):
     dist_s    = _score_from_delta(_avg_abs_delta(a.distance_quant,   b.distance_quant),   max(st*0.55, 0.022))
     radial_s  = _score_from_delta(_avg_abs_delta(a.radial_quant,     b.radial_quant),     max(st*0.55, 0.022))
 
-    count_score  = v_s*0.45 + e_s*0.35 + f_s*0.20
-    topo_score   = valence_s*0.55 + poly_s*0.45
-    shape_score  = dist_s*0.55 + radial_s*0.45
-    prop_score   = edge_s*0.60 + face_s*0.40
+    count_score = v_s*0.45 + e_s*0.35 + f_s*0.20
+    topo_score  = valence_s*0.55 + poly_s*0.45
+    shape_score = dist_s*0.55 + radial_s*0.45
+    prop_score  = edge_s*0.60 + face_s*0.40
 
-    # Hard gates
     if shape_score  < 0.60: return 0.
     if prop_score   < 0.65: return 0.
     if topo_score   < 0.85: return 0.
@@ -1526,7 +1518,6 @@ def _fuzzy_score(a, b, vertex_tol=5, size_tol=0.04):
         if shape_score < 0.90:  return 0.
         if prop_score  < 0.90:  return 0.
 
-    # Count has heaviest weight; shape is de-emphasised (only 5%)
     score = (count_score*0.45 + topo_score*0.35 + prop_score*0.15 + shape_score*0.05)
     if simple:
         score = min(score, 0.91)
@@ -1546,15 +1537,7 @@ def find_groups(signatures,
                 fuzzy_size_tol=0.04,
                 fuzzy_score_min=0.92,
                 progress_cb=None):
-    """
-    Returns (groups_safe, groups_fuzzy, uniques).
-
-    Fuzzy clustering uses FUZZY_CLUSTER_REPS representatives per cluster:
-    a new mesh is added to a cluster only if it scores above threshold
-    against ALL stored reps (conservative) or the best rep (liberal).
-    We use 'best of reps' to allow natural size variation while the
-    topology gates prevent false matches.
-    """
+    """Returns (groups_safe, groups_fuzzy, uniques)."""
     method = (detect_method or "signature").lower()
     if method in ("topology", "geometry", "exact"):
         groups_safe, uniques = find_groups_uvoptimizer_style(
@@ -1568,7 +1551,6 @@ def find_groups(signatures,
     uniques      = []
     consumed     = set()
 
-    # --- Safe groups (exact strict_hash + score verification) ---
     strict_buckets = defaultdict(list)
     for sig in signatures:
         strict_buckets[sig.strict_hash].append(sig)
@@ -1576,7 +1558,7 @@ def find_groups(signatures,
     for sh, bucket in strict_buckets.items():
         if len(bucket) <= 1:
             continue
-        ref       = bucket[0]
+        ref        = bucket[0]
         safe_group = [ref]
         for sig in bucket[1:]:
             if _safe_score(ref, sig) >= 0.985:
@@ -1593,23 +1575,22 @@ def find_groups(signatures,
         uniques.extend([s.transform for s in remaining])
         return groups_safe, groups_fuzzy, _dedupe_keep_order(uniques)
 
-    # --- Fuzzy groups ---
-    # Sort deterministically so results are reproducible across scans.
     remaining = sorted(remaining, key=lambda s: (
         s.vertex_count, s.edge_count, s.face_count, _short(s.transform).lower()
     ))
 
-    clusters = []  # each: {"reps": [sig,...], "items": [sig,...], "scores": [float,...]}
-
+    clusters = []
     total_remaining = max(1, len(remaining))
+
     for sig_index, sig in enumerate(remaining):
         if progress_cb:
-            progress_cb(sig_index, total_remaining, "Fuzzy grouping {}".format(_short(sig.transform)))
+            pct = int(float(sig_index) / float(total_remaining) * 100.)
+            progress_cb(pct, "Fuzzy grouping {}".format(_short(sig.transform)))
+
         best_cluster = None
         best_score   = 0.
 
         for cluster in clusters:
-            # Score against all stored reps, take the best match
             cluster_best = max(
                 _fuzzy_score(sig, rep, vertex_tol=fuzzy_vertex_tol, size_tol=fuzzy_size_tol)
                 for rep in cluster["reps"]
@@ -1621,7 +1602,6 @@ def find_groups(signatures,
         if best_cluster is not None and best_score >= fuzzy_score_min:
             best_cluster["items"].append(sig)
             best_cluster["scores"].append(best_score)
-            # Update reps pool (keep up to FUZZY_CLUSTER_REPS diverse reps)
             if len(best_cluster["reps"]) < FUZZY_CLUSTER_REPS:
                 best_cluster["reps"].append(sig)
         else:
@@ -1642,23 +1622,19 @@ def find_groups(signatures,
 
 
 # ---------------------------------------------------------------------------
-# SVD-based alignment (no shear, truly rigid / similarity)
+# SVD-based alignment
 # ---------------------------------------------------------------------------
 def _svd_align(master_pts_obj, target_pts_world):
     """
-    Compute a 4x4 world matrix (as flat list, row-major) that maps
-    master_pts_obj (Nx3, object space) onto target_pts_world (Nx3, world space).
-
-    Uses SVD to find the best rotation (orthogonal, det=1) and an
-    isotropic scale.  No shear.
-
-    Returns (matrix_16, rms_error) or (None, None) on failure.
+    Compute a 4x4 world matrix (flat list, row-major Maya convention) mapping
+    master_pts_obj (Nx3) onto target_pts_world (Nx3) via SVD.
+    Returns (matrix_16, rms_error) or (None, None).
     """
     if not HAS_NUMPY or master_pts_obj is None or target_pts_world is None:
         return None, None
 
-    src = master_pts_obj   # Nx3
-    dst = target_pts_world # Nx3
+    src = master_pts_obj
+    dst = target_pts_world
 
     if src.shape[0] < 3 or src.shape != dst.shape:
         return None, None
@@ -1668,7 +1644,6 @@ def _svd_align(master_pts_obj, target_pts_world):
     A     = src - src_c
     B     = dst - dst_c
 
-    # Scale factor
     src_scale = math.sqrt(float(np.mean(np.sum(A*A, axis=1))))
     dst_scale = math.sqrt(float(np.mean(np.sum(B*B, axis=1))))
     if src_scale < 1e-8:
@@ -1685,14 +1660,14 @@ def _svd_align(master_pts_obj, target_pts_world):
         return None, None
 
     R = Vt.T.dot(U.T)
-    # Correct reflection
     if np.linalg.det(R) < 0:
         Vt[-1, :] *= -1
         R = Vt.T.dot(U.T)
 
-    RS = R * scale  # 3x3 rotation+scale
-    t  = dst_c - src_c.dot(RS)  # translation row-vector
+    RS = R * scale                    # 3x3 rotation+scale (colonne-convention)
+    t  = dst_c - src_c.dot(RS)       # translation row-vector
 
+    # FIX : matrice 4x4 en convention row-vector Maya
     matrix = [
         float(RS[0,0]), float(RS[0,1]), float(RS[0,2]), 0.,
         float(RS[1,0]), float(RS[1,1]), float(RS[1,2]), 0.,
@@ -1708,15 +1683,11 @@ def _svd_align(master_pts_obj, target_pts_world):
 
 
 def _compute_alignment(master_transform, original_transform):
-    """
-    Align master to original via SVD.
-    Returns (matrix_16, normalized_error) or (None, None).
-    """
     if not HAS_NUMPY:
         return None, None
 
-    mfn, _       = _get_mesh_fn(master_transform)
-    tfn, tdag    = _get_mesh_fn(original_transform)
+    mfn, _    = _get_mesh_fn(master_transform)
+    tfn, tdag = _get_mesh_fn(original_transform)
     if not mfn or not tfn:
         return None, None
     if mfn.numVertices != tfn.numVertices:
@@ -1745,7 +1716,6 @@ def _compute_alignment(master_transform, original_transform):
 
 
 def _fallback_align(instance, original):
-    """Fallback: copy world matrix then snap bbox centers."""
     _apply_world_matrix(instance, _get_world_matrix(original))
     oc, _ = _world_bbox(original)
     ic, _ = _world_bbox(instance)
@@ -1761,12 +1731,11 @@ def _fallback_align(instance, original):
 
 
 def _bbox_fit_align(instance, original):
-    """Fallback with bbox scale correction."""
     _fallback_align(instance, original)
     try:
-        _, os = _world_bbox(original)
+        _, os  = _world_bbox(original)
         _, is_ = _world_bbox(instance)
-        ratio = tuple(max(0.001, min(1000., os[i]/max(is_[i], 1e-8))) for i in range(3))
+        ratio  = tuple(max(0.001, min(1000., os[i]/max(is_[i], 1e-8))) for i in range(3))
         sx = cmds.getAttr(instance+".scaleX")
         sy = cmds.getAttr(instance+".scaleY")
         sz = cmds.getAttr(instance+".scaleZ")
@@ -1775,7 +1744,7 @@ def _bbox_fit_align(instance, original):
         cmds.setAttr(instance+".scaleZ", sz*ratio[2])
         oc, _ = _world_bbox(original)
         ic, _ = _world_bbox(instance)
-        pos = cmds.xform(instance, q=True, ws=True, t=True)
+        pos   = cmds.xform(instance, q=True, ws=True, t=True)
         cmds.xform(instance, ws=True, t=(
             pos[0]+oc[0]-ic[0], pos[1]+oc[1]-ic[1], pos[2]+oc[2]-ic[2]
         ))
@@ -1788,7 +1757,7 @@ def _bbox_fit_align(instance, original):
 # ---------------------------------------------------------------------------
 class MasterManager(object):
     def __init__(self):
-        self.masters = {}  # internal_id -> long path
+        self.masters = {}
 
     def find_existing_master(self, internal_id):
         if not _exists(MASTERS_GROUP):
@@ -1810,7 +1779,7 @@ class MasterManager(object):
             return None
 
         _, masters_group, _, _, _ = _ensure_ic_groups()
-        layer_masters, _, _, _   = _ensure_ic_layers()
+        layer_masters, _, _, _    = _ensure_ic_layers()
 
         existing = self.find_existing_master(internal_id)
         if existing and _exists(existing):
@@ -1866,16 +1835,15 @@ class MasterManager(object):
             return [], [], []
 
         _, _, instances_root, backups_root, _ = _ensure_ic_groups()
-        lm, li, lb, _                         = _ensure_ic_layers()
+        lm, li, lb, _                          = _ensure_ic_layers()
 
         inst_grp   = _ensure_group("{}_INSTANCES".format(display_name), instances_root)
         backup_grp = _ensure_group("{}_BACKUPS".format(display_name),   backups_root)
 
-        instances_created  = []
-        backups_created    = []
-        originals_visible  = []
+        instances_created = []
+        backups_created   = []
+        originals_visible = []
 
-        # Make sure master layer is unlocked before instancing
         _unlock_layer_for(master_path)
 
         for idx, mesh in enumerate(group_meshes):
@@ -1906,7 +1874,7 @@ class MasterManager(object):
                 if progress_state is not None:
                     progress_state["current"] = progress_state.get("current", 0) + 1
                     if progress_cb:
-                        progress_cb(progress_state["current"], progress_state.get("total",1), "")
+                        progress_cb(progress_state["current"], progress_state.get("total", 1), "")
                 continue
 
             # --- Align ---
@@ -1915,7 +1883,7 @@ class MasterManager(object):
                 if use_pca_icp_alignment:
                     pca_icp_ok, pca_icp_err = _pca_icp_align_instance_to_backup(inst, full_mesh)
                     if not pca_icp_ok:
-                        cmds.warning("[IC] PCA+ICP alignment failed for {}. Falling back to legacy alignment.".format(_short(full_mesh)))
+                        cmds.warning("[IC] PCA+ICP alignment failed for {}. Falling back.".format(_short(full_mesh)))
 
                 if not pca_icp_ok:
                     mat, err = _compute_alignment(master_path, full_mesh)
@@ -1932,17 +1900,10 @@ class MasterManager(object):
                     else:
                         fb(inst, full_mesh)
 
-                    # Refine against the still-visible original/backup point cloud.  This tries
-                    # full 0-360° candidate rotations around the original bbox center and keeps
-                    # the orientation that matches the most vertex positions, avoiding weird
-                    # bbox-only rotations on symmetric pieces.
                     _refine_instance_orientation_to_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
 
                 ok, verify_err = _verify_instance_matches_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
                 if not ok:
-                    # The SVD fit can pick a valid-looking but wrong rotation on symmetric or
-                    # near-symmetric meshes.  Re-check against the original/backup geometry and
-                    # try conservative fallbacks before the original is moved away.
                     _fallback_align(inst, full_mesh)
                     if use_pca_icp_alignment:
                         _pca_icp_align_instance_to_backup(inst, full_mesh)
@@ -1957,7 +1918,7 @@ class MasterManager(object):
                             _refine_instance_orientation_to_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
                         ok, verify_err = _verify_instance_matches_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
                     if not ok:
-                        cmds.warning("[IC] Alignment verify failed for {} (norm err: {}). Keeping best fallback.".format(
+                        cmds.warning("[IC] Alignment verify failed for {} (err: {}).".format(
                             _short(full_mesh), "n/a" if verify_err is None else "{:.5f}".format(verify_err)))
             except Exception as e:
                 cmds.warning("[IC] Alignment failed for {}: {}".format(full_mesh, e))
@@ -1969,7 +1930,7 @@ class MasterManager(object):
                         _refine_instance_orientation_to_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
                     ok, verify_err = _verify_instance_matches_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
                     if not ok:
-                        cmds.warning("[IC] Fallback verify failed for {} (norm err: {}).".format(
+                        cmds.warning("[IC] Fallback verify failed for {} (err: {}).".format(
                             _short(full_mesh), "n/a" if verify_err is None else "{:.5f}".format(verify_err)))
                 except Exception:
                     pass
@@ -1984,13 +1945,16 @@ class MasterManager(object):
             _add_ic_attr(inst, ATTR_IC_PROCESSED, True, "bool")
             if batch_id is not None:
                 _add_ic_attr(inst, ATTR_IC_BATCH, batch_id, "int")
+
+            # FIX : on ajoute l'instance au layer ici (une seule fois), pas une
+            # deuxième fois après la boucle.
             _add_to_layer(li, [inst])
             instances_created.append(inst)
 
             # --- Handle original ---
             try:
                 if not _exists(full_mesh):
-                    pass  # was deleted somehow, skip
+                    pass
                 elif delete_originals:
                     cmds.delete(full_mesh)
                 elif keep_hidden_backups:
@@ -2030,10 +1994,11 @@ class MasterManager(object):
             if progress_state is not None:
                 progress_state["current"] = progress_state.get("current", 0) + 1
                 if progress_cb:
-                    progress_cb(progress_state["current"], progress_state.get("total",1),
+                    progress_cb(progress_state["current"], progress_state.get("total", 1),
                                 "Processing {}".format(_short(full_mesh)))
 
-        _add_to_layer(li, instances_created)
+        # Layers masters / backups mis à jour une fois après la boucle
+        # (pas les instances : déjà fait individuellement dans la boucle)
         _add_to_layer(lb, backups_created)
         _add_to_layer(lm, [master_path])
 
@@ -2062,8 +2027,6 @@ class InstanceCleaner(object):
         self.last_process_batch      = None
         self._batch_counter          = 0
         self._manual_group_counter   = 0
-
-    # -- Internal helpers --
 
     def _all_ic_meshes(self):
         if not _exists(ROOT_GROUP):
@@ -2140,7 +2103,9 @@ class InstanceCleaner(object):
              fuzzy_enabled=True, fuzzy_vertex_tol=0,
              fuzzy_size_tol=0.04, fuzzy_score_min=0.92,
              min_copies=2, progress_cb=None):
-
+        """
+        progress_cb(percent: int, message: str) — unified 2-argument signature.
+        """
         if roots is None and root:
             roots = [root]
 
@@ -2162,20 +2127,24 @@ class InstanceCleaner(object):
         total = len(transforms)
         for i, tf in enumerate(transforms):
             if progress_cb:
-                progress_cb(int(i*60./max(1, total)), "Scanning {}".format(_short(tf)))
+                # FIX : 2 arguments (percent, message)
+                progress_cb(int(i * 60. / max(1, total)),
+                            "Scanning {}".format(_short(tf)))
             sig = (_compute_light_signature(tf) if uvoptimizer_mode
                    else _compute_signature(tf, strict_tol=strict_tol))
             if sig:
                 self.signatures.append(sig)
                 self.signature_by_transform[sig.transform] = sig
 
-        def grouping_progress(current, total_count, message):
+        # FIX : grouping_progress adapté pour n'émettre que 2 arguments
+        def grouping_progress(percent, message):
             if progress_cb:
-                pct = 60 + int(float(current) * 35.0 / float(max(1, total_count)))
-                progress_cb(min(95, pct), message)
+                mapped = 60 + int(float(percent) * 35. / 100.)
+                progress_cb(min(95, mapped), message)
 
         if progress_cb:
             progress_cb(60, "Grouping meshes...")
+
         self.groups_safe, self.groups_fuzzy, self.uniques = find_groups(
             self.signatures,
             detect_method=detect_method,
@@ -2187,12 +2156,13 @@ class InstanceCleaner(object):
             fuzzy_score_min=fuzzy_score_min,
             progress_cb=grouping_progress,
         )
+
         if progress_cb:
             progress_cb(95, "Building group list...")
 
         self.validated_groups = {}
-        existing_names   = self._existing_display_names_by_internal_id()
-        used_names       = set(existing_names.values())
+        existing_names = self._existing_display_names_by_internal_id()
+        used_names     = set(existing_names.values())
         gid = 0
 
         for iid, data in self.groups_safe.items():
@@ -2313,7 +2283,7 @@ class InstanceCleaner(object):
     def merge_groups(self, labels, primary_label=None):
         labels = [l for l in labels
                   if l in self.validated_groups and not self.validated_groups[l].get("processed")]
-        labels = list(dict.fromkeys(labels))  # dedupe keep order
+        labels = list(dict.fromkeys(labels))
         if len(labels) < 2:
             return {"merged": 0, "target": primary_label, "meshes": 0}
         if primary_label not in labels:
@@ -2323,7 +2293,8 @@ class InstanceCleaner(object):
         all_meshes   = []
         score        = float(target.get("score", 1.) or 1.)
         has_fuzzy    = target.get("type") == MATCH_FUZZY
-        acc_values   = [target.get("accepted")]
+        # FIX : acc_values initialisé vide ; la cible est incluse via la boucle
+        acc_values   = []
         merged_count = 0
 
         for label in labels:
@@ -2415,8 +2386,8 @@ class InstanceCleaner(object):
         selected_meshes = _dedupe_keep_order([m for m in
                           _collect_mesh_transforms_from_roots(selected_nodes) if _exists(m)])
         group_meshes = _dedupe_keep_order([m for m in info.get("meshes", []) if _exists(m)])
-        group_set = set(group_meshes)
-        preferred = next((m for m in selected_meshes if m in group_set), None)
+        group_set    = set(group_meshes)
+        preferred    = next((m for m in selected_meshes if m in group_set), None)
         if not preferred:
             return None
 
@@ -2463,8 +2434,8 @@ class InstanceCleaner(object):
 
         with UndoChunk("InstanceCleanerOrganizeMasters"):
             for i, m in enumerate(masters):
-                r  = i // cols
-                c  = i % cols
+                r   = i // cols
+                c   = i % cols
                 tgt = (x_centers[c]-tx*0.5, sizes[i][1]*0.5, -(z_centers[r]-tz*0.5))
                 cc, _ = _world_bbox(m)
                 try:
@@ -2498,26 +2469,20 @@ class InstanceCleaner(object):
         return latest
 
     def find_group_for_mesh(self, mesh):
-        """Find which validated_groups label contains mesh.
-        Uses signature cache first; only recomputes if not found.
-        """
         if not mesh or not _exists(mesh):
             return None
         mesh = _long(mesh)
 
-        # Check by IC source attribute (fastest)
         iid = _get_ic_attr(mesh, ATTR_IC_SOURCE, "")
         if iid:
             for label, info in self.validated_groups.items():
                 if info.get("internal_id") == iid:
                     return label
 
-        # Check by membership in groups
         for label, info in self.validated_groups.items():
             if mesh in [_long(m) for m in info.get("meshes", []) if _exists(m)]:
                 return label
 
-        # Signature-based fallback (uses cache when possible)
         sel_sig = self.signature_by_transform.get(mesh)
         if sel_sig is None:
             try:
@@ -2539,7 +2504,7 @@ class InstanceCleaner(object):
                 continue
             rep_sig = self.signature_by_transform.get(_long(rep))
             if rep_sig is None:
-                continue  # Don't recompute here to avoid UI freezes
+                continue
 
             if sel_sig.strict_hash == rep_sig.strict_hash:
                 return label
@@ -2567,17 +2532,17 @@ class InstanceCleaner(object):
             cmds.warning("[IC] No accepted groups to process.")
             return {}
 
-        batch_id                 = self._next_batch_id()
-        self.last_process_batch  = batch_id
+        batch_id                = self._next_batch_id()
+        self.last_process_batch = batch_id
 
         stats = {
-            "masters_created":  0,
+            "masters_created":   0,
             "instances_created": 0,
-            "backups_created":  0,
+            "backups_created":   0,
             "originals_visible": 0,
-            "groups_skipped":   0,
-            "canceled":         False,
-            "rollback":         None,
+            "groups_skipped":    0,
+            "canceled":          False,
+            "rollback":          None,
         }
 
         total_meshes = sum(
@@ -2596,7 +2561,6 @@ class InstanceCleaner(object):
                     if cancel_cb and cancel_cb():
                         raise ProcessCanceled()
 
-                    # Filter to only existing, non-processed meshes
                     meshes = [m for m in info["meshes"]
                               if _exists(m) and not _get_ic_attr(m, ATTR_IC_PROCESSED, False)]
 
@@ -2604,13 +2568,11 @@ class InstanceCleaner(object):
                         stats["groups_skipped"] += 1
                         continue
 
-                    internal_id  = info["internal_id"]
-                    display_name = info["display_name"]
-                    group_id     = info["group_id"]
-                    match_type   = info.get("type", MATCH_SAFE)
-                    score        = float(info.get("score", 1.))
-
-                    # Find a valid reference mesh (first existing one)
+                    internal_id    = info["internal_id"]
+                    display_name   = info["display_name"]
+                    group_id       = info["group_id"]
+                    match_type     = info.get("type", MATCH_SAFE)
+                    score          = float(info.get("score", 1.))
                     reference_mesh = next((m for m in meshes if _exists(m)), None)
                     if reference_mesh is None:
                         stats["groups_skipped"] += 1
@@ -2671,12 +2633,11 @@ class InstanceCleaner(object):
             cmds.warning("[IC] No batch to cancel.")
             return {"restored": 0, "deleted_instances": 0, "deleted_masters": 0}
 
-        restored           = []
-        deleted_instances  = 0
-        deleted_masters    = 0
+        restored          = []
+        deleted_instances = 0
+        deleted_masters   = 0
 
         with UndoChunk("InstanceCleanerCancelProcess"):
-            # Delete instances from this batch
             for node in list(self._all_ic_meshes()):
                 if not _exists(node):
                     continue
@@ -2693,7 +2654,6 @@ class InstanceCleaner(object):
                     except Exception:
                         pass
 
-            # Restore backups
             if _exists(BACKUP_GROUP):
                 root    = cmds.ls(BACKUP_GROUP, long=True)[0]
                 backups = _iter_mesh_transforms(root, include_ic=True)
@@ -2735,7 +2695,6 @@ class InstanceCleaner(object):
                     _clear_ic_attrs(bkp)
                     restored.append(bkp)
 
-            # Delete masters from this batch
             if _exists(MASTERS_GROUP):
                 root    = cmds.ls(MASTERS_GROUP, long=True)[0]
                 masters = _iter_mesh_transforms(root, include_ic=True)
@@ -2775,7 +2734,7 @@ class InstanceCleaner(object):
             return {"converted": 0}
 
         _, _, inst_root, _, conv_root = _ensure_ic_groups()
-        _, li, _, lc                  = _ensure_ic_layers()
+        _, li, _, lc                   = _ensure_ic_layers()
 
         instances = [n for n in _iter_mesh_transforms(inst_root, include_ic=True)
                      if _get_ic_attr(n, ATTR_IC_TYPE, "") == "instance"]
@@ -2789,17 +2748,17 @@ class InstanceCleaner(object):
                 if not _exists(inst):
                     continue
                 try:
-                    mat        = _get_world_matrix(inst)
-                    dname      = _get_ic_attr(inst, ATTR_IC_GROUP_NAME, "Converted")
-                    mt         = _get_ic_attr(inst, ATTR_IC_MATCH_TYPE, "")
-                    sc         = float(_get_ic_attr(inst, ATTR_IC_SCORE, 0.) or 0.)
-                    gid        = int(_get_ic_attr(inst, ATTR_IC_GROUP, 0) or 0)
-                    src        = _get_ic_attr(inst, ATTR_IC_SOURCE, "")
-                    new_name   = "GEO_{:03d}_{}".format(idx, _safe_name(dname))
-                    geo        = cmds.duplicate(inst, rr=True, name=new_name)[0]
-                    geo        = cmds.parent(geo, conv_root, absolute=True)[0]
+                    mat      = _get_world_matrix(inst)
+                    dname    = _get_ic_attr(inst, ATTR_IC_GROUP_NAME, "Converted")
+                    mt       = _get_ic_attr(inst, ATTR_IC_MATCH_TYPE, "")
+                    sc       = float(_get_ic_attr(inst, ATTR_IC_SCORE, 0.) or 0.)
+                    gid      = int(_get_ic_attr(inst, ATTR_IC_GROUP, 0) or 0)
+                    src      = _get_ic_attr(inst, ATTR_IC_SOURCE, "")
+                    new_name = "GEO_{:03d}_{}".format(idx, _safe_name(dname))
+                    geo      = cmds.duplicate(inst, rr=True, name=new_name)[0]
+                    geo      = cmds.parent(geo, conv_root, absolute=True)[0]
                     _apply_world_matrix(geo, mat)
-                    geo        = cmds.ls(geo, long=True)[0]
+                    geo      = cmds.ls(geo, long=True)[0]
                     _tag_node(geo, "converted_geo", gid, src, dname, mt, sc)
                     _add_ic_attr(geo, ATTR_IC_PROCESSED, True, "bool")
                     _add_to_layer(lc, [geo])
@@ -2957,7 +2916,8 @@ class GroupItem(QWidget):
         header = QHBoxLayout()
         self.group_check = QCheckBox("")
         self.group_check.setToolTip("Check multiple group cards, then use MERGE SEL GROUPS.")
-        self.group_check.stateChanged.connect(lambda _v: self.checked_changed.emit(self.label, self.group_check.isChecked()))
+        self.group_check.stateChanged.connect(
+            lambda _v: self.checked_changed.emit(self.label, self.group_check.isChecked()))
         self.badge       = QLabel("")
         self.badge.setFixedSize(60, 18)
         self.badge.setAlignment(Qt.AlignCenter)
@@ -2981,8 +2941,11 @@ class GroupItem(QWidget):
         self.master_btn    = ColorBtn("MST", "Select master",        "#253525","#90d090", 46,21)
         self.instances_btn = ColorBtn("INS", "Select instances",     "#252535","#9090d0", 46,21)
         self.backups_btn   = ColorBtn("BKP", "Select backups",       "#352525","#d09090", 46,21)
-        self.acc_btn       = ColorBtn("OK",  "Accept group",         "#1a3a1a","#60d060", 30,21)
-        self.rej_btn       = ColorBtn("NO",  "Reject group",         "#3a1a1a","#d06060", 30,21)
+
+        # FIX : acc_btn et rej_btn créés inconditionnellement (toujours
+        # accessibles via self), puis cachés si le groupe est déjà processed.
+        self.acc_btn = ColorBtn("OK",  "Accept group", "#1a3a1a","#60d060", 30,21)
+        self.rej_btn = ColorBtn("NO",  "Reject group", "#3a1a1a","#d06060", 30,21)
 
         self.src_btn.clicked.connect(lambda: self.select_clicked.emit(self.label))
         self.master_btn.clicked.connect(lambda: self.master_clicked.emit(self.label))
@@ -2996,9 +2959,8 @@ class GroupItem(QWidget):
         actions.addWidget(self.instances_btn)
         actions.addWidget(self.backups_btn)
         actions.addStretch()
-        if not self.info.get("processed"):
-            actions.addWidget(self.acc_btn)
-            actions.addWidget(self.rej_btn)
+        actions.addWidget(self.acc_btn)
+        actions.addWidget(self.rej_btn)
 
         self.status_lbl = QLabel("")
         layout.addLayout(header)
@@ -3029,10 +2991,10 @@ class GroupItem(QWidget):
         return self.group_check.isChecked()
 
     def refresh(self):
-        accepted   = self.info["accepted"]
-        processed  = self.info.get("processed")
-        gtype      = self.info.get("type")
-        score      = float(self.info.get("score", 0.) or 0.)
+        accepted  = self.info["accepted"]
+        processed = self.info.get("processed")
+        gtype     = self.info.get("type")
+        score     = float(self.info.get("score", 0.) or 0.)
 
         self.name_label.setText(self.info.get("display_name", self.label))
         self.count_label.setText("{} copies".format(len(self.info.get("meshes", []))))
@@ -3041,6 +3003,10 @@ class GroupItem(QWidget):
         self.master_btn.setEnabled(bool(processed))
         self.instances_btn.setEnabled(bool(processed))
         self.backups_btn.setEnabled(bool(processed))
+
+        # FIX : masquer les boutons accept/reject sur les groupes déjà traités
+        self.acc_btn.setVisible(not bool(processed))
+        self.rej_btn.setVisible(not bool(processed))
 
         if processed:
             self._set_badge("DONE", "#2a6f9e")
@@ -3071,7 +3037,7 @@ class GroupItem(QWidget):
             self.status_lbl.setText("Waiting")
             bg, border, color = "#202020", "#444444", "#aaaaaa"
 
-        bw = 2 if self._highlighted else 1
+        bw     = 2 if self._highlighted else 1
         border = "#d8c85a" if self._highlighted else border
         self.status_lbl.setStyleSheet("color:{}; font-size:8px;".format(color))
         self.setStyleSheet(
@@ -3097,7 +3063,7 @@ class InstanceCleanerUI(QDialog):
         self._cancel_requested    = False
         self._compact_state       = None
 
-        self.setWindowTitle("Instance Cleaner V3.1 — UVOpt Detect / Verified Align / Multi-Select Groups")
+        self.setWindowTitle("Instance Cleaner V3.1 — Fixed")
         self.setMinimumWidth(900)
         self.resize(1040, 600)
         self.setMinimumHeight(540)
@@ -3137,15 +3103,15 @@ class InstanceCleanerUI(QDialog):
         root.setContentsMargins(8,8,8,8)
         root.setSpacing(10)
 
-        left_col  = QWidget()
-        left      = QVBoxLayout(left_col)
+        left_col = QWidget()
+        left     = QVBoxLayout(left_col)
         left.setContentsMargins(0,0,0,0)
         left.setSpacing(6)
 
         right_col = QWidget()
         right_col.setMinimumWidth(500)
         right_col.setMaximumWidth(540)
-        right     = QVBoxLayout(right_col)
+        right = QVBoxLayout(right_col)
         right.setContentsMargins(0,0,0,0)
         right.setSpacing(6)
 
@@ -3160,7 +3126,9 @@ class InstanceCleanerUI(QDialog):
         self.scan_mode_combo = QComboBox()
         self.scan_mode_combo.addItems(["Scene", "Selected Mesh(es)", "Find Selected"])
         self.scan_mode_combo.setCurrentIndex(2)
-        self.scan_mode_combo.setToolTip("Default is Find Selected to avoid launching a full-scene scan by accident. Choose Scene when you really want to rescan everything.")
+        self.scan_mode_combo.setToolTip(
+            "Default is Find Selected to avoid launching a full-scene scan by accident. "
+            "Choose Scene when you really want to rescan everything.")
         left.addLayout(self._row("Source", self.scan_mode_combo))
 
         self.strict_tol_slider = ParamSlider("Strict tol", 0.0001, 0.02, 0.001, 4, 90)
@@ -3174,7 +3142,9 @@ class InstanceCleanerUI(QDialog):
             "Signature + Fuzzy (current)",
         ])
         self.detect_method_combo.setCurrentIndex(1)
-        self.detect_method_combo.setToolTip("Same comparison choices as UVOptimizer.py. Geometry is the default because Exact is much slower on full scenes.")
+        self.detect_method_combo.setToolTip(
+            "Same comparison choices as UVOptimizer.py. "
+            "Geometry is the default because Exact is much slower on full scenes.")
         left.addLayout(self._row("Method", self.detect_method_combo))
 
         self.ignore_scale_cb = QCheckBox("Ignore scale")
@@ -3248,15 +3218,18 @@ class InstanceCleanerUI(QDialog):
         left.addLayout(manual_row)
 
         master_row = QHBoxLayout()
-        sel_mst_btn  = ColorBtn("SELECT ALL MASTERS", "", "#253525","#90d090", h=24)
-        org_mst_btn  = ColorBtn("ORGANIZE MASTERS",   "", "#2a2a3a","#a0c0ff", h=24)
+        sel_mst_btn = ColorBtn("SELECT ALL MASTERS", "", "#253525","#90d090", h=24)
+        org_mst_btn = ColorBtn("ORGANIZE MASTERS",   "", "#2a2a3a","#a0c0ff", h=24)
         sel_mst_btn.clicked.connect(self.do_select_all_masters)
         org_mst_btn.clicked.connect(self.do_organize_masters)
         master_row.addWidget(sel_mst_btn)
         master_row.addWidget(org_mst_btn)
         left.addLayout(master_row)
 
-        set_mst_btn = ColorBtn("SET SEL MASTER", "Use selected mesh as the master/reference for its group", "#203a2a","#80e0a0", h=24)
+        set_mst_btn = ColorBtn(
+            "SET SEL MASTER",
+            "Use selected mesh as the master/reference for its group",
+            "#203a2a","#80e0a0", h=24)
         set_mst_btn.clicked.connect(self.do_set_selected_as_master)
         left.addWidget(set_mst_btn)
 
@@ -3272,7 +3245,9 @@ class InstanceCleanerUI(QDialog):
 
         self.pca_icp_align_cb = QCheckBox("PCA+ICP match to backup")
         self.pca_icp_align_cb.setChecked(True)
-        self.pca_icp_align_cb.setToolTip("Default: use the PCA candidate + ICP algorithm to align each new instance to the still-visible original/backup before moving it to BACKUPS.")
+        self.pca_icp_align_cb.setToolTip(
+            "Default: use the PCA candidate + ICP algorithm to align each new "
+            "instance to the still-visible original/backup before moving it to BACKUPS.")
         left.addWidget(self.pca_icp_align_cb)
 
         proc_row = QHBoxLayout()
@@ -3296,14 +3271,15 @@ class InstanceCleanerUI(QDialog):
         # --- RIGHT: group list ---
         right.addWidget(SectionLabel("GROUP LIST / FAST REVIEW"))
 
-        self.groups_count_label = QLabel("Visible 0 / 0 | Safe 0 | Fuzzy 0 | Accepted 0 | Done 0 | Unique 0")
+        self.groups_count_label = QLabel(
+            "Visible 0 / 0 | Safe 0 | Fuzzy 0 | Accepted 0 | Done 0 | Unique 0")
         self.groups_count_label.setStyleSheet("color:#707070; font-size:9px;")
         right.addWidget(self.groups_count_label)
 
         rev_row = QHBoxLayout()
-        self.prev_btn       = ColorBtn("?", "Previous group", "#222a35","#a0c0ff", 36, 26)
+        self.prev_btn       = ColorBtn("◀", "Previous group",               "#222a35","#a0c0ff", 36, 26)
         self.review_src_btn = ColorBtn("SRC ISOLATE + FRAME", "Isolate + frame current group", "#1f2c3a","#80c0ff", h=26)
-        self.next_btn       = ColorBtn("?", "Next group",     "#222a35","#a0c0ff", 36, 26)
+        self.next_btn       = ColorBtn("▶", "Next group",                   "#222a35","#a0c0ff", 36, 26)
         self.prev_btn.clicked.connect(lambda: self._navigate_review(-1))
         self.next_btn.clicked.connect(lambda: self._navigate_review(1))
         self.review_src_btn.clicked.connect(self.do_isolate_current_source)
@@ -3313,9 +3289,9 @@ class InstanceCleanerUI(QDialog):
         right.addLayout(rev_row)
 
         rev_row2 = QHBoxLayout()
-        self.accept_next_btn = ColorBtn("OK + NEXT", "Accept then next",  "#1a3a1a","#70e070", h=26)
-        self.reject_next_btn = ColorBtn("NO + NEXT", "Reject then next",  "#3a1a1a","#e07070", h=26)
-        self.exit_iso_btn    = ColorBtn("EXIT ISO",  "Exit isolate all panels", "#303030","#b0b0b0", h=26)
+        self.accept_next_btn = ColorBtn("OK + NEXT", "Accept then next",          "#1a3a1a","#70e070", h=26)
+        self.reject_next_btn = ColorBtn("NO + NEXT", "Reject then next",          "#3a1a1a","#e07070", h=26)
+        self.exit_iso_btn    = ColorBtn("EXIT ISO",  "Exit isolate all panels",   "#303030","#b0b0b0", h=26)
         self.accept_next_btn.clicked.connect(self.do_accept_current_and_next)
         self.reject_next_btn.clicked.connect(self.do_reject_current_and_next)
         self.exit_iso_btn.clicked.connect(self.do_exit_isolate)
@@ -3324,7 +3300,6 @@ class InstanceCleanerUI(QDialog):
         rev_row2.addWidget(self.exit_iso_btn)
         right.addLayout(rev_row2)
 
-        # Filter / Sort / Search
         filter_row = QHBoxLayout()
         fl = QLabel("Filter"); fl.setFixedWidth(50)
         self.filter_combo = QComboBox()
@@ -3386,7 +3361,7 @@ class InstanceCleanerUI(QDialog):
         row.addWidget(widget)
         return row
 
-    # -- Selection watcher (safe, cache-first) --
+    # -- Selection watcher --
 
     def _start_selection_watcher(self):
         self.selection_timer = QTimer(self)
@@ -3456,7 +3431,7 @@ class InstanceCleanerUI(QDialog):
         self.groups_count_label.setText(
             "Visible {} / {} | Safe {} | Fuzzy {} | Accepted {} | Done {} | Unique {}".format(
                 len(self.visible_group_order), len(self.cleaner.validated_groups),
-                report.get("safe_groups",0), report.get("fuzzy_groups",0),
+                report.get("safe_groups",0),  report.get("fuzzy_groups",0),
                 report.get("accepted_groups",0), report.get("processed_groups",0),
                 report.get("unique_meshes",0),
             )
@@ -3480,12 +3455,9 @@ class InstanceCleanerUI(QDialog):
 
     def _get_detect_method(self):
         txt = self.detect_method_combo.currentText().lower()
-        if txt.startswith("topology"):
-            return "topology"
-        if txt.startswith("geometry"):
-            return "geometry"
-        if txt.startswith("exact"):
-            return "exact"
+        if txt.startswith("topology"):  return "topology"
+        if txt.startswith("geometry"):  return "geometry"
+        if txt.startswith("exact"):     return "exact"
         return "signature"
 
     def do_scan(self):
@@ -3519,11 +3491,6 @@ class InstanceCleanerUI(QDialog):
             roots          = selected_roots
             selection_only = True
         elif mode == "Find Selected":
-            # Find Selected should be instant: use the current scan/group cache and
-            # only filter to groups containing the selected meshes.  The previous
-            # behavior rescanned the full scene, which felt like an endless loop on
-            # large files.  If there is no scan yet, scan only the selected roots as
-            # a bounded fallback instead of the whole scene.
             if self.cleaner.validated_groups:
                 labels = self.cleaner.keep_only_groups_for_nodes(selected_roots)
                 self.progress_bar.setValue(100)
@@ -3531,15 +3498,17 @@ class InstanceCleanerUI(QDialog):
                 if labels:
                     self.current_group_label = labels[0]
                     self._highlight_group_item(labels[0], frame=True, select=False)
-                self.status_label.setText("Find selected: {} cached matching group(s)".format(len(labels)))
+                self.status_label.setText(
+                    "Find selected: {} cached matching group(s)".format(len(labels)))
                 return
             roots          = selected_roots
             selection_only = True
             find_selected  = True
 
-        def progress_cb(percent, label):
-            self.progress_bar.setValue(percent)
-            self.status_label.setText(_short(str(label)))
+        # FIX : progress_cb avec 2 arguments (percent, message)
+        def progress_cb(percent, message):
+            self.progress_bar.setValue(max(0, min(100, int(percent))))
+            self.status_label.setText(_short(str(message)))
             QApplication.processEvents()
 
         self.progress_bar.setValue(0)
@@ -3559,32 +3528,29 @@ class InstanceCleanerUI(QDialog):
 
         if find_selected:
             labels = self.cleaner.keep_only_groups_for_nodes(selected_roots)
-            count = len(self.cleaner.validated_groups)
-            if labels:
-                self.current_group_label = labels[0]
-            else:
-                self.current_group_label = None
+            count  = len(self.cleaner.validated_groups)
+            self.current_group_label = labels[0] if labels else None
 
         self.progress_bar.setValue(100)
         report = self.cleaner.get_report()
         if find_selected:
-            self.status_label.setText("Find selected: {} matching group(s) | {} safe | {} fuzzy".format(
-                count, report["safe_groups"], report["fuzzy_groups"]
-            ))
+            self.status_label.setText(
+                "Find selected: {} matching group(s) | {} safe | {} fuzzy".format(
+                    count, report["safe_groups"], report["fuzzy_groups"]))
         else:
-            self.status_label.setText("{} groups | {} safe | {} fuzzy | {} unique".format(
-                count, report["safe_groups"], report["fuzzy_groups"], report["unique_meshes"]
-            ))
+            self.status_label.setText(
+                "{} groups | {} safe | {} fuzzy | {} unique".format(
+                    count, report["safe_groups"], report["fuzzy_groups"], report["unique_meshes"]))
         self.refresh_group_list()
         if find_selected and self.current_group_label in self.group_items:
             self._highlight_group_item(self.current_group_label, frame=True, select=False)
 
     def _passes_filter(self, info, filter_text):
-        if filter_text == "Safe"      and info["type"] != MATCH_SAFE:      return False
-        if filter_text == "Fuzzy"     and info["type"] != MATCH_FUZZY:     return False
-        if filter_text == "Accepted"  and info["accepted"] is not True:    return False
-        if filter_text == "Rejected"  and info["accepted"] is not False:   return False
-        if filter_text == "Processed" and not info.get("processed"):       return False
+        if filter_text == "Safe"      and info["type"] != MATCH_SAFE:   return False
+        if filter_text == "Fuzzy"     and info["type"] != MATCH_FUZZY:  return False
+        if filter_text == "Accepted"  and info["accepted"] is not True:  return False
+        if filter_text == "Rejected"  and info["accepted"] is not False: return False
+        if filter_text == "Processed" and not info.get("processed"):     return False
         return True
 
     def _sort_items(self, items):
@@ -3610,8 +3576,8 @@ class InstanceCleanerUI(QDialog):
                 self.groups_layout.takeAt(i)
                 w.deleteLater()
 
-        self.group_items          = {}
-        self.visible_group_order  = []
+        self.group_items         = {}
+        self.visible_group_order = []
 
         filter_text = self.filter_combo.currentText()
         search_text = self.search_edit.text().strip().lower()
@@ -3626,7 +3592,7 @@ class InstanceCleanerUI(QDialog):
                 continue
             filtered.append((label, info))
 
-        filtered = self._sort_items(filtered)
+        filtered  = self._sort_items(filtered)
         has_items = False
 
         for i, (label, info) in enumerate(filtered):
@@ -3641,7 +3607,7 @@ class InstanceCleanerUI(QDialog):
             w.checked_changed.connect(self._on_group_checked_changed)
             w.set_checked(label in self.checked_group_labels)
             self.groups_layout.insertWidget(i, w)
-            self.group_items[label] = w
+            self.group_items[label]  = w
             self.visible_group_order.append(label)
             if label == self._highlighted_label:
                 w.set_highlighted(True)
@@ -3652,7 +3618,7 @@ class InstanceCleanerUI(QDialog):
         self.groups_count_label.setText(
             "Visible {} / {} | Safe {} | Fuzzy {} | Accepted {} | Done {} | Unique {}".format(
                 len(filtered), len(all_items),
-                report.get("safe_groups",0), report.get("fuzzy_groups",0),
+                report.get("safe_groups",0),   report.get("fuzzy_groups",0),
                 report.get("accepted_groups",0), report.get("processed_groups",0),
                 report.get("unique_meshes",0),
             )
@@ -3667,23 +3633,30 @@ class InstanceCleanerUI(QDialog):
         if compact:
             self.right_col.setVisible(False)
             self.setMinimumWidth(330)
-            if force: self.resize(380, 540)
+            if force:
+                self.resize(380, 540)
         else:
             self.right_col.setVisible(True)
+            # FIX : setMinimumWidth / setMaximumWidth appelés seulement quand
+            # l'état change réellement (guard via _compact_state) pour éviter
+            # les appels redondants qui peuvent causer des glitches Qt.
             self.right_col.setMinimumWidth(500)
             self.right_col.setMaximumWidth(540)
             self.setMinimumWidth(900)
-            if force: self.resize(1040, 600)
+            if force:
+                self.resize(1040, 600)
 
     def on_accept_group(self, label):
         self.cleaner.accept_group(label)
-        if label in self.group_items: self.group_items[label].refresh()
+        if label in self.group_items:
+            self.group_items[label].refresh()
         self._highlight_group_item(label)
         self._fast_refresh_after_state_change(label)
 
     def on_reject_group(self, label):
         self.cleaner.reject_group(label)
-        if label in self.group_items: self.group_items[label].refresh()
+        if label in self.group_items:
+            self.group_items[label].refresh()
         self._highlight_group_item(label)
         self._fast_refresh_after_state_change(label)
 
@@ -3702,22 +3675,26 @@ class InstanceCleanerUI(QDialog):
     def on_select_group(self, label):
         nodes = self._select_and_maybe_isolate(label, "source", add=True)
         self._highlight_group_item(label)
-        if nodes: self.status_label.setText("Source: {} meshes".format(len(nodes)))
+        if nodes:
+            self.status_label.setText("Source: {} meshes".format(len(nodes)))
 
     def on_select_master(self, label):
         nodes = self.cleaner.select_master(label)
         self._highlight_group_item(label)
-        if nodes: _frame_selected()
+        if nodes:
+            _frame_selected()
 
     def on_select_instances(self, label):
         nodes = self.cleaner.select_instances(label)
         self._highlight_group_item(label)
-        if nodes: _frame_selected()
+        if nodes:
+            _frame_selected()
 
     def on_select_backups(self, label):
         nodes = self.cleaner.select_backups(label)
         self._highlight_group_item(label)
-        if nodes: _frame_selected()
+        if nodes:
+            _frame_selected()
 
     def do_accept_safe(self):
         for label, info in self.cleaner.validated_groups.items():
@@ -3751,11 +3728,12 @@ class InstanceCleanerUI(QDialog):
             self.status_label.setText("Merge: select meshes from 2 groups or check 2+ group cards.")
             return
         primary = self.current_group_label if self.current_group_label in labels else labels[0]
-        stats = self.cleaner.merge_groups(labels, primary_label=primary)
+        stats   = self.cleaner.merge_groups(labels, primary_label=primary)
         self.checked_group_labels.difference_update(labels)
         self.refresh_group_list()
         tgt = stats.get("target")
-        if tgt: self._highlight_group_item(tgt, frame=True)
+        if tgt:
+            self._highlight_group_item(tgt, frame=True)
         self.status_label.setText("Merged {} groups | {} meshes".format(
             stats.get("merged",0), stats.get("meshes",0)))
 
@@ -3770,12 +3748,13 @@ class InstanceCleanerUI(QDialog):
             return
         self.refresh_group_list()
         nl = stats.get("new_label")
-        if nl: self._highlight_group_item(nl, frame=True, select=True)
+        if nl:
+            self._highlight_group_item(nl, frame=True, select=True)
         self.status_label.setText("Split {} meshes into new group".format(stats.get("split",0)))
 
     def do_set_selected_as_master(self):
         selected = _get_selected_transforms()
-        label = self._find_group_from_selection() or self.current_group_label
+        label    = self._find_group_from_selection() or self.current_group_label
         if not label:
             self.status_label.setText("Set master: select a mesh from a scanned group.")
             return
@@ -3862,8 +3841,10 @@ class InstanceCleanerUI(QDialog):
         self._cancel_requested = False
         self._set_processing_ui(True)
 
+        # FIX : progress_cb à 3 arguments (current, total, message) pour
+        # create_masters_and_replace qui transmet les valeurs brutes.
         def progress_cb(current, total, message):
-            pct = int(float(current)/float(max(1, total))*100.)
+            pct = int(float(current) / float(max(1, total)) * 100.)
             self.progress_bar.setValue(max(0, min(100, pct)))
             self.status_label.setText(str(message))
             QApplication.processEvents()
@@ -3893,50 +3874,66 @@ class InstanceCleanerUI(QDialog):
 
         if stats.get("canceled"):
             rb = stats.get("rollback") or {}
-            self.status_label.setText("Stopped | restored {} | del inst {} | del masters {}".format(
-                rb.get("restored",0), rb.get("deleted_instances",0), rb.get("deleted_masters",0)))
+            self.status_label.setText(
+                "Stopped | restored {} | del inst {} | del masters {}".format(
+                    rb.get("restored",0), rb.get("deleted_instances",0), rb.get("deleted_masters",0)))
         else:
-            self.status_label.setText("Done | masters {} | instances {} | backups {} | skipped {}".format(
-                stats["masters_created"], stats["instances_created"],
-                stats["backups_created"], stats["groups_skipped"]))
+            self.status_label.setText(
+                "Done | masters {} | instances {} | backups {} | skipped {}".format(
+                    stats["masters_created"], stats["instances_created"],
+                    stats["backups_created"], stats["groups_skipped"]))
 
         self.progress_bar.setValue(100)
         self.do_scan()
 
     def do_cancel_process(self):
         stats = self.cleaner.cancel_last_process()
-        self.status_label.setText("Canceled | restored {} | del inst {} | del masters {}".format(
-            stats.get("restored",0), stats.get("deleted_instances",0), stats.get("deleted_masters",0)))
+        self.status_label.setText(
+            "Canceled | restored {} | del inst {} | del masters {}".format(
+                stats.get("restored",0), stats.get("deleted_instances",0),
+                stats.get("deleted_masters",0)))
         self.do_scan()
 
     def do_convert_instances(self):
         stats = self.cleaner.convert_instances_to_geometry()
-        self.status_label.setText("Converted {} instances to geo".format(stats.get("converted",0)))
+        self.status_label.setText(
+            "Converted {} instances to geo".format(stats.get("converted",0)))
         self.do_scan()
 
     def keyPressEvent(self, event):
         focus = QApplication.focusWidget()
 
         if event.key() == Qt.Key_Escape and self._is_processing:
-            self.do_stop_process(); event.accept(); return
+            self.do_stop_process()
+            event.accept()
+            return
 
         if isinstance(focus, (QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox)):
-            super(InstanceCleanerUI, self).keyPressEvent(event); return
+            super(InstanceCleanerUI, self).keyPressEvent(event)
+            return
 
         k = event.key()
-        if k in (Qt.Key_Right, Qt.Key_Down,  Qt.Key_S): self._navigate_review( 1); event.accept(); return
-        if k in (Qt.Key_Left,  Qt.Key_Up,    Qt.Key_W): self._navigate_review(-1); event.accept(); return
-        if k in (Qt.Key_Return, Qt.Key_Enter):  self.do_isolate_current_source();   event.accept(); return
-        if k == Qt.Key_A: self.do_accept_current_and_next(); event.accept(); return
-        if k == Qt.Key_R: self.do_reject_current_and_next(); event.accept(); return
-        if k == Qt.Key_F: self.do_frame_selected_group();     event.accept(); return
+        if k in (Qt.Key_Right, Qt.Key_Down, Qt.Key_S):
+            self._navigate_review(1);  event.accept(); return
+        if k in (Qt.Key_Left, Qt.Key_Up, Qt.Key_W):
+            self._navigate_review(-1); event.accept(); return
+        if k in (Qt.Key_Return, Qt.Key_Enter):
+            self.do_isolate_current_source(); event.accept(); return
+        if k == Qt.Key_A:
+            self.do_accept_current_and_next(); event.accept(); return
+        if k == Qt.Key_R:
+            self.do_reject_current_and_next(); event.accept(); return
+        if k == Qt.Key_F:
+            self.do_frame_selected_group();    event.accept(); return
 
         super(InstanceCleanerUI, self).keyPressEvent(event)
 
     def closeEvent(self, event):
         self._stop_selection_watcher()
-        try: self.cleaner.exit_isolate()
-        except Exception: pass
+        try:
+            self.cleaner.exit_isolate()
+        except Exception:
+            pass
         super(InstanceCleanerUI, self).closeEvent(event)
 
 

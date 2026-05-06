@@ -95,6 +95,8 @@ FUZZY_CLUSTER_REPS = 3
 
 # Extra verification used after replacing originals with instances.
 ALIGN_VERIFY_TOL_DEFAULT = 0.030
+ORIENTATION_SEARCH_STEP_DEGREES = 15
+ORIENTATION_SEARCH_MAX_POINTS = 768
 
 
 # ---------------------------------------------------------------------------
@@ -1069,7 +1071,196 @@ def _verify_instance_matches_original(instance, original, tolerance=ALIGN_VERIFY
     if rms is None:
         return False, None
     norm = rms / max(size, 1e-8)
-    return norm <= max(float(tolerance), 0.0), norm
+    tol = max(float(tolerance), 0.0)
+    if norm <= tol:
+        return True, norm
+
+    # If vertex order differs but the actual positions match, accept based on
+    # nearest point matches rather than the ordered RMS alone.
+    sample_limit = max(16, int(ORIENTATION_SEARCH_MAX_POINTS))
+    if len(inst_pts) > sample_limit:
+        step = float(len(inst_pts)) / float(sample_limit)
+        idx = [min(len(inst_pts) - 1, int(i * step)) for i in range(sample_limit)]
+        inst_check = [inst_pts[i] for i in idx]
+        orig_check = [orig_pts[i] for i in idx]
+    else:
+        inst_check = inst_pts
+        orig_check = orig_pts
+    ratio, nearest_err = _nearest_point_match_score(inst_check, orig_check, max(tol * max(size, 1e-8), 0.0001))
+    if ratio >= 0.98:
+        return True, nearest_err
+    return False, norm
+
+
+def _nearest_point_match_score(src_points, dst_points, world_tolerance):
+    """Return (matched_ratio, normalized_rms) using nearest unordered point matches.
+
+    This is intentionally not bbox-only and not vertex-order-only: every sampled
+    instance point is checked against backup/original point positions through a
+    small spatial hash.  That makes alignment verification more tolerant of mesh
+    vertex order while still catching bad rotations/flips.
+    """
+    if not src_points or not dst_points:
+        return 0.0, None
+    tol = max(float(world_tolerance), 1e-8)
+    inv = 1.0 / tol
+    buckets = defaultdict(list)
+    for p in dst_points:
+        key = (int(math.floor(p[0] * inv)), int(math.floor(p[1] * inv)), int(math.floor(p[2] * inv)))
+        buckets[key].append(p)
+
+    matched = 0
+    total_sq = 0.0
+    for p in src_points:
+        bx = int(math.floor(p[0] * inv))
+        by = int(math.floor(p[1] * inv))
+        bz = int(math.floor(p[2] * inv))
+        best_sq = None
+        for ox in (-1, 0, 1):
+            for oy in (-1, 0, 1):
+                for oz in (-1, 0, 1):
+                    for q in buckets.get((bx + ox, by + oy, bz + oz), []):
+                        dx = p[0] - q[0]
+                        dy = p[1] - q[1]
+                        dz = p[2] - q[2]
+                        d2 = dx*dx + dy*dy + dz*dz
+                        if best_sq is None or d2 < best_sq:
+                            best_sq = d2
+        if best_sq is not None and best_sq <= tol * tol:
+            matched += 1
+            total_sq += best_sq
+        else:
+            total_sq += tol * tol
+
+    ratio = float(matched) / float(max(1, len(src_points)))
+    rms = math.sqrt(total_sq / float(max(1, len(src_points))))
+    return ratio, rms / tol
+
+
+def _matrix_flat_to_np(matrix):
+    if not HAS_NUMPY or matrix is None or len(matrix) != 16:
+        return None
+    return np.array(matrix, dtype=np.float64).reshape((4, 4))
+
+
+def _matrix_np_to_flat(matrix):
+    return [float(v) for v in np.asarray(matrix, dtype=np.float64).reshape((16,))]
+
+
+def _translation_matrix_np(offset):
+    m = np.identity(4, dtype=np.float64)
+    m[3, 0] = float(offset[0])
+    m[3, 1] = float(offset[1])
+    m[3, 2] = float(offset[2])
+    return m
+
+
+def _rotation_matrix_np(axis, degrees):
+    rad = math.radians(float(degrees))
+    c = math.cos(rad)
+    s = math.sin(rad)
+    m = np.identity(4, dtype=np.float64)
+    if axis == 0:  # X, row-vector convention
+        m[1, 1], m[1, 2] = c, s
+        m[2, 1], m[2, 2] = -s, c
+    elif axis == 1:  # Y
+        m[0, 0], m[0, 2] = c, -s
+        m[2, 0], m[2, 2] = s, c
+    else:  # Z
+        m[0, 0], m[0, 1] = c, s
+        m[1, 0], m[1, 1] = -s, c
+    return m
+
+
+def _transform_points_with_matrix(points, matrix_np):
+    if not HAS_NUMPY or matrix_np is None or not points:
+        return []
+    arr = np.array([[p[0], p[1], p[2], 1.0] for p in points], dtype=np.float64)
+    out = arr.dot(matrix_np)
+    return [(float(p[0]), float(p[1]), float(p[2])) for p in out[:, :3]]
+
+
+def _candidate_rotation_matrices(base_matrix, pivot):
+    """Generate full 0-360° candidate matrices around the backup center."""
+    base = _matrix_flat_to_np(base_matrix)
+    if base is None:
+        return []
+    pivot = (float(pivot[0]), float(pivot[1]), float(pivot[2]))
+    to_pivot = _translation_matrix_np((-pivot[0], -pivot[1], -pivot[2]))
+    from_pivot = _translation_matrix_np(pivot)
+
+    candidates = [base]
+    seen = {tuple(round(v, 8) for v in _matrix_np_to_flat(base))}
+
+    def add(rot):
+        candidate = base.dot(to_pivot).dot(rot).dot(from_pivot)
+        key = tuple(round(v, 8) for v in _matrix_np_to_flat(candidate))
+        if key not in seen:
+            seen.add(key)
+            candidates.append(candidate)
+
+    step = max(1, int(ORIENTATION_SEARCH_STEP_DEGREES))
+    for axis in (0, 1, 2):
+        for degrees in range(step, 360, step):
+            add(_rotation_matrix_np(axis, degrees))
+
+    # Also cover combined right-angle orientations (cheap, useful for axis-swapped pieces).
+    for rx in (0, 90, 180, 270):
+        for ry in (0, 90, 180, 270):
+            for rz in (0, 90, 180, 270):
+                if rx == ry == rz == 0:
+                    continue
+                rot = _rotation_matrix_np(0, rx).dot(_rotation_matrix_np(1, ry)).dot(_rotation_matrix_np(2, rz))
+                add(rot)
+    return candidates
+
+
+def _refine_instance_orientation_to_original(instance, original, tolerance=ALIGN_VERIFY_TOL_DEFAULT):
+    """Try 360° point-cloud orientations and keep the one matching most backup points."""
+    if not HAS_NUMPY or not _exists(instance) or not _exists(original):
+        return False, 0.0, None
+
+    mfn, _ = _get_mesh_fn(instance)
+    if not mfn:
+        return False, 0.0, None
+    master_obj_pts = [(p.x, p.y, p.z) for p in mfn.getPoints(om2.MSpace.kObject)]
+    orig_pts = _points_array(original, om2.MSpace.kWorld)
+    if not master_obj_pts or not orig_pts or len(master_obj_pts) != len(orig_pts):
+        return False, 0.0, None
+
+    max_points = max(16, int(ORIENTATION_SEARCH_MAX_POINTS))
+    if len(master_obj_pts) > max_points:
+        step = float(len(master_obj_pts)) / float(max_points)
+        sample_idx = [min(len(master_obj_pts) - 1, int(i * step)) for i in range(max_points)]
+        src_sample = [master_obj_pts[i] for i in sample_idx]
+        dst_sample = [orig_pts[i] for i in sample_idx]
+    else:
+        src_sample = master_obj_pts
+        dst_sample = orig_pts
+
+    _, size = _normalize_point_list(orig_pts)
+    world_tol = max(float(tolerance) * max(size, 1e-8), 0.0001)
+    pivot, _ = _world_bbox(original)
+    current_matrix = _get_world_matrix(instance)
+
+    best_matrix = None
+    best_ratio = -1.0
+    best_rms = None
+    for candidate in _candidate_rotation_matrices(current_matrix, pivot):
+        pred = _transform_points_with_matrix(src_sample, candidate)
+        ratio, norm_rms = _nearest_point_match_score(pred, dst_sample, world_tol)
+        if (ratio > best_ratio or
+                (abs(ratio - best_ratio) < 1e-9 and (best_rms is None or (norm_rms is not None and norm_rms < best_rms)))):
+            best_ratio = ratio
+            best_rms = norm_rms
+            best_matrix = candidate
+        if best_ratio >= 0.999:
+            break
+
+    if best_matrix is None:
+        return False, 0.0, None
+    _apply_world_matrix(instance, _matrix_np_to_flat(best_matrix))
+    return best_ratio >= 0.98, best_ratio, best_rms
 
 # ---------------------------------------------------------------------------
 # Scoring
@@ -1563,15 +1754,23 @@ class MasterManager(object):
                 else:
                     fb(inst, full_mesh)
 
+                # Refine against the still-visible original/backup point cloud.  This tries
+                # full 0-360° candidate rotations around the original bbox center and keeps
+                # the orientation that matches the most vertex positions, avoiding weird
+                # bbox-only rotations on symmetric pieces.
+                _refine_instance_orientation_to_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
+
                 ok, verify_err = _verify_instance_matches_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
                 if not ok:
                     # The SVD fit can pick a valid-looking but wrong rotation on symmetric or
                     # near-symmetric meshes.  Re-check against the original/backup geometry and
                     # try conservative fallbacks before the original is moved away.
                     _fallback_align(inst, full_mesh)
+                    _refine_instance_orientation_to_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
                     ok, verify_err = _verify_instance_matches_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
                     if not ok and match_type != MATCH_SAFE:
                         _bbox_fit_align(inst, full_mesh)
+                        _refine_instance_orientation_to_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
                         ok, verify_err = _verify_instance_matches_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
                     if not ok:
                         cmds.warning("[IC] Alignment verify failed for {} (norm err: {}). Keeping best fallback.".format(
@@ -1580,6 +1779,7 @@ class MasterManager(object):
                 cmds.warning("[IC] Alignment failed for {}: {}".format(full_mesh, e))
                 try:
                     _fallback_align(inst, full_mesh)
+                    _refine_instance_orientation_to_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
                     ok, verify_err = _verify_instance_matches_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
                     if not ok:
                         cmds.warning("[IC] Fallback verify failed for {} (norm err: {}).".format(
@@ -3125,7 +3325,23 @@ class InstanceCleanerUI(QDialog):
             roots          = selected_roots
             selection_only = True
         elif mode == "Find Selected":
-            find_selected = True
+            # Find Selected should be instant: use the current scan/group cache and
+            # only filter to groups containing the selected meshes.  The previous
+            # behavior rescanned the full scene, which felt like an endless loop on
+            # large files.  If there is no scan yet, scan only the selected roots as
+            # a bounded fallback instead of the whole scene.
+            if self.cleaner.validated_groups:
+                labels = self.cleaner.keep_only_groups_for_nodes(selected_roots)
+                self.progress_bar.setValue(100)
+                self.refresh_group_list()
+                if labels:
+                    self.current_group_label = labels[0]
+                    self._highlight_group_item(labels[0], frame=True, select=False)
+                self.status_label.setText("Find selected: {} cached matching group(s)".format(len(labels)))
+                return
+            roots          = selected_roots
+            selection_only = True
+            find_selected  = True
 
         def progress_cb(percent, label):
             self.progress_bar.setValue(percent)

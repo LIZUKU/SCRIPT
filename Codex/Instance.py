@@ -1942,6 +1942,40 @@ class InstanceCleaner(object):
         self._renumber_groups()
         return {"split": len(split_meshes), "new_label": new_label}
 
+    def keep_only_groups_for_nodes(self, nodes):
+        seed_meshes = _dedupe_keep_order([m for m in
+                         _collect_mesh_transforms_from_roots(nodes) if _exists(m)])
+        labels = []
+        for mesh in seed_meshes:
+            label = self.find_group_for_mesh(mesh)
+            if label and label not in labels:
+                labels.append(label)
+
+        keep = set(labels)
+        for label in list(self.validated_groups.keys()):
+            if label not in keep:
+                del self.validated_groups[label]
+        self._renumber_groups()
+        return labels
+
+    def set_preferred_master_from_selection(self, label, selected_nodes):
+        if label not in self.validated_groups:
+            return None
+        info = self.validated_groups[label]
+        if info.get("processed"):
+            return None
+
+        selected_meshes = _dedupe_keep_order([m for m in
+                          _collect_mesh_transforms_from_roots(selected_nodes) if _exists(m)])
+        group_meshes = _dedupe_keep_order([m for m in info.get("meshes", []) if _exists(m)])
+        group_set = set(group_meshes)
+        preferred = next((m for m in selected_meshes if m in group_set), None)
+        if not preferred:
+            return None
+
+        info["meshes"] = [preferred] + [m for m in group_meshes if m != preferred]
+        return preferred
+
     def organize_masters(self, spacing=10.):
         if not _exists(MASTERS_GROUP):
             cmds.warning("[IC] No master group.")
@@ -2368,7 +2402,7 @@ class ColorBtn(QPushButton):
         hover = QColor(bg).lighter(130).name()
         self.setStyleSheet(
             "QPushButton {{ background:{bg}; color:{fg}; border:1px solid #222;"
-            " border-radius:3px; font-weight:bold; font-size:10px; padding:2px 6px; }}"
+            " border-radius:3px; font-weight:bold; font-size:11px; padding:2px 6px; }}"
             "QPushButton:hover {{ background:{hover}; border-color:#444; }}"
             "QPushButton:pressed {{ background:#1a1a1a; }}"
             "QPushButton:disabled {{ background:#242424; color:#555; border-color:#222; }}"
@@ -2401,7 +2435,7 @@ class ParamSlider(QWidget):
 
         lbl = QLabel(label)
         lbl.setFixedWidth(label_width)
-        lbl.setStyleSheet("color:#707070; font-size:9px;")
+        lbl.setStyleSheet("color:#707070; font-size:10px;")
 
         self._slider = QSlider(Qt.Horizontal)
         self._slider.setRange(int(min_val*self._mult), int(max_val*self._mult))
@@ -2616,8 +2650,8 @@ class InstanceCleanerUI(QDialog):
 
         self.setWindowTitle("Instance Cleaner V3.1 — UVOpt Detect / Verified Align / Multi-Select Groups")
         self.setMinimumWidth(900)
-        self.resize(1040, 560)
-        self.setMinimumHeight(500)
+        self.resize(1040, 600)
+        self.setMinimumHeight(540)
         self.setWindowFlags(Qt.Window | Qt.WindowCloseButtonHint)
 
         self._build_ui()
@@ -2630,8 +2664,8 @@ class InstanceCleanerUI(QDialog):
             QDialog { background-color:#1e1e1e; }
             QLabel { color:#707070; font-size:10px; }
             QLineEdit { background:#252525; color:#a0a0a0; border:1px solid #303030;
-                        border-radius:3px; padding:4px 8px; font-size:10px; }
-            QCheckBox { color:#888888; font-size:10px; }
+                        border-radius:3px; padding:4px 8px; font-size:11px; }
+            QCheckBox { color:#888888; font-size:11px; }
             QScrollArea { border:none; background:transparent; }
             QScrollBar:vertical { background:#141414; width:14px; border-radius:6px; }
             QScrollBar::handle:vertical { background:#555; border-radius:6px; min-height:34px; }
@@ -2641,9 +2675,9 @@ class InstanceCleanerUI(QDialog):
             QSlider::handle:horizontal { background:#d32f2f; width:12px; margin:-4px 0; border-radius:6px; }
             QSlider::sub-page:horizontal { background:#d32f2f; border-radius:2px; }
             QSpinBox, QDoubleSpinBox { background:#252525; color:#a0a0a0; border:1px solid #303030;
-                                       border-radius:3px; padding:2px; font-size:10px; }
+                                       border-radius:3px; padding:2px; font-size:11px; }
             QComboBox { background:#252525; color:#a0a0a0; border:1px solid #303030;
-                        border-radius:3px; padding:4px 8px; font-size:10px; }
+                        border-radius:3px; padding:4px 8px; font-size:11px; }
             QProgressBar { background:#1a1a1a; border:1px solid #303030; border-radius:3px;
                            text-align:center; color:#707070; font-size:9px; }
             QProgressBar::chunk { background:#d32f2f; border-radius:2px; }
@@ -2675,7 +2709,7 @@ class InstanceCleanerUI(QDialog):
         left.addWidget(SectionLabel("SCAN"))
 
         self.scan_mode_combo = QComboBox()
-        self.scan_mode_combo.addItems(["Selection", "Scene"])
+        self.scan_mode_combo.addItems(["Scene", "Selected Mesh(es)", "Find Selected"])
         left.addLayout(self._row("Source", self.scan_mode_combo))
 
         self.strict_tol_slider = ParamSlider("Strict tol", 0.0001, 0.02, 0.001, 4, 90)
@@ -2764,14 +2798,20 @@ class InstanceCleanerUI(QDialog):
         master_row = QHBoxLayout()
         sel_mst_btn  = ColorBtn("SELECT ALL MASTERS", "", "#253525","#90d090", h=24)
         org_mst_btn  = ColorBtn("ORGANIZE MASTERS",   "", "#2a2a3a","#a0c0ff", h=24)
-        find_sel_btn = ColorBtn("FIND SELECTED",       "Highlight group of selection", "#3a3320","#e0c060", h=24)
         sel_mst_btn.clicked.connect(self.do_select_all_masters)
         org_mst_btn.clicked.connect(self.do_organize_masters)
-        find_sel_btn.clicked.connect(self.do_frame_selected_group)
         master_row.addWidget(sel_mst_btn)
         master_row.addWidget(org_mst_btn)
-        master_row.addWidget(find_sel_btn)
         left.addLayout(master_row)
+
+        find_master_row = QHBoxLayout()
+        find_sel_btn = ColorBtn("FIND SELECTED", "Highlight group of selection", "#3a3320","#e0c060", h=24)
+        set_mst_btn  = ColorBtn("SET SEL MASTER", "Use selected mesh as the master/reference for its group", "#203a2a","#80e0a0", h=24)
+        find_sel_btn.clicked.connect(self.do_frame_selected_group)
+        set_mst_btn.clicked.connect(self.do_set_selected_as_master)
+        find_master_row.addWidget(find_sel_btn)
+        find_master_row.addWidget(set_mst_btn)
+        left.addLayout(find_master_row)
 
         # --- PROCESS ---
         left.addWidget(SectionLabel("PROCESS"))
@@ -2999,11 +3039,13 @@ class InstanceCleanerUI(QDialog):
     def do_scan(self):
         roots          = None
         selection_only = False
+        find_selected  = False
+        selected_roots = []
+        mode           = self.scan_mode_combo.currentText()
 
-        if self.scan_mode_combo.currentText() == "Selection":
-            roots          = _get_selected_transforms()
-            selection_only = True
-            if not roots:
+        if mode in ("Selected Mesh(es)", "Find Selected"):
+            selected_roots = _get_selected_transforms()
+            if not selected_roots:
                 self.cleaner.scan(
                     roots=[], selection_only=True,
                     strict_tol=self.strict_tol_slider.value(),
@@ -3020,6 +3062,12 @@ class InstanceCleanerUI(QDialog):
                 self.status_label.setText("No selection.")
                 self.refresh_group_list()
                 return
+
+        if mode == "Selected Mesh(es)":
+            roots          = selected_roots
+            selection_only = True
+        elif mode == "Find Selected":
+            find_selected = True
 
         def progress_cb(percent, label):
             self.progress_bar.setValue(percent)
@@ -3040,12 +3088,28 @@ class InstanceCleanerUI(QDialog):
             min_copies=self.min_copies_spin.value(),
             progress_cb=progress_cb,
         )
+
+        if find_selected:
+            labels = self.cleaner.keep_only_groups_for_nodes(selected_roots)
+            count = len(self.cleaner.validated_groups)
+            if labels:
+                self.current_group_label = labels[0]
+            else:
+                self.current_group_label = None
+
         self.progress_bar.setValue(100)
         report = self.cleaner.get_report()
-        self.status_label.setText("{} groups | {} safe | {} fuzzy | {} unique".format(
-            count, report["safe_groups"], report["fuzzy_groups"], report["unique_meshes"]
-        ))
+        if find_selected:
+            self.status_label.setText("Find selected: {} matching group(s) | {} safe | {} fuzzy".format(
+                count, report["safe_groups"], report["fuzzy_groups"]
+            ))
+        else:
+            self.status_label.setText("{} groups | {} safe | {} fuzzy | {} unique".format(
+                count, report["safe_groups"], report["fuzzy_groups"], report["unique_meshes"]
+            ))
         self.refresh_group_list()
+        if find_selected and self.current_group_label in self.group_items:
+            self._highlight_group_item(self.current_group_label, frame=True, select=False)
 
     def _passes_filter(self, info, filter_text):
         if filter_text == "Safe"      and info["type"] != MATCH_SAFE:      return False
@@ -3135,13 +3199,13 @@ class InstanceCleanerUI(QDialog):
         if compact:
             self.right_col.setVisible(False)
             self.setMinimumWidth(330)
-            if force: self.resize(380, 500)
+            if force: self.resize(380, 540)
         else:
             self.right_col.setVisible(True)
             self.right_col.setMinimumWidth(500)
             self.right_col.setMaximumWidth(540)
             self.setMinimumWidth(900)
-            if force: self.resize(1040, 560)
+            if force: self.resize(1040, 600)
 
     def on_accept_group(self, label):
         self.cleaner.accept_group(label)
@@ -3240,6 +3304,20 @@ class InstanceCleanerUI(QDialog):
         nl = stats.get("new_label")
         if nl: self._highlight_group_item(nl, frame=True, select=True)
         self.status_label.setText("Split {} meshes into new group".format(stats.get("split",0)))
+
+    def do_set_selected_as_master(self):
+        selected = _get_selected_transforms()
+        label = self._find_group_from_selection() or self.current_group_label
+        if not label:
+            self.status_label.setText("Set master: select a mesh from a scanned group.")
+            return
+        preferred = self.cleaner.set_preferred_master_from_selection(label, selected)
+        if not preferred:
+            self.status_label.setText("Set master: selected mesh must be inside an unprocessed group.")
+            return
+        self.refresh_group_list()
+        self._highlight_group_item(label, frame=True, select=False)
+        self.status_label.setText("Master reference set to {}".format(_short(preferred)))
 
     def do_select_all_masters(self):
         n = self.cleaner.select_all_masters()

@@ -23,6 +23,7 @@ Requires: Maya 2020+, numpy (bundled with Maya), PySide2 or PySide6.
 from __future__ import print_function
 
 import hashlib
+import itertools
 import math
 import time
 from collections import defaultdict
@@ -97,6 +98,8 @@ FUZZY_CLUSTER_REPS = 3
 ALIGN_VERIFY_TOL_DEFAULT = 0.030
 ORIENTATION_SEARCH_STEP_DEGREES = 15
 ORIENTATION_SEARCH_MAX_POINTS = 768
+PCA_ICP_MAX_SAMPLE_POINTS = 800
+PCA_ICP_ITERATIONS = 25
 
 
 # ---------------------------------------------------------------------------
@@ -1262,6 +1265,173 @@ def _refine_instance_orientation_to_original(instance, original, tolerance=ALIGN
     _apply_world_matrix(instance, _matrix_np_to_flat(best_matrix))
     return best_ratio >= 0.98, best_ratio, best_rms
 
+
+
+# ---------------------------------------------------------------------------
+# PCA + ICP backup alignment (optional default process matcher)
+# ---------------------------------------------------------------------------
+def _sample_np_points(points, max_points=PCA_ICP_MAX_SAMPLE_POINTS):
+    if not HAS_NUMPY or points is None:
+        return None
+    if len(points) <= max_points:
+        return points.copy()
+    indices = np.linspace(0, len(points) - 1, max_points).astype(int)
+    return points[indices].copy()
+
+
+def _world_vertices_np(transform_name):
+    fn, _ = _get_mesh_fn(transform_name)
+    if not fn:
+        return None
+    try:
+        points = fn.getPoints(om2.MSpace.kWorld)
+        return np.array([[p.x, p.y, p.z] for p in points], dtype=np.float64)
+    except Exception:
+        return None
+
+
+def _nearest_neighbor_bruteforce_np(source, target):
+    """Return nearest target point for every source point without scipy."""
+    nearest = []
+    distances = []
+    chunk_size = 200
+    for i in range(0, len(source), chunk_size):
+        src_chunk = source[i:i + chunk_size]
+        diff = src_chunk[:, None, :] - target[None, :, :]
+        dist_sq = np.sum(diff * diff, axis=2)
+        idx = np.argmin(dist_sq, axis=1)
+        nearest.append(target[idx])
+        distances.append(np.sqrt(np.min(dist_sq, axis=1)))
+    return np.vstack(nearest), np.concatenate(distances)
+
+
+def _best_fit_transform_np(source, target):
+    """Kabsch best-fit rotation + translation from source to target."""
+    source_center = np.mean(source, axis=0)
+    target_center = np.mean(target, axis=0)
+    source_centered = source - source_center
+    target_centered = target - target_center
+    h = source_centered.T.dot(target_centered)
+    try:
+        u, _, vt = np.linalg.svd(h)
+    except np.linalg.LinAlgError:
+        return None, None
+    r = vt.T.dot(u.T)
+    if np.linalg.det(r) < 0:
+        vt[-1, :] *= -1
+        r = vt.T.dot(u.T)
+    t = target_center - r.dot(source_center)
+    return r, t
+
+
+def _apply_np_transform(points, rotation, translation):
+    return rotation.dot(points.T).T + translation
+
+
+def _compute_pca_axes_np(points):
+    center = np.mean(points, axis=0)
+    centered = points - center
+    cov = np.cov(centered.T)
+    try:
+        values, vectors = np.linalg.eigh(cov)
+    except np.linalg.LinAlgError:
+        return None, None
+    order = np.argsort(values)[::-1]
+    vectors = vectors[:, order]
+    if np.linalg.det(vectors) < 0:
+        vectors[:, -1] *= -1
+    return center, vectors
+
+
+def _generate_orientation_candidates_np(a_axes, b_axes):
+    candidates = []
+    for perm in itertools.permutations([0, 1, 2]):
+        permuted_a = a_axes[:, perm]
+        for sign in itertools.product([-1, 1], repeat=3):
+            signed_a = permuted_a * np.array(sign)
+            if np.linalg.det(signed_a) < 0:
+                continue
+            r = b_axes.dot(signed_a.T)
+            if np.linalg.det(r) > 0:
+                candidates.append(r)
+    return candidates
+
+
+def _score_alignment_np(source, target):
+    _, distances = _nearest_neighbor_bruteforce_np(source, target)
+    return float(np.mean(distances))
+
+
+def _row_vector_delta_matrix_np(rotation_col, translation_col):
+    matrix = np.identity(4, dtype=np.float64)
+    matrix[:3, :3] = rotation_col.T
+    matrix[3, :3] = translation_col
+    return matrix
+
+
+def _pca_icp_align_instance_to_backup(instance, backup, iterations=PCA_ICP_ITERATIONS,
+                                      max_points=PCA_ICP_MAX_SAMPLE_POINTS):
+    """Align an instance to the still-visible original/backup using PCA candidates + ICP.
+
+    This is the integrated version of the standalone matcher script: it samples
+    both world-space point clouds, picks the best PCA orientation (including axis
+    permutations/sign flips), refines with nearest-neighbor ICP, then applies the
+    resulting delta to the instance transform.
+    """
+    if not HAS_NUMPY or not _exists(instance) or not _exists(backup):
+        return False, None
+    points_a = _world_vertices_np(instance)
+    points_b = _world_vertices_np(backup)
+    if points_a is None or points_b is None:
+        return False, None
+
+    sample_a = _sample_np_points(points_a, max_points=max_points)
+    sample_b = _sample_np_points(points_b, max_points=max_points)
+    if sample_a is None or sample_b is None or len(sample_a) < 3 or len(sample_b) < 3:
+        return False, None
+
+    center_a, axes_a = _compute_pca_axes_np(sample_a)
+    center_b, axes_b = _compute_pca_axes_np(sample_b)
+    if center_a is None or center_b is None:
+        return False, None
+
+    best_score = None
+    best_r = None
+    best_t = None
+    for r in _generate_orientation_candidates_np(axes_a, axes_b):
+        t = center_b - r.dot(center_a)
+        transformed = _apply_np_transform(sample_a, r, t)
+        score = _score_alignment_np(transformed, sample_b)
+        if best_score is None or score < best_score:
+            best_score = score
+            best_r = r
+            best_t = t
+
+    if best_r is None or best_t is None:
+        return False, None
+
+    current_points = _apply_np_transform(sample_a, best_r, best_t)
+    total_r = best_r.copy()
+    total_t = best_t.copy()
+
+    for _ in range(max(0, int(iterations))):
+        nearest_points, _ = _nearest_neighbor_bruteforce_np(current_points, sample_b)
+        delta_r, delta_t = _best_fit_transform_np(current_points, nearest_points)
+        if delta_r is None or delta_t is None:
+            break
+        current_points = _apply_np_transform(current_points, delta_r, delta_t)
+        total_r = delta_r.dot(total_r)
+        total_t = delta_r.dot(total_t) + delta_t
+
+    final_score = _score_alignment_np(current_points, sample_b)
+    current_matrix = _matrix_flat_to_np(_get_world_matrix(instance))
+    if current_matrix is None:
+        return False, final_score
+    delta_matrix = _row_vector_delta_matrix_np(total_r, total_t)
+    _apply_world_matrix(instance, _matrix_np_to_flat(current_matrix.dot(delta_matrix)))
+    return True, final_score
+
+
 # ---------------------------------------------------------------------------
 # Scoring
 # ---------------------------------------------------------------------------
@@ -1682,6 +1852,7 @@ class MasterManager(object):
                                 group_id, match_type, score,
                                 keep_hidden_backups=True,
                                 delete_originals=False,
+                                use_pca_icp_alignment=True,
                                 batch_id=None,
                                 progress_cb=None,
                                 cancel_cb=None,
@@ -1740,25 +1911,32 @@ class MasterManager(object):
 
             # --- Align ---
             try:
-                mat, err = _compute_alignment(master_path, full_mesh)
+                pca_icp_ok = False
+                if use_pca_icp_alignment:
+                    pca_icp_ok, pca_icp_err = _pca_icp_align_instance_to_backup(inst, full_mesh)
+                    if not pca_icp_ok:
+                        cmds.warning("[IC] PCA+ICP alignment failed for {}. Falling back to legacy alignment.".format(_short(full_mesh)))
 
-                if match_type == MATCH_SAFE:
-                    tol = ALIGN_ERROR_TOL_SAFE
-                    fb  = _fallback_align
-                else:
-                    tol = ALIGN_ERROR_TOL_FUZZY
-                    fb  = _bbox_fit_align
+                if not pca_icp_ok:
+                    mat, err = _compute_alignment(master_path, full_mesh)
 
-                if mat and (err is None or err <= tol):
-                    _apply_world_matrix(inst, mat)
-                else:
-                    fb(inst, full_mesh)
+                    if match_type == MATCH_SAFE:
+                        tol = ALIGN_ERROR_TOL_SAFE
+                        fb  = _fallback_align
+                    else:
+                        tol = ALIGN_ERROR_TOL_FUZZY
+                        fb  = _bbox_fit_align
 
-                # Refine against the still-visible original/backup point cloud.  This tries
-                # full 0-360° candidate rotations around the original bbox center and keeps
-                # the orientation that matches the most vertex positions, avoiding weird
-                # bbox-only rotations on symmetric pieces.
-                _refine_instance_orientation_to_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
+                    if mat and (err is None or err <= tol):
+                        _apply_world_matrix(inst, mat)
+                    else:
+                        fb(inst, full_mesh)
+
+                    # Refine against the still-visible original/backup point cloud.  This tries
+                    # full 0-360° candidate rotations around the original bbox center and keeps
+                    # the orientation that matches the most vertex positions, avoiding weird
+                    # bbox-only rotations on symmetric pieces.
+                    _refine_instance_orientation_to_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
 
                 ok, verify_err = _verify_instance_matches_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
                 if not ok:
@@ -1766,11 +1944,17 @@ class MasterManager(object):
                     # near-symmetric meshes.  Re-check against the original/backup geometry and
                     # try conservative fallbacks before the original is moved away.
                     _fallback_align(inst, full_mesh)
-                    _refine_instance_orientation_to_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
+                    if use_pca_icp_alignment:
+                        _pca_icp_align_instance_to_backup(inst, full_mesh)
+                    else:
+                        _refine_instance_orientation_to_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
                     ok, verify_err = _verify_instance_matches_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
                     if not ok and match_type != MATCH_SAFE:
                         _bbox_fit_align(inst, full_mesh)
-                        _refine_instance_orientation_to_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
+                        if use_pca_icp_alignment:
+                            _pca_icp_align_instance_to_backup(inst, full_mesh)
+                        else:
+                            _refine_instance_orientation_to_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
                         ok, verify_err = _verify_instance_matches_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
                     if not ok:
                         cmds.warning("[IC] Alignment verify failed for {} (norm err: {}). Keeping best fallback.".format(
@@ -1779,7 +1963,10 @@ class MasterManager(object):
                 cmds.warning("[IC] Alignment failed for {}: {}".format(full_mesh, e))
                 try:
                     _fallback_align(inst, full_mesh)
-                    _refine_instance_orientation_to_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
+                    if use_pca_icp_alignment:
+                        _pca_icp_align_instance_to_backup(inst, full_mesh)
+                    else:
+                        _refine_instance_orientation_to_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
                     ok, verify_err = _verify_instance_matches_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
                     if not ok:
                         cmds.warning("[IC] Fallback verify failed for {} (norm err: {}).".format(
@@ -2367,6 +2554,7 @@ class InstanceCleaner(object):
     def create_masters_and_replace(self, master_spacing=10.,
                                    keep_hidden_backups=True,
                                    delete_originals=False,
+                                   use_pca_icp_alignment=True,
                                    progress_cb=None,
                                    cancel_cb=None):
         accepted = {
@@ -2453,6 +2641,7 @@ class InstanceCleaner(object):
                         group_id, match_type, score,
                         keep_hidden_backups=keep_hidden_backups,
                         delete_originals=delete_originals,
+                        use_pca_icp_alignment=use_pca_icp_alignment,
                         batch_id=batch_id,
                         progress_cb=progress_cb,
                         cancel_cb=cancel_cb,
@@ -3081,6 +3270,11 @@ class InstanceCleanerUI(QDialog):
         self.master_spacing_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
         left.addLayout(self._row("Spacing", self.master_spacing_spin))
 
+        self.pca_icp_align_cb = QCheckBox("PCA+ICP match to backup")
+        self.pca_icp_align_cb.setChecked(True)
+        self.pca_icp_align_cb.setToolTip("Default: use the PCA candidate + ICP algorithm to align each new instance to the still-visible original/backup before moving it to BACKUPS.")
+        left.addWidget(self.pca_icp_align_cb)
+
         proc_row = QHBoxLayout()
         self.process_btn      = ColorBtn("PROCESS ACCEPTED",  "", "#1e3a1a","#80e060", h=34)
         self.cancel_btn       = ColorBtn("CANCEL PROCESS",    "Restore before latest batch", "#3a2a1a","#e0a060", h=34)
@@ -3683,6 +3877,7 @@ class InstanceCleanerUI(QDialog):
                 master_spacing=self.master_spacing_spin.value(),
                 keep_hidden_backups=True,
                 delete_originals=False,
+                use_pca_icp_alignment=self.pca_icp_align_cb.isChecked(),
                 progress_cb=progress_cb,
                 cancel_cb=cancel_cb,
             )

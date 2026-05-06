@@ -12,6 +12,7 @@ Compatible: Maya 2022 - 2025
 """
 import math
 import random
+import time
 import maya.cmds as cmds
 import maya.api.OpenMaya as om
 # Qt imports - Maya 2022-2024 use PySide2, Maya 2025+ uses PySide6
@@ -155,6 +156,28 @@ def parse_float_flexible(value, default=0.0):
             return default
 def parse_int_flexible(value, default=0):
     return int(round(parse_float_flexible(value, default)))
+
+# ============================================================
+# CURSOR / EVENT LOOP CLEANUP
+# ============================================================
+def clear_busy_cursor():
+    """Force Maya/Qt back to the normal cursor after preview rebuilds."""
+    try:
+        cmds.waitCursor(state=False)
+    except:
+        pass
+    try:
+        app = QtWidgets.QApplication.instance()
+        if app:
+            while QtWidgets.QApplication.overrideCursor() is not None:
+                QtWidgets.QApplication.restoreOverrideCursor()
+    except:
+        pass
+    try:
+        QtWidgets.QApplication.processEvents()
+    except:
+        pass
+
 # ============================================================
 # GENERIC VECTOR UTILS
 # ============================================================
@@ -230,6 +253,30 @@ def apply_shared_style(widget):
             padding-top: 4px;
             border-top: 1px solid #3a3a3a;
             margin-top: 4px;
+        }}
+        QGroupBox {{
+            border: 1px solid #3a3a3a;
+            border-radius: 4px;
+            margin-top: 8px;
+            padding-top: 8px;
+            font-weight: bold;
+            color: #909090;
+        }}
+        QGroupBox::title {{
+            subcontrol-origin: margin;
+            left: 8px;
+            padding: 0 4px;
+        }}
+        QProgressBar {{
+            border: 1px solid #3a3a3a;
+            border-radius: 3px;
+            background: #252525;
+            color: #b0b0b0;
+            text-align: center;
+        }}
+        QProgressBar::chunk {{
+            background: {ACCENT_RED_BG};
+            border-radius: 2px;
         }}
         QPushButton {{
             background-color: #3a3a3a;
@@ -2252,6 +2299,7 @@ class ProArrayTab(QtWidgets.QWidget, SliderMixin):
             cmds.warning("Rebuild failed: %s" % str(e))
         finally:
             _PROARRAY_STATE["is_processing"] = False
+            clear_busy_cursor()
     def _on_cancel(self):
         self._rebuild_timer.stop()
         self._drag_timer.stop()
@@ -3096,6 +3144,7 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
             self.status_label.setText("Rebuild failed")
         finally:
             _CURVE_STATE["is_processing"] = False
+            clear_busy_cursor()
     def _on_select_mesh(self):
         selected_meshes = self._capture_meshes_from_selection()
         if selected_meshes:
@@ -3177,6 +3226,452 @@ class CurveDistributeTab(QtWidgets.QWidget, SliderMixin):
         if _CURVE_STATE.get("started") and not _CURVE_STATE.get("baked"):
             curve_full_cleanup()
         _CURVE_STATE["ui_instance"] = None
+
+# ============================================================
+# TAB 3 - TILE PACKER PRO
+# ============================================================
+class TilePackerSlider(QtWidgets.QWidget):
+    valueChanged = QtCore.Signal(float)
+    def __init__(self, label, min_v, max_v, default, decimals=0, parent=None):
+        super(TilePackerSlider, self).__init__(parent)
+        self.decimals = int(decimals)
+        self.scale = 10 ** self.decimals
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        lbl = QtWidgets.QLabel(label)
+        lbl.setFixedWidth(120)
+        layout.addWidget(lbl)
+        self.slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.slider.setMinimum(int(min_v * self.scale))
+        self.slider.setMaximum(int(max_v * self.scale))
+        self.slider.setValue(int(default * self.scale))
+        layout.addWidget(self.slider)
+        if self.decimals == 0:
+            self.spin = QtWidgets.QSpinBox()
+            self.spin.setMinimum(int(min_v))
+            self.spin.setMaximum(int(max_v))
+            self.spin.setValue(int(default))
+            self.spin.setFixedWidth(70)
+        else:
+            self.spin = FlexibleDoubleSpinBox()
+            self.spin.setMinimum(float(min_v))
+            self.spin.setMaximum(float(max_v))
+            self.spin.setValue(float(default))
+            self.spin.setDecimals(self.decimals)
+            self.spin.setSingleStep(1.0 / self.scale)
+            self.spin.setFixedWidth(82)
+        self.spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+        layout.addWidget(self.spin)
+        self.slider.valueChanged.connect(self._slider_changed)
+        self.spin.valueChanged.connect(self._spin_changed)
+    def _slider_changed(self, v):
+        real = float(v) / float(self.scale)
+        self.spin.blockSignals(True)
+        self.spin.setValue(int(round(real)) if self.decimals == 0 else real)
+        self.spin.blockSignals(False)
+        self.valueChanged.emit(real)
+    def _spin_changed(self, v):
+        self.slider.blockSignals(True)
+        self.slider.setValue(int(float(v) * self.scale))
+        self.slider.blockSignals(False)
+        self.valueChanged.emit(float(v))
+    def value(self):
+        return float(self.slider.value()) / float(self.scale)
+
+
+class TilePackerTab(QtWidgets.QWidget):
+    AUTO_GRID_DETAIL = 2.0
+    MIN_GRID_RES = 0.02
+    MAX_GRID_RES = 2.0
+    def __init__(self, parent=None):
+        super(TilePackerTab, self).__init__(parent)
+        self.grid_res = 0.4
+        self.group_name = "TILE_PACKER_GRP"
+        self.mesh_data = []
+        self.target_plane = None
+        self.target_mesh_fn = None
+        self._live_timer = QtCore.QTimer(self)
+        self._live_timer.setSingleShot(True)
+        self._live_timer.timeout.connect(self._run_generate)
+        self._build_ui()
+    def _build_ui(self):
+        root = QtWidgets.QVBoxLayout(self)
+        root.setSpacing(8)
+        root.setContentsMargins(6, 6, 6, 6)
+        grp_setup = QtWidgets.QGroupBox("Scene Setup")
+        gl = QtWidgets.QVBoxLayout(grp_setup)
+        gl.setSpacing(6)
+        self.btn_load = QtWidgets.QPushButton("Load Selection  (tiles + target plane last)")
+        self.btn_load.clicked.connect(self._load_selection)
+        gl.addWidget(self.btn_load)
+        self.status_lbl = QtWidgets.QLabel("No selection loaded.")
+        self.status_lbl.setObjectName("statusLabel")
+        gl.addWidget(self.status_lbl)
+        self.grid_info_lbl = QtWidgets.QLabel("Auto Grid Resolution: waiting for selection")
+        gl.addWidget(self.grid_info_lbl)
+        root.addWidget(grp_setup)
+        grp_pack = QtWidgets.QGroupBox("Packing Options")
+        pl = QtWidgets.QVBoxLayout(grp_pack)
+        pl.setSpacing(6)
+        self.seed_slider = TilePackerSlider("Seed", 0, 9999, random.randint(0, 9999), decimals=0)
+        self.seed_slider.valueChanged.connect(self._on_param_changed)
+        pl.addWidget(self.seed_slider)
+        self.jitter_slider = TilePackerSlider("Position Jitter", 0.0, 0.20, 0.01, decimals=3)
+        self.jitter_slider.valueChanged.connect(self._on_param_changed)
+        pl.addWidget(self.jitter_slider)
+        self.rot_jitter_slider = TilePackerSlider("Rotation Jitter (°)", 0.0, 10.0, 1.0, decimals=1)
+        self.rot_jitter_slider.valueChanged.connect(self._on_param_changed)
+        pl.addWidget(self.rot_jitter_slider)
+        self.chk_balance_sources = QtWidgets.QCheckBox("Balance source usage after packing")
+        self.chk_balance_sources.setChecked(True)
+        self.chk_balance_sources.stateChanged.connect(self._on_param_changed)
+        pl.addWidget(self.chk_balance_sources)
+        self.chk_optimize_fill = QtWidgets.QCheckBox("Optimize fill like UV layout (large first + tight rotations)")
+        self.chk_optimize_fill.setChecked(True)
+        self.chk_optimize_fill.stateChanged.connect(self._on_param_changed)
+        pl.addWidget(self.chk_optimize_fill)
+        root.addWidget(grp_pack)
+        grp_rot = QtWidgets.QGroupBox("Rotation & Placement")
+        rl = QtWidgets.QVBoxLayout(grp_rot)
+        rl.setSpacing(6)
+        row_rot = QtWidgets.QHBoxLayout()
+        self.chk_rot0 = self._chkbox("0°", True, row_rot)
+        self.chk_rot90 = self._chkbox("90°", True, row_rot)
+        self.chk_rot180 = self._chkbox("180°", True, row_rot)
+        self.chk_rot270 = self._chkbox("270°", True, row_rot)
+        rl.addLayout(row_rot)
+        self.chk_use_instances = QtWidgets.QCheckBox("Use Instances (recommended for large planes)")
+        self.chk_use_instances.setChecked(True)
+        self.chk_use_instances.stateChanged.connect(self._on_param_changed)
+        rl.addWidget(self.chk_use_instances)
+        self.chk_backfill = QtWidgets.QCheckBox("Backfill gaps with smallest fitting tiles")
+        self.chk_backfill.setChecked(True)
+        self.chk_backfill.stateChanged.connect(self._on_param_changed)
+        rl.addWidget(self.chk_backfill)
+        self.chk_clip_border = QtWidgets.QCheckBox("Strict clip to target boundary")
+        self.chk_clip_border.setChecked(True)
+        self.chk_clip_border.stateChanged.connect(self._on_param_changed)
+        rl.addWidget(self.chk_clip_border)
+        root.addWidget(grp_rot)
+        grp_live = QtWidgets.QGroupBox("Live Preview")
+        lv = QtWidgets.QVBoxLayout(grp_live)
+        self.chk_live = QtWidgets.QCheckBox("Auto-regenerate on parameter change")
+        self.chk_live.setChecked(False)
+        lv.addWidget(self.chk_live)
+        root.addWidget(grp_live)
+        self.progress = QtWidgets.QProgressBar()
+        self.progress.setValue(0)
+        self.progress.setVisible(False)
+        root.addWidget(self.progress)
+        btn_row = QtWidgets.QHBoxLayout()
+        self.btn_generate = QtWidgets.QPushButton("Generate Tiling")
+        self.btn_generate.setObjectName("bakeBtn")
+        self.btn_generate.setFixedHeight(34)
+        self.btn_generate.clicked.connect(self._run_generate)
+        self.btn_clear = QtWidgets.QPushButton("Clear")
+        self.btn_clear.setFixedHeight(34)
+        self.btn_clear.setFixedWidth(80)
+        self.btn_clear.clicked.connect(self._clear)
+        btn_row.addWidget(self.btn_generate)
+        btn_row.addWidget(self.btn_clear)
+        root.addLayout(btn_row)
+        self.log_lbl = QtWidgets.QLabel("")
+        self.log_lbl.setAlignment(QtCore.Qt.AlignCenter)
+        root.addWidget(self.log_lbl)
+    def _chkbox(self, label, default, layout):
+        cb = QtWidgets.QCheckBox(label)
+        cb.setChecked(default)
+        cb.stateChanged.connect(self._on_param_changed)
+        layout.addWidget(cb)
+        return cb
+    def _on_param_changed(self, *args):
+        if self.chk_live.isChecked() and self.mesh_data:
+            self._live_timer.start(600)
+    def _set_status(self, msg, kind="ok"):
+        self.status_lbl.setText(msg)
+        self.status_lbl.setStyleSheet("color: #e84d4d; font-weight: bold;" if kind == "err" else "color: #7fbf7f; font-weight: bold;")
+    def _set_log(self, msg, kind="ok"):
+        color = "#e84d4d" if kind == "err" else ("#d1a91f" if kind == "run" else "#7fbf7f")
+        self.log_lbl.setStyleSheet("color: %s; font-weight: bold;" % color)
+        self.log_lbl.setText(msg)
+    def _compute_auto_grid_res(self, meshes):
+        dims = []
+        for m in meshes:
+            try:
+                bbox = cmds.exactWorldBoundingBox(m)
+                size_x = abs(bbox[3] - bbox[0])
+                size_z = abs(bbox[5] - bbox[2])
+                valid_dims = [d for d in (size_x, size_z) if d > 0.0001]
+                if valid_dims:
+                    dims.append(min(valid_dims))
+            except:
+                pass
+        if not dims:
+            return self.grid_res
+        gr = min(dims) / self.AUTO_GRID_DETAIL
+        return max(self.MIN_GRID_RES, min(self.MAX_GRID_RES, gr))
+    def _load_selection(self):
+        sel = cmds.ls(selection=True, long=True) or []
+        if len(sel) < 2:
+            self._set_status("Select tiles first, then the target plane LAST.", "err")
+            return
+        self.target_plane = sel[-1]
+        raw_meshes = sel[:-1]
+        try:
+            t_sel = om.MSelectionList()
+            t_sel.add(self.target_plane)
+            self.target_mesh_fn = om.MFnMesh(t_sel.getDagPath(0))
+        except Exception as e:
+            self._set_status("Target plane error: %s" % e, "err")
+            return
+        self.grid_res = self._compute_auto_grid_res(raw_meshes)
+        self.grid_info_lbl.setText("Auto Grid Resolution: %.3f" % self.grid_res)
+        self.mesh_data = []
+        for source_id, m in enumerate(raw_meshes):
+            try:
+                bbox = cmds.exactWorldBoundingBox(m)
+                base_fp = self._scan_geo(m, bbox)
+                self.mesh_data.append({
+                    "id": source_id,
+                    "node": m,
+                    "name": m.split("|")[-1],
+                    "base_footprint": base_fp,
+                    "orientations": self._build_orientations(base_fp),
+                    "min_y": bbox[1],
+                    "area": len(base_fp),
+                    "bbox": bbox,
+                })
+            except Exception as e:
+                cmds.warning("Tile skipped: %s / %s" % (m, e))
+        self.mesh_data.sort(key=lambda d: d["area"], reverse=True)
+        self._set_status("Loaded %d tile(s) + target plane: %s" % (len(self.mesh_data), self.target_plane.split('|')[-1]), "ok")
+        try:
+            cmds.select([d["node"] for d in self.mesh_data] + [self.target_plane], r=True)
+        except:
+            pass
+    def _scan_geo(self, mesh, bbox):
+        sel = om.MSelectionList()
+        sel.add(mesh)
+        mesh_fn = om.MFnMesh(sel.getDagPath(0))
+        footprint = []
+        gr = self.grid_res
+        steps_x = int(round((bbox[3] - bbox[0]) / gr)) + 1
+        steps_z = int(round((bbox[5] - bbox[2]) / gr)) + 1
+        start_y = bbox[4] + 10.0
+        for i in range(steps_x):
+            for j in range(steps_z):
+                tx = bbox[0] + i * gr
+                tz = bbox[2] + j * gr
+                hit = mesh_fn.allIntersections(om.MFloatPoint(tx, start_y, tz), om.MFloatVector(0, -1, 0), om.MSpace.kWorld, 1000, False)
+                if hit and len(hit[0]) > 0:
+                    footprint.append((i, j))
+        return footprint if footprint else [(0, 0)]
+    def _normalize_footprint(self, footprint):
+        min_x = min(f[0] for f in footprint)
+        min_z = min(f[1] for f in footprint)
+        return [(f[0] - min_x, f[1] - min_z) for f in footprint]
+    def _build_orientations(self, base_fp):
+        enabled = []
+        for chk, angle in [(self.chk_rot0, 0), (self.chk_rot90, 90), (self.chk_rot180, 180), (self.chk_rot270, 270)]:
+            if chk.isChecked():
+                enabled.append(angle)
+        orientations = []
+        curr = base_fp[:]
+        for step in range(4):
+            angle = step * 90
+            if angle in enabled:
+                norm = self._normalize_footprint(curr)
+                orientations.append({"angle": angle, "footprint": norm, "area": len(norm)})
+            curr = [(f[1], -f[0]) for f in curr]
+        if orientations:
+            return orientations
+        norm = self._normalize_footprint(base_fp)
+        return [{"angle": 0, "footprint": norm, "area": len(norm)}]
+    def _is_on_target(self, gx, gz, gr, p_bbox):
+        wx = gx * gr
+        wz = gz * gr
+        return bool(self.target_mesh_fn.closestIntersection(om.MFloatPoint(wx, p_bbox[4] + 1, wz), om.MFloatVector(0, -1, 0), om.MSpace.kWorld, 100, False))
+    def _build_target_cells(self, g_min_x, g_max_x, g_min_z, g_max_z, gr, p_bbox):
+        valid = set()
+        total_cols = max(g_max_x - g_min_x, 1)
+        self.progress.setMaximum(total_cols)
+        self.progress.setValue(0)
+        self.progress.setVisible(True)
+        for col_i, gx in enumerate(range(g_min_x, g_max_x)):
+            self.progress.setValue(col_i + 1)
+            QtWidgets.QApplication.processEvents()
+            for gz in range(g_min_z, g_max_z):
+                if self._is_on_target(gx, gz, gr, p_bbox):
+                    valid.add((gx, gz))
+        return valid
+    def _clear(self):
+        if cmds.objExists(self.group_name):
+            cmds.delete(self.group_name)
+        self._set_log("Cleared.", "ok")
+    def _place_mesh(self, data, orient, gx, gz, cells, occupied, p_bbox, gr, jitter, rot_jit, use_inst):
+        for c in cells:
+            occupied.add(c)
+        new_m = cmds.instance(data["node"])[0] if use_inst else cmds.duplicate(data["node"])[0]
+        cmds.parent(new_m, self.group_name)
+        rot_y = orient["angle"] + random.uniform(-rot_jit, rot_jit)
+        cmds.xform(new_m, cp=True)
+        cmds.rotate(0, rot_y, 0, new_m, r=True, ws=True)
+        cur_bbox = cmds.exactWorldBoundingBox(new_m)
+        tx = (gx * gr) - cur_bbox[0] + random.uniform(-jitter, jitter)
+        tz = (gz * gr) - cur_bbox[2] + random.uniform(-jitter, jitter)
+        ty = p_bbox[1] - cur_bbox[1]
+        cmds.move(tx, ty, tz, new_m, r=True)
+        return new_m
+    def _run_generate(self):
+        if not self.mesh_data:
+            self._set_log("Load a selection first.", "err")
+            return
+        cmds.undoInfo(openChunk=True, chunkName="Tile Packer Generate")
+        try:
+            for data in self.mesh_data:
+                data["orientations"] = self._build_orientations(data["base_footprint"])
+            self._clear()
+            cmds.group(em=True, n=self.group_name)
+            seed = int(self.seed_slider.value())
+            jitter = self.jitter_slider.value()
+            rot_jit = self.rot_jitter_slider.value()
+            use_inst = self.chk_use_instances.isChecked()
+            backfill = self.chk_backfill.isChecked()
+            clip = self.chk_clip_border.isChecked()
+            balance = self.chk_balance_sources.isChecked()
+            optimize_fill = self.chk_optimize_fill.isChecked()
+            if clip:
+                jitter = 0.0
+                rot_jit = 0.0
+            random.seed(seed)
+            p_bbox = cmds.exactWorldBoundingBox(self.target_plane)
+            gr = self.grid_res
+            g_min_x = int(round(p_bbox[0] / gr))
+            g_max_x = int(round(p_bbox[3] / gr))
+            g_min_z = int(round(p_bbox[2] / gr))
+            g_max_z = int(round(p_bbox[5] / gr))
+            self._set_log("Building strict target grid...", "run")
+            valid_target_cells = self._build_target_cells(g_min_x, g_max_x, g_min_z, g_max_z, gr, p_bbox)
+            total_target_cells = len(valid_target_cells)
+            occupied = set()
+            placed_count = 0
+            source_usage = {data["id"]: 0 for data in self.mesh_data}
+            t0 = time.time()
+            self._set_log("Packing optimized layout...", "run")
+            self.progress.setMaximum(max(g_max_x - g_min_x, 1))
+            self.progress.setValue(0)
+            self.progress.setVisible(True)
+            QtWidgets.QApplication.processEvents()
+            def footprint_cells(gx, gz, fp):
+                cells = []
+                for fx, fz in fp:
+                    cx, cz = gx + fx, gz + fz
+                    cell = (cx, cz)
+                    if cell in occupied:
+                        return None
+                    if not (g_min_x <= cx < g_max_x and g_min_z <= cz < g_max_z):
+                        return None
+                    if clip and cell not in valid_target_cells:
+                        return None
+                    cells.append(cell)
+                return cells
+            def contact_score(cells):
+                score = 0
+                for cx, cz in cells:
+                    if (cx + 1, cz) in occupied: score += 1
+                    if (cx - 1, cz) in occupied: score += 1
+                    if (cx, cz + 1) in occupied: score += 1
+                    if (cx, cz - 1) in occupied: score += 1
+                return score
+            def try_place(gx, gz, candidates, prefer_small=False):
+                nonlocal placed_count
+                fitting = []
+                shuffled = list(candidates)
+                random.shuffle(shuffled)
+                for data in shuffled:
+                    orientations = list(data["orientations"])
+                    random.shuffle(orientations)
+                    for orient in orientations:
+                        cells = footprint_cells(gx, gz, orient["footprint"])
+                        if not cells:
+                            continue
+                        area = len(cells)
+                        contact = contact_score(cells)
+                        usage = source_usage.get(data["id"], 0)
+                        if prefer_small:
+                            score = (-area * 1000) + (contact * 10) - (usage if balance else 0)
+                        elif optimize_fill:
+                            score = (area * 1000) + (contact * 10) - (usage * 25 if balance else 0)
+                        else:
+                            score = random.random() * 1000 - (usage * 25 if balance else 0)
+                        fitting.append((score, random.random(), data, orient, cells))
+                if not fitting:
+                    return False
+                fitting.sort(key=lambda item: (item[0], item[1]), reverse=True)
+                _, _, data, orient, cells = fitting[0]
+                self._place_mesh(data, orient, gx, gz, cells, occupied, p_bbox, gr, jitter, rot_jit, use_inst)
+                source_usage[data["id"]] = source_usage.get(data["id"], 0) + 1
+                placed_count += 1
+                return True
+            for col_i, gx in enumerate(range(g_min_x, g_max_x)):
+                self.progress.setValue(col_i + 1)
+                QtWidgets.QApplication.processEvents()
+                for gz in range(g_min_z, g_max_z):
+                    cell = (gx, gz)
+                    if cell in occupied:
+                        continue
+                    if clip and cell not in valid_target_cells:
+                        continue
+                    if not clip and not self._is_on_target(gx, gz, gr, p_bbox):
+                        continue
+                    try_place(gx, gz, self.mesh_data, prefer_small=False)
+            if backfill and self.mesh_data:
+                small_first = sorted(self.mesh_data, key=lambda d: d["area"])
+                coords = [(gx, gz) for gx in range(g_min_x, g_max_x) for gz in range(g_min_z, g_max_z)]
+                for pass_id in range(4):
+                    if pass_id == 1:
+                        coords = list(reversed(coords))
+                    elif pass_id >= 2:
+                        random.shuffle(coords)
+                    changed = False
+                    for gx, gz in coords:
+                        cell = (gx, gz)
+                        if cell in occupied:
+                            continue
+                        if clip and cell not in valid_target_cells:
+                            continue
+                        if not clip and not self._is_on_target(gx, gz, gr, p_bbox):
+                            continue
+                        if try_place(gx, gz, small_first, prefer_small=True):
+                            changed = True
+                    if not changed:
+                        break
+            elapsed = time.time() - t0
+            self.progress.setVisible(False)
+            cmds.select(cl=True)
+            used_sources = sum(1 for v in source_usage.values() if v > 0)
+            total_sources = len(source_usage)
+            fill_ratio = (len(occupied) / float(total_target_cells) * 100.0) if total_target_cells else 0.0
+            clip_note = " — strict clip: jitter disabled" if clip else ""
+            self._set_log("Done — %d tiles — fill %.1f%% — sources %d/%d — %.1fs%s" % (placed_count, fill_ratio, used_sources, total_sources, elapsed, clip_note), "ok")
+        except Exception as e:
+            self.progress.setVisible(False)
+            self._set_log("Generation error: %s" % e, "err")
+            raise
+        finally:
+            try:
+                cmds.undoInfo(closeChunk=True)
+            except:
+                pass
+            clear_busy_cursor()
+    def reset_settings(self):
+        self.chk_live.setChecked(False)
+        self.progress.setVisible(False)
+        self.log_lbl.setText("")
+    def shutdown(self):
+        self._live_timer.stop()
+
 # ============================================================
 # MAIN COMBINED UI
 # ============================================================
@@ -3188,6 +3683,7 @@ class ProToolsCombinedUI(QtWidgets.QDialog):
         self.setWindowFlags(QtCore.Qt.Window | QtCore.Qt.WindowCloseButtonHint)
         self._min_width_proarray = 360
         self._min_width_curve = 390
+        self._min_width_tile = 460
         self._max_auto_height = 900
         self._ui_scale_percent = 100
         self._ui_scale_factor = 1.0
@@ -3221,7 +3717,7 @@ class ProToolsCombinedUI(QtWidgets.QDialog):
         top_row.addWidget(self.ui_scale_slider)
         top_row.addStretch()
         self.btn_reset_settings = QtWidgets.QPushButton("Reset All Settings")
-        self.btn_reset_settings.setToolTip("Reset ProArray + Curve settings and clear saved preferences")
+        self.btn_reset_settings.setToolTip("Reset ProArray + Curve + Tile Packer settings and clear saved preferences")
         self.btn_reset_settings.setFixedHeight(22)
         self.btn_reset_settings.clicked.connect(self._on_reset_all_settings)
         top_row.addWidget(self.btn_reset_settings)
@@ -3239,12 +3735,21 @@ class ProToolsCombinedUI(QtWidgets.QDialog):
         self.curve_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self.curve_scroll.setWidget(self.tab_curve)
         self.tabs.addTab(self.curve_scroll, "Curve Distribute Pro")
+        # TAB 3
+        self.tab_tile = TilePackerTab()
+        self.tile_scroll = QtWidgets.QScrollArea()
+        self.tile_scroll.setWidgetResizable(True)
+        self.tile_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.tile_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.tile_scroll.setWidget(self.tab_tile)
+        self.tabs.addTab(self.tile_scroll, "Tile Packer Pro")
         self.tabs.currentChanged.connect(self._on_tab_changed)
         layout.addWidget(self.tabs)
     def _load_settings(self):
         # Requested behavior: every new UI opening starts from clean defaults.
         self.tab_proarray.reset_settings()
         self.tab_curve.reset_settings()
+        self.tab_tile.reset_settings()
         self._ui_scale_percent = 100
         self.ui_scale_spin.blockSignals(True)
         self.ui_scale_slider.blockSignals(True)
@@ -3261,6 +3766,7 @@ class ProToolsCombinedUI(QtWidgets.QDialog):
         self._settings.clear()
         self.tab_proarray.reset_settings()
         self.tab_curve.reset_settings()
+        self.tab_tile.reset_settings()
         # Requested behavior: preserve current UI scale when resetting tool settings.
         current_scale = int(clamp(self._ui_scale_percent, 30, 150))
         self.ui_scale_spin.blockSignals(True)
@@ -3319,9 +3825,11 @@ class ProToolsCombinedUI(QtWidgets.QDialog):
         if index == 0:
             self.tab_proarray.adjustSize()
             return self.tab_proarray.sizeHint()
-        else:
+        if index == 1:
             self.tab_curve.adjustSize()
             return self.tab_curve.sizeHint()
+        self.tab_tile.adjustSize()
+        return self.tab_tile.sizeHint()
     def _apply_tab_size(self, index, force=False):
         self.layout().activate()
         self.tabs.updateGeometry()
@@ -3333,19 +3841,23 @@ class ProToolsCombinedUI(QtWidgets.QDialog):
             target_w = max(min_w, int(round(content_hint.width() + (40 * scale))))
             target_h = int(round(content_hint.height() + (90 * scale)))
             target_h = min(target_h, int(round(self._max_auto_height * scale)))
-            self.setMinimumWidth(min_w)
-            self.setMinimumHeight(int(round(250 * scale)))
-            self.setMaximumWidth(16777215)
-            self.setMaximumHeight(16777215)
-        else:
+            min_h = int(round(250 * scale))
+        elif index == 1:
             min_w = int(round(self._min_width_curve * scale))
             target_w = max(min_w, int(round(content_hint.width() + (40 * scale))))
             target_h = int(round(content_hint.height() + (90 * scale)))
             target_h = max(int(round(620 * scale)), min(target_h, int(round(self._max_auto_height * scale))))
-            self.setMinimumWidth(min_w)
-            self.setMinimumHeight(int(round(620 * scale)))
-            self.setMaximumWidth(16777215)
-            self.setMaximumHeight(16777215)
+            min_h = int(round(620 * scale))
+        else:
+            min_w = int(round(self._min_width_tile * scale))
+            target_w = max(min_w, int(round(content_hint.width() + (40 * scale))))
+            target_h = int(round(content_hint.height() + (90 * scale)))
+            target_h = max(int(round(560 * scale)), min(target_h, int(round(self._max_auto_height * scale))))
+            min_h = int(round(560 * scale))
+        self.setMinimumWidth(min_w)
+        self.setMinimumHeight(min_h)
+        self.setMaximumWidth(16777215)
+        self.setMaximumHeight(16777215)
         self.resize(target_w, target_h)
     def _on_tab_changed(self, index):
         self._apply_tab_size(index, force=True)
@@ -3357,6 +3869,10 @@ class ProToolsCombinedUI(QtWidgets.QDialog):
             pass
         try:
             self.tab_curve.shutdown()
+        except:
+            pass
+        try:
+            self.tab_tile.shutdown()
         except:
             pass
         super(ProToolsCombinedUI, self).closeEvent(event)

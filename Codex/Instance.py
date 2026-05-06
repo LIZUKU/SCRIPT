@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Instance Cleaner V3.1 - Fixed
+Instance Cleaner V3.2 - Fixed
 ------------------------------
 Corrections vs V3.0 :
   - find_groups_uvoptimizer_style : f-string double .format() corrigée.
@@ -19,6 +19,10 @@ Corrections vs V3.0 :
     identité combinée (rx=ry=rz=0).
   - _update_window_compactness : setMinimumWidth / setMaximumWidth appelés
     uniquement quand la valeur change réellement.
+  - UI : les boutons passent par un wrapper robuste qui affiche les erreurs
+    dans le statut + Script Editor au lieu de donner l’impression de ne rien faire.
+  - UI : REFRESH SCAN lance Scene par défaut ; Find Selected ne détruit plus
+    la liste de groupes en cache.
   - Divers guards None supplémentaires et commentaires clarifiés.
 
 Requires: Maya 2020+, numpy (bundled with Maya), PySide2 or PySide6.
@@ -30,6 +34,7 @@ import hashlib
 import itertools
 import math
 import time
+import traceback
 from collections import defaultdict
 
 try:
@@ -3063,7 +3068,7 @@ class InstanceCleanerUI(QDialog):
         self._cancel_requested    = False
         self._compact_state       = None
 
-        self.setWindowTitle("Instance Cleaner V3.1 — Fixed")
+        self.setWindowTitle("Instance Cleaner V3.2 — Fixed")
         self.setMinimumWidth(900)
         self.resize(1040, 600)
         self.setMinimumHeight(540)
@@ -3125,10 +3130,10 @@ class InstanceCleanerUI(QDialog):
 
         self.scan_mode_combo = QComboBox()
         self.scan_mode_combo.addItems(["Scene", "Selected Mesh(es)", "Find Selected"])
-        self.scan_mode_combo.setCurrentIndex(2)
+        self.scan_mode_combo.setCurrentIndex(0)
         self.scan_mode_combo.setToolTip(
-            "Default is Find Selected to avoid launching a full-scene scan by accident. "
-            "Choose Scene when you really want to rescan everything.")
+            "Scene performs a real refresh/rescan. Use Selected Mesh(es) to limit the scan, "
+            "or Find Selected to locate selected meshes in the current scan.")
         left.addLayout(self._row("Source", self.scan_mode_combo))
 
         self.strict_tol_slider = ParamSlider("Strict tol", 0.0001, 0.02, 0.001, 4, 90)
@@ -3190,7 +3195,7 @@ class InstanceCleanerUI(QDialog):
         left.addWidget(self.status_label)
 
         scan_btn = ColorBtn("REFRESH SCAN", "Rescan scene or selection", "#1a2a3a","#60a0d0", h=32)
-        scan_btn.clicked.connect(self.do_scan)
+        self._connect_button(scan_btn, "Refresh scan", self.do_scan)
         left.addWidget(scan_btn)
 
         # --- GROUPS ---
@@ -3200,9 +3205,9 @@ class InstanceCleanerUI(QDialog):
         acc_safe_btn = ColorBtn("ACCEPT SAFE", "Accept only safe groups", "#1a3a1a","#60d060", h=24)
         acc_all_btn  = ColorBtn("ACCEPT ALL",  "Accept safe + fuzzy",     "#3a3510","#e0d060", h=24)
         rej_all_btn  = ColorBtn("REJECT ALL",  "",                         "#3a1a1a","#d06060", h=24)
-        acc_safe_btn.clicked.connect(self.do_accept_safe)
-        acc_all_btn.clicked.connect(self.do_accept_all)
-        rej_all_btn.clicked.connect(self.do_reject_all)
+        self._connect_button(acc_safe_btn, "Accept safe", self.do_accept_safe)
+        self._connect_button(acc_all_btn, "Accept all", self.do_accept_all)
+        self._connect_button(rej_all_btn, "Reject all", self.do_reject_all)
         bulk.addWidget(acc_safe_btn)
         bulk.addWidget(acc_all_btn)
         bulk.addWidget(rej_all_btn)
@@ -3211,8 +3216,8 @@ class InstanceCleanerUI(QDialog):
         manual_row = QHBoxLayout()
         merge_btn = ColorBtn("MERGE SEL GROUPS", "Merge groups from selection", "#2f2b12","#e0d070", h=24)
         split_btn = ColorBtn("SPLIT SEL OUT",    "Split selected out of group",  "#2a223a","#c0a0ff", h=24)
-        merge_btn.clicked.connect(self.do_merge_selected_groups)
-        split_btn.clicked.connect(self.do_split_selected_from_group)
+        self._connect_button(merge_btn, "Merge selected groups", self.do_merge_selected_groups)
+        self._connect_button(split_btn, "Split selected out", self.do_split_selected_from_group)
         manual_row.addWidget(merge_btn)
         manual_row.addWidget(split_btn)
         left.addLayout(manual_row)
@@ -3220,8 +3225,8 @@ class InstanceCleanerUI(QDialog):
         master_row = QHBoxLayout()
         sel_mst_btn = ColorBtn("SELECT ALL MASTERS", "", "#253525","#90d090", h=24)
         org_mst_btn = ColorBtn("ORGANIZE MASTERS",   "", "#2a2a3a","#a0c0ff", h=24)
-        sel_mst_btn.clicked.connect(self.do_select_all_masters)
-        org_mst_btn.clicked.connect(self.do_organize_masters)
+        self._connect_button(sel_mst_btn, "Select all masters", self.do_select_all_masters)
+        self._connect_button(org_mst_btn, "Organize masters", self.do_organize_masters)
         master_row.addWidget(sel_mst_btn)
         master_row.addWidget(org_mst_btn)
         left.addLayout(master_row)
@@ -3230,7 +3235,7 @@ class InstanceCleanerUI(QDialog):
             "SET SEL MASTER",
             "Use selected mesh as the master/reference for its group",
             "#203a2a","#80e0a0", h=24)
-        set_mst_btn.clicked.connect(self.do_set_selected_as_master)
+        self._connect_button(set_mst_btn, "Set selected as master", self.do_set_selected_as_master)
         left.addWidget(set_mst_btn)
 
         # --- PROCESS ---
@@ -3255,16 +3260,16 @@ class InstanceCleanerUI(QDialog):
         self.cancel_btn       = ColorBtn("CANCEL PROCESS",    "Restore before latest batch", "#3a2a1a","#e0a060", h=34)
         self.stop_process_btn = ColorBtn("STOP",              "Stop current process safely", "#4a1515","#ff7070", h=34)
         self.stop_process_btn.setEnabled(False)
-        self.process_btn.clicked.connect(self.do_process)
-        self.cancel_btn.clicked.connect(self.do_cancel_process)
-        self.stop_process_btn.clicked.connect(self.do_stop_process)
+        self._connect_button(self.process_btn, "Process accepted", self.do_process)
+        self._connect_button(self.cancel_btn, "Cancel process", self.do_cancel_process)
+        self._connect_button(self.stop_process_btn, "Stop process", self.do_stop_process)
         proc_row.addWidget(self.process_btn)
         proc_row.addWidget(self.cancel_btn)
         proc_row.addWidget(self.stop_process_btn)
         left.addLayout(proc_row)
 
         conv_btn = ColorBtn("CONVERT INSTANCES TO GEO", "", "#3a1e3a","#e080e0", h=34)
-        conv_btn.clicked.connect(self.do_convert_instances)
+        self._connect_button(conv_btn, "Convert instances to geo", self.do_convert_instances)
         left.addWidget(conv_btn)
         left.addStretch()
 
@@ -3280,9 +3285,9 @@ class InstanceCleanerUI(QDialog):
         self.prev_btn       = ColorBtn("◀", "Previous group",               "#222a35","#a0c0ff", 36, 26)
         self.review_src_btn = ColorBtn("SRC ISOLATE + FRAME", "Isolate + frame current group", "#1f2c3a","#80c0ff", h=26)
         self.next_btn       = ColorBtn("▶", "Next group",                   "#222a35","#a0c0ff", 36, 26)
-        self.prev_btn.clicked.connect(lambda: self._navigate_review(-1))
-        self.next_btn.clicked.connect(lambda: self._navigate_review(1))
-        self.review_src_btn.clicked.connect(self.do_isolate_current_source)
+        self._connect_button(self.prev_btn, "Previous group", lambda: self._navigate_review(-1))
+        self._connect_button(self.next_btn, "Next group", lambda: self._navigate_review(1))
+        self._connect_button(self.review_src_btn, "Isolate current source", self.do_isolate_current_source)
         rev_row.addWidget(self.prev_btn)
         rev_row.addWidget(self.review_src_btn)
         rev_row.addWidget(self.next_btn)
@@ -3292,9 +3297,9 @@ class InstanceCleanerUI(QDialog):
         self.accept_next_btn = ColorBtn("OK + NEXT", "Accept then next",          "#1a3a1a","#70e070", h=26)
         self.reject_next_btn = ColorBtn("NO + NEXT", "Reject then next",          "#3a1a1a","#e07070", h=26)
         self.exit_iso_btn    = ColorBtn("EXIT ISO",  "Exit isolate all panels",   "#303030","#b0b0b0", h=26)
-        self.accept_next_btn.clicked.connect(self.do_accept_current_and_next)
-        self.reject_next_btn.clicked.connect(self.do_reject_current_and_next)
-        self.exit_iso_btn.clicked.connect(self.do_exit_isolate)
+        self._connect_button(self.accept_next_btn, "Accept and next", self.do_accept_current_and_next)
+        self._connect_button(self.reject_next_btn, "Reject and next", self.do_reject_current_and_next)
+        self._connect_button(self.exit_iso_btn, "Exit isolate", self.do_exit_isolate)
         rev_row2.addWidget(self.accept_next_btn)
         rev_row2.addWidget(self.reject_next_btn)
         rev_row2.addWidget(self.exit_iso_btn)
@@ -3304,7 +3309,7 @@ class InstanceCleanerUI(QDialog):
         fl = QLabel("Filter"); fl.setFixedWidth(50)
         self.filter_combo = QComboBox()
         self.filter_combo.addItems(["All","Safe","Fuzzy","Accepted","Rejected","Processed"])
-        self.filter_combo.currentIndexChanged.connect(self.refresh_group_list)
+        self.filter_combo.currentIndexChanged.connect(lambda _idx: self._run_ui_action("Filter groups", self.refresh_group_list))
         filter_row.addWidget(fl); filter_row.addWidget(self.filter_combo)
         right.addLayout(filter_row)
 
@@ -3315,7 +3320,7 @@ class InstanceCleanerUI(QDialog):
             "Copies high","Copies low","Score high","Score low",
             "Name A-Z","Name Z-A","Type","Accepted first","Fuzzy first",
         ])
-        self.sort_combo.currentIndexChanged.connect(self.refresh_group_list)
+        self.sort_combo.currentIndexChanged.connect(lambda _idx: self._run_ui_action("Sort groups", self.refresh_group_list))
         sort_row.addWidget(sl); sort_row.addWidget(self.sort_combo)
         right.addLayout(sort_row)
 
@@ -3323,7 +3328,7 @@ class InstanceCleanerUI(QDialog):
         sel = QLabel("Search"); sel.setFixedWidth(50)
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("name...")
-        self.search_edit.textChanged.connect(self.refresh_group_list)
+        self.search_edit.textChanged.connect(lambda _text: self._run_ui_action("Search groups", self.refresh_group_list))
         search_row.addWidget(sel); search_row.addWidget(self.search_edit)
         right.addLayout(search_row)
 
@@ -3351,6 +3356,27 @@ class InstanceCleanerUI(QDialog):
 
         self.groups_scroll.setWidget(self.groups_container)
         right.addWidget(self.groups_scroll)
+
+    def _connect_button(self, button, action_name, callback):
+        button.clicked.connect(lambda _checked=False: self._run_ui_action(action_name, callback))
+
+    def _run_ui_action(self, action_name, callback, *args, **kwargs):
+        if self._is_processing and action_name != "Stop process":
+            self.status_label.setText("{} ignored: processing is running".format(action_name))
+            return None
+        try:
+            self.status_label.setText("{}...".format(action_name))
+            QApplication.processEvents()
+            return callback(*args, **kwargs)
+        except Exception as e:
+            message = "{} failed: {}".format(action_name, e)
+            self.status_label.setText(message)
+            self.progress_bar.setValue(0)
+            try:
+                cmds.warning("[IC] {}\n{}".format(message, traceback.format_exc()))
+            except Exception:
+                print("[IC] {}\n{}".format(message, traceback.format_exc()))
+            return None
 
     def _row(self, label_text, widget, label_width=90):
         row = QHBoxLayout()
@@ -3483,7 +3509,7 @@ class InstanceCleanerUI(QDialog):
                     min_copies=self.min_copies_spin.value(),
                 )
                 self.progress_bar.setValue(0)
-                self.status_label.setText("No selection.")
+                self.status_label.setText("No selection. Choose Scene for a full refresh, or select mesh roots first.")
                 self.refresh_group_list()
                 return
 
@@ -3492,12 +3518,18 @@ class InstanceCleanerUI(QDialog):
             selection_only = True
         elif mode == "Find Selected":
             if self.cleaner.validated_groups:
-                labels = self.cleaner.keep_only_groups_for_nodes(selected_roots)
+                labels = self.cleaner.find_labels_for_nodes(selected_roots)
                 self.progress_bar.setValue(100)
-                self.refresh_group_list()
                 if labels:
+                    if self.filter_combo.currentText() != "All":
+                        self.filter_combo.setCurrentText("All")
+                    if self.search_edit.text():
+                        self.search_edit.clear()
+                    self.refresh_group_list()
                     self.current_group_label = labels[0]
                     self._highlight_group_item(labels[0], frame=True, select=False)
+                else:
+                    self.status_label.setText("Find selected: no cached matching group")
                 self.status_label.setText(
                     "Find selected: {} cached matching group(s)".format(len(labels)))
                 return
@@ -3598,13 +3630,13 @@ class InstanceCleanerUI(QDialog):
         for i, (label, info) in enumerate(filtered):
             has_items = True
             w = GroupItem(label, info)
-            w.accept_clicked.connect(self.on_accept_group)
-            w.reject_clicked.connect(self.on_reject_group)
-            w.select_clicked.connect(self.on_select_group)
-            w.master_clicked.connect(self.on_select_master)
-            w.instances_clicked.connect(self.on_select_instances)
-            w.backups_clicked.connect(self.on_select_backups)
-            w.checked_changed.connect(self._on_group_checked_changed)
+            w.accept_clicked.connect(lambda lbl, self=self: self._run_ui_action("Accept group", self.on_accept_group, lbl))
+            w.reject_clicked.connect(lambda lbl, self=self: self._run_ui_action("Reject group", self.on_reject_group, lbl))
+            w.select_clicked.connect(lambda lbl, self=self: self._run_ui_action("Select group", self.on_select_group, lbl))
+            w.master_clicked.connect(lambda lbl, self=self: self._run_ui_action("Select master", self.on_select_master, lbl))
+            w.instances_clicked.connect(lambda lbl, self=self: self._run_ui_action("Select instances", self.on_select_instances, lbl))
+            w.backups_clicked.connect(lambda lbl, self=self: self._run_ui_action("Select backups", self.on_select_backups, lbl))
+            w.checked_changed.connect(lambda lbl, checked, self=self: self._run_ui_action("Check group", self._on_group_checked_changed, lbl, checked))
             w.set_checked(label in self.checked_group_labels)
             self.groups_layout.insertWidget(i, w)
             self.group_items[label]  = w

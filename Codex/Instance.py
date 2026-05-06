@@ -93,6 +93,9 @@ ALIGN_ERROR_TOL_FUZZY = 0.030
 # Higher = more accurate grouping, slower scan on large scenes.
 FUZZY_CLUSTER_REPS = 3
 
+# Extra verification used after replacing originals with instances.
+ALIGN_VERIFY_TOL_DEFAULT = 0.030
+
 
 # ---------------------------------------------------------------------------
 # Maya / Qt helpers
@@ -864,6 +867,169 @@ def _compute_signature(transform_name, strict_tol=0.001):
     return sig
 
 
+
+# ---------------------------------------------------------------------------
+# UVOptimizer-style mesh comparison helpers
+# ---------------------------------------------------------------------------
+def _mesh_compare_hash(mesh_transform, ignore_scale=False):
+    """
+    Lightweight hash inspired by UVOptimizer.py.
+    Returns (vtx, edge, face, area, bbox_volume).  With ignore_scale=True, the
+    area / volume channels are normalized by topology count so differently scaled
+    duplicates can still be grouped by the Geometry method.
+    """
+    if not _exists(mesh_transform) or not _has_mesh_shape(mesh_transform):
+        return None
+    try:
+        vtx_count  = int(cmds.polyEvaluate(mesh_transform, vertex=True) or 0)
+        edge_count = int(cmds.polyEvaluate(mesh_transform, edge=True) or 0)
+        face_count = int(cmds.polyEvaluate(mesh_transform, face=True) or 0)
+        area       = float(cmds.polyEvaluate(mesh_transform, worldArea=True) or 0.0)
+        bbox       = cmds.exactWorldBoundingBox(mesh_transform)
+        volume     = float((bbox[3]-bbox[0]) * (bbox[4]-bbox[1]) * (bbox[5]-bbox[2]))
+        if ignore_scale and vtx_count > 0:
+            area   = area / (float(vtx_count) ** 0.5) if abs(area) > 1e-12 else 0.0
+            volume = volume / (float(vtx_count) ** (2.0/3.0)) if abs(volume) > 1e-12 else 0.0
+        return (vtx_count, edge_count, face_count, area, volume)
+    except Exception:
+        return None
+
+
+def _compare_mesh_topology(mesh1, mesh2, ignore_scale=False, tolerance=0.01):
+    h1 = _mesh_compare_hash(mesh1, ignore_scale=ignore_scale)
+    h2 = _mesh_compare_hash(mesh2, ignore_scale=ignore_scale)
+    return bool(h1 and h2 and h1[:3] == h2[:3])
+
+
+def _compare_mesh_geometry(mesh1, mesh2, ignore_scale=False, tolerance=0.01):
+    h1 = _mesh_compare_hash(mesh1, ignore_scale=ignore_scale)
+    h2 = _mesh_compare_hash(mesh2, ignore_scale=ignore_scale)
+    if not h1 or not h2 or h1[:3] != h2[:3]:
+        return False
+    tol = max(float(tolerance), 0.0)
+    for idx in (3, 4):
+        a = abs(float(h1[idx]))
+        b = abs(float(h2[idx]))
+        if a > 1e-8 and abs(a - b) / a > tol:
+            return False
+    return True
+
+
+def _points_array(transform_name, space=om2.MSpace.kObject):
+    fn, dag = _get_mesh_fn(transform_name)
+    if not fn:
+        return None
+    try:
+        pts = fn.getPoints(space)
+        return [(float(p.x), float(p.y), float(p.z)) for p in pts]
+    except Exception:
+        if space != om2.MSpace.kObject and dag:
+            try:
+                pts = fn.getPoints(om2.MSpace.kObject)
+                mat = dag.inclusiveMatrix()
+                return [((p*mat).x, (p*mat).y, (p*mat).z) for p in pts]
+            except Exception:
+                return None
+        return None
+
+
+def _normalize_point_list(points):
+    if not points:
+        return points, 1.0
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    zs = [p[2] for p in points]
+    center = ((min(xs)+max(xs))*0.5, (min(ys)+max(ys))*0.5, (min(zs)+max(zs))*0.5)
+    size = max(max(xs)-min(xs), max(ys)-min(ys), max(zs)-min(zs), 1e-8)
+    return [((p[0]-center[0])/size, (p[1]-center[1])/size, (p[2]-center[2])/size) for p in points], size
+
+
+def _point_list_rms(a, b):
+    if not a or not b or len(a) != len(b):
+        return None
+    total = 0.0
+    for p, q in zip(a, b):
+        dx = p[0] - q[0]
+        dy = p[1] - q[1]
+        dz = p[2] - q[2]
+        total += dx*dx + dy*dy + dz*dz
+    return math.sqrt(total / float(max(1, len(a))))
+
+
+def _compare_mesh_exact(mesh1, mesh2, ignore_scale=False, tolerance=0.001):
+    if not _compare_mesh_topology(mesh1, mesh2, ignore_scale=ignore_scale):
+        return False
+    p1 = _points_array(mesh1, om2.MSpace.kObject)
+    p2 = _points_array(mesh2, om2.MSpace.kObject)
+    if not p1 or not p2 or len(p1) != len(p2):
+        return False
+    tol = max(float(tolerance), 0.0)
+    if ignore_scale:
+        p1, _ = _normalize_point_list(p1)
+        p2, _ = _normalize_point_list(p2)
+    rms = _point_list_rms(p1, p2)
+    return bool(rms is not None and rms <= tol)
+
+
+def _uvoptimizer_compare_score(mesh1, mesh2, method="exact", tolerance=0.30, ignore_scale=True):
+    method = (method or "signature").lower()
+    if method == "topology":
+        return 1.0 if _compare_mesh_topology(mesh1, mesh2, ignore_scale=ignore_scale, tolerance=tolerance) else 0.0
+    if method == "geometry":
+        return 1.0 if _compare_mesh_geometry(mesh1, mesh2, ignore_scale=ignore_scale, tolerance=tolerance) else 0.0
+    if method == "exact":
+        return 1.0 if _compare_mesh_exact(mesh1, mesh2, ignore_scale=ignore_scale, tolerance=tolerance) else 0.0
+    return 0.0
+
+
+def find_groups_uvoptimizer_style(signatures, method="exact", tolerance=0.30, ignore_scale=True):
+    """Pairwise all-scene grouping using UVOptimizer-like methods/options."""
+    groups = {}
+    uniques = []
+    remaining = sorted(list(signatures or []), key=lambda s: (
+        s.vertex_count, s.edge_count, s.face_count, _short(s.transform).lower()
+    ))
+    processed = set()
+    group_index = 0
+    for source in remaining:
+        if source.transform in processed:
+            continue
+        matches = [source.transform]
+        processed.add(source.transform)
+        for candidate in remaining:
+            if candidate.transform in processed:
+                continue
+            if _uvoptimizer_compare_score(source.transform, candidate.transform, method, tolerance, ignore_scale) >= 1.0:
+                matches.append(candidate.transform)
+                processed.add(candidate.transform)
+        if len(matches) > 1:
+            iid = "{}_{{:03d}}_{{}}".format(method).format(group_index, _hash_blob(matches, tolerance, ignore_scale)[:10])
+            groups[iid] = {"meshes": matches, "score": 1.0}
+            group_index += 1
+        else:
+            uniques.extend(matches)
+    return groups, _dedupe_keep_order(uniques)
+
+
+def _verify_instance_matches_original(instance, original, tolerance=ALIGN_VERIFY_TOL_DEFAULT):
+    """
+    After alignment, compare the new instance points against the original backup
+    geometry in world space.  This catches bad rotations/flips before the original
+    is hidden/deleted.
+    """
+    if not _exists(instance) or not _exists(original):
+        return False, None
+    inst_pts = _points_array(instance, om2.MSpace.kWorld)
+    orig_pts = _points_array(original, om2.MSpace.kWorld)
+    if not inst_pts or not orig_pts or len(inst_pts) != len(orig_pts):
+        return False, None
+    _, size = _normalize_point_list(orig_pts)
+    rms = _point_list_rms(inst_pts, orig_pts)
+    if rms is None:
+        return False, None
+    norm = rms / max(size, 1e-8)
+    return norm <= max(float(tolerance), 0.0), norm
+
 # ---------------------------------------------------------------------------
 # Scoring
 # ---------------------------------------------------------------------------
@@ -970,6 +1136,9 @@ def _fuzzy_score(a, b, vertex_tol=5, size_tol=0.04):
 # Grouping
 # ---------------------------------------------------------------------------
 def find_groups(signatures,
+                detect_method="signature",
+                compare_tolerance=0.30,
+                ignore_scale=True,
                 fuzzy_enabled=True,
                 fuzzy_vertex_tol=0,
                 fuzzy_size_tol=0.04,
@@ -983,6 +1152,13 @@ def find_groups(signatures,
     We use 'best of reps' to allow natural size variation while the
     topology gates prevent false matches.
     """
+    method = (detect_method or "signature").lower()
+    if method in ("topology", "geometry", "exact"):
+        groups_safe, uniques = find_groups_uvoptimizer_style(
+            signatures, method=method, tolerance=compare_tolerance, ignore_scale=ignore_scale
+        )
+        return groups_safe, {}, uniques
+
     groups_safe  = {}
     groups_fuzzy = {}
     uniques      = []
@@ -1340,10 +1516,28 @@ class MasterManager(object):
                     _apply_world_matrix(inst, mat)
                 else:
                     fb(inst, full_mesh)
+
+                ok, verify_err = _verify_instance_matches_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
+                if not ok:
+                    # The SVD fit can pick a valid-looking but wrong rotation on symmetric or
+                    # near-symmetric meshes.  Re-check against the original/backup geometry and
+                    # try conservative fallbacks before the original is moved away.
+                    _fallback_align(inst, full_mesh)
+                    ok, verify_err = _verify_instance_matches_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
+                    if not ok and match_type != MATCH_SAFE:
+                        _bbox_fit_align(inst, full_mesh)
+                        ok, verify_err = _verify_instance_matches_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
+                    if not ok:
+                        cmds.warning("[IC] Alignment verify failed for {} (norm err: {}). Keeping best fallback.".format(
+                            _short(full_mesh), "n/a" if verify_err is None else "{:.5f}".format(verify_err)))
             except Exception as e:
                 cmds.warning("[IC] Alignment failed for {}: {}".format(full_mesh, e))
                 try:
                     _fallback_align(inst, full_mesh)
+                    ok, verify_err = _verify_instance_matches_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
+                    if not ok:
+                        cmds.warning("[IC] Fallback verify failed for {} (norm err: {}).".format(
+                            _short(full_mesh), "n/a" if verify_err is None else "{:.5f}".format(verify_err)))
                 except Exception:
                     pass
 
@@ -1509,6 +1703,7 @@ class InstanceCleaner(object):
 
     def scan(self, root=None, roots=None, selection_only=False,
              strict_tol=0.001,
+             detect_method="signature", compare_tolerance=0.30, ignore_scale=True,
              fuzzy_enabled=True, fuzzy_vertex_tol=0,
              fuzzy_size_tol=0.04, fuzzy_score_min=0.92,
              min_copies=2, progress_cb=None):
@@ -1539,6 +1734,9 @@ class InstanceCleaner(object):
 
         self.groups_safe, self.groups_fuzzy, self.uniques = find_groups(
             self.signatures,
+            detect_method=detect_method,
+            compare_tolerance=compare_tolerance,
+            ignore_scale=ignore_scale,
             fuzzy_enabled=fuzzy_enabled,
             fuzzy_vertex_tol=fuzzy_vertex_tol,
             fuzzy_size_tol=fuzzy_size_tol,
@@ -2248,6 +2446,7 @@ class GroupItem(QWidget):
         master_clicked    = Signal(str)
         instances_clicked = Signal(str)
         backups_clicked   = Signal(str)
+        checked_changed   = Signal(str, bool)
     else:
         accept_clicked    = QtCore.Signal(str)
         reject_clicked    = QtCore.Signal(str)
@@ -2255,6 +2454,7 @@ class GroupItem(QWidget):
         master_clicked    = QtCore.Signal(str)
         instances_clicked = QtCore.Signal(str)
         backups_clicked   = QtCore.Signal(str)
+        checked_changed   = QtCore.Signal(str, bool)
 
     def __init__(self, label, info, parent=None):
         super(GroupItem, self).__init__(parent)
@@ -2272,6 +2472,9 @@ class GroupItem(QWidget):
         layout.setSpacing(4)
 
         header = QHBoxLayout()
+        self.group_check = QCheckBox("")
+        self.group_check.setToolTip("Check multiple group cards, then use MERGE SEL GROUPS.")
+        self.group_check.stateChanged.connect(lambda _v: self.checked_changed.emit(self.label, self.group_check.isChecked()))
         self.badge       = QLabel("")
         self.badge.setFixedSize(60, 18)
         self.badge.setAlignment(Qt.AlignCenter)
@@ -2282,6 +2485,7 @@ class GroupItem(QWidget):
         self.score_label = QLabel("")
         self.score_label.setStyleSheet("color:#aaaaaa; font-size:9px;")
         self.score_label.setFixedWidth(48)
+        header.addWidget(self.group_check)
         header.addWidget(self.badge)
         header.addWidget(self.name_label)
         header.addStretch()
@@ -2332,6 +2536,14 @@ class GroupItem(QWidget):
     def set_highlighted(self, state):
         self._highlighted = bool(state)
         self.refresh()
+
+    def set_checked(self, state):
+        self.group_check.blockSignals(True)
+        self.group_check.setChecked(bool(state))
+        self.group_check.blockSignals(False)
+
+    def is_checked(self):
+        return self.group_check.isChecked()
 
     def refresh(self):
         accepted   = self.info["accepted"]
@@ -2396,12 +2608,13 @@ class InstanceCleanerUI(QDialog):
         self.visible_group_order  = []
         self.current_group_label  = None
         self._highlighted_label   = None
+        self.checked_group_labels = set()
         self._last_selection_key  = ""
         self._is_processing       = False
         self._cancel_requested    = False
         self._compact_state       = None
 
-        self.setWindowTitle("Instance Cleaner V3.0 — SVD Align / Multi-Rep Fuzzy / Prod-Ready")
+        self.setWindowTitle("Instance Cleaner V3.1 — UVOpt Detect / Verified Align / Multi-Select Groups")
         self.setMinimumWidth(900)
         self.resize(1040, 560)
         self.setMinimumHeight(500)
@@ -2467,6 +2680,28 @@ class InstanceCleanerUI(QDialog):
 
         self.strict_tol_slider = ParamSlider("Strict tol", 0.0001, 0.02, 0.001, 4, 90)
         left.addWidget(self.strict_tol_slider)
+
+        self.detect_method_combo = QComboBox()
+        self.detect_method_combo.addItems([
+            "Exact (UVOptimizer)",
+            "Geometry (UVOptimizer)",
+            "Topology (UVOptimizer)",
+            "Signature + Fuzzy (current)",
+        ])
+        self.detect_method_combo.setToolTip("Choose how similar meshes are detected. Exact + Ignore Scale + 0.3000 tolerance is the requested default.")
+        left.addLayout(self._row("Method", self.detect_method_combo))
+
+        self.ignore_scale_cb = QCheckBox("Ignore scale")
+        self.ignore_scale_cb.setChecked(True)
+        left.addWidget(self.ignore_scale_cb)
+
+        self.compare_tolerance_spin = QDoubleSpinBox()
+        self.compare_tolerance_spin.setRange(0.0001, 1.0)
+        self.compare_tolerance_spin.setDecimals(4)
+        self.compare_tolerance_spin.setSingleStep(0.001)
+        self.compare_tolerance_spin.setValue(0.3000)
+        self.compare_tolerance_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        left.addLayout(self._row("Tolerance", self.compare_tolerance_spin))
 
         self.fuzzy_enabled_cb = QCheckBox("Enable fuzzy detection")
         self.fuzzy_enabled_cb.setChecked(True)
@@ -2699,6 +2934,13 @@ class InstanceCleanerUI(QDialog):
                 return label
         return None
 
+    def _on_group_checked_changed(self, label, checked):
+        if checked:
+            self.checked_group_labels.add(label)
+        else:
+            self.checked_group_labels.discard(label)
+        self.status_label.setText("{} checked group(s)".format(len(self.checked_group_labels)))
+
     # -- Highlight / nav --
 
     def _highlight_group_item(self, label, frame=False, select=False):
@@ -2744,6 +2986,16 @@ class InstanceCleanerUI(QDialog):
         else:
             self.status_label.setText("Group found but hidden by current filter")
 
+    def _get_detect_method(self):
+        txt = self.detect_method_combo.currentText().lower()
+        if txt.startswith("topology"):
+            return "topology"
+        if txt.startswith("geometry"):
+            return "geometry"
+        if txt.startswith("exact"):
+            return "exact"
+        return "signature"
+
     def do_scan(self):
         roots          = None
         selection_only = False
@@ -2755,6 +3007,9 @@ class InstanceCleanerUI(QDialog):
                 self.cleaner.scan(
                     roots=[], selection_only=True,
                     strict_tol=self.strict_tol_slider.value(),
+                    detect_method=self._get_detect_method(),
+                    compare_tolerance=self.compare_tolerance_spin.value(),
+                    ignore_scale=self.ignore_scale_cb.isChecked(),
                     fuzzy_enabled=self.fuzzy_enabled_cb.isChecked(),
                     fuzzy_vertex_tol=self.fuzzy_vertex_spin.value(),
                     fuzzy_size_tol=self.fuzzy_size_slider.value(),
@@ -2775,6 +3030,9 @@ class InstanceCleanerUI(QDialog):
         count = self.cleaner.scan(
             roots=roots, selection_only=selection_only,
             strict_tol=self.strict_tol_slider.value(),
+            detect_method=self._get_detect_method(),
+            compare_tolerance=self.compare_tolerance_spin.value(),
+            ignore_scale=self.ignore_scale_cb.isChecked(),
             fuzzy_enabled=self.fuzzy_enabled_cb.isChecked(),
             fuzzy_vertex_tol=self.fuzzy_vertex_spin.value(),
             fuzzy_size_tol=self.fuzzy_size_slider.value(),
@@ -2848,6 +3106,8 @@ class InstanceCleanerUI(QDialog):
             w.master_clicked.connect(self.on_select_master)
             w.instances_clicked.connect(self.on_select_instances)
             w.backups_clicked.connect(self.on_select_backups)
+            w.checked_changed.connect(self._on_group_checked_changed)
+            w.set_checked(label in self.checked_group_labels)
             self.groups_layout.insertWidget(i, w)
             self.group_items[label] = w
             self.visible_group_order.append(label)
@@ -2947,16 +3207,20 @@ class InstanceCleanerUI(QDialog):
     def do_merge_selected_groups(self):
         selected = _get_selected_transforms()
         labels   = self.cleaner.find_labels_for_nodes(selected)
+        checked  = [l for l in self.visible_group_order
+                    if l in self.checked_group_labels and l in self.cleaner.validated_groups]
+        for label in checked:
+            if label not in labels:
+                labels.append(label)
         if self.current_group_label and self.current_group_label in self.cleaner.validated_groups:
             if self.current_group_label not in labels:
                 labels.insert(0, self.current_group_label)
         if len(labels) < 2:
-            self.status_label.setText("Merge: select meshes from at least 2 groups.")
+            self.status_label.setText("Merge: select meshes from 2 groups or check 2+ group cards.")
             return
-        stats = self.cleaner.merge_groups(
-            labels,
-            primary_label=self.current_group_label if self.current_group_label in labels else labels[0]
-        )
+        primary = self.current_group_label if self.current_group_label in labels else labels[0]
+        stats = self.cleaner.merge_groups(labels, primary_label=primary)
+        self.checked_group_labels.difference_update(labels)
         self.refresh_group_list()
         tgt = stats.get("target")
         if tgt: self._highlight_group_item(tgt, frame=True)

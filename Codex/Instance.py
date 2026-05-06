@@ -867,6 +867,27 @@ def _compute_signature(transform_name, strict_tol=0.001):
     return sig
 
 
+def _compute_light_signature(transform_name):
+    """Create the minimal signature data needed by UVOptimizer-style scans.
+
+    Topology / Geometry / Exact modes compare meshes directly with the same
+    UVOptimizer-style helpers below, so building the full histogram signature is
+    wasted work and makes Refresh Scan feel frozen on big scenes.
+    """
+    fn, _ = _get_mesh_fn(transform_name)
+    if fn is None:
+        return None
+
+    sig = MeshSignature()
+    sig.transform = _long(transform_name)
+    sig.vertex_count = fn.numVertices
+    sig.edge_count = fn.numEdges
+    sig.face_count = fn.numPolygons
+    sig.bbox_size = _bbox_size_from_fn(fn)
+    sig.strict_hash = _hash_blob(sig.vertex_count, sig.edge_count, sig.face_count)
+    sig.loose_hash = sig.strict_hash
+    return sig
+
 
 # ---------------------------------------------------------------------------
 # UVOptimizer-style mesh comparison helpers
@@ -957,18 +978,30 @@ def _point_list_rms(a, b):
 
 
 def _compare_mesh_exact(mesh1, mesh2, ignore_scale=False, tolerance=0.001):
+    """UVOptimizer.py-style exact vertex comparison.
+
+    This intentionally mirrors the pasted UVOptimizer algorithm: topology gate
+    first, then ordered vertex positions in world space; when Ignore Scale is on
+    both point clouds are centered and normalized by their largest world-bbox
+    dimension before distance testing.
+    """
     if not _compare_mesh_topology(mesh1, mesh2, ignore_scale=ignore_scale):
         return False
-    p1 = _points_array(mesh1, om2.MSpace.kObject)
-    p2 = _points_array(mesh2, om2.MSpace.kObject)
+    p1 = _points_array(mesh1, om2.MSpace.kWorld)
+    p2 = _points_array(mesh2, om2.MSpace.kWorld)
     if not p1 or not p2 or len(p1) != len(p2):
         return False
     tol = max(float(tolerance), 0.0)
     if ignore_scale:
         p1, _ = _normalize_point_list(p1)
         p2, _ = _normalize_point_list(p2)
-    rms = _point_list_rms(p1, p2)
-    return bool(rms is not None and rms <= tol)
+    for a, b in zip(p1, p2):
+        dx = a[0] - b[0]
+        dy = a[1] - b[1]
+        dz = a[2] - b[2]
+        if math.sqrt(dx*dx + dy*dy + dz*dz) > tol:
+            return False
+    return True
 
 
 def _uvoptimizer_compare_score(mesh1, mesh2, method="exact", tolerance=0.30, ignore_scale=True):
@@ -982,7 +1015,7 @@ def _uvoptimizer_compare_score(mesh1, mesh2, method="exact", tolerance=0.30, ign
     return 0.0
 
 
-def find_groups_uvoptimizer_style(signatures, method="exact", tolerance=0.30, ignore_scale=True):
+def find_groups_uvoptimizer_style(signatures, method="exact", tolerance=0.30, ignore_scale=True, progress_cb=None):
     """Pairwise all-scene grouping using UVOptimizer-like methods/options."""
     groups = {}
     uniques = []
@@ -991,12 +1024,18 @@ def find_groups_uvoptimizer_style(signatures, method="exact", tolerance=0.30, ig
     ))
     processed = set()
     group_index = 0
-    for source in remaining:
+    total = max(1, len(remaining))
+    for source_index, source in enumerate(remaining):
+        if progress_cb:
+            progress_cb(source_index, total, "Grouping {}".format(_short(source.transform)))
         if source.transform in processed:
             continue
         matches = [source.transform]
         processed.add(source.transform)
-        for candidate in remaining:
+        for candidate_index, candidate in enumerate(remaining):
+            if progress_cb and candidate_index % 32 == 0:
+                progress_cb(source_index + (float(candidate_index) / float(total)), total,
+                            "Grouping {} ({}/{})".format(_short(source.transform), candidate_index + 1, len(remaining)))
             if candidate.transform in processed:
                 continue
             if _uvoptimizer_compare_score(source.transform, candidate.transform, method, tolerance, ignore_scale) >= 1.0:
@@ -1008,6 +1047,8 @@ def find_groups_uvoptimizer_style(signatures, method="exact", tolerance=0.30, ig
             group_index += 1
         else:
             uniques.extend(matches)
+    if progress_cb:
+        progress_cb(total, total, "Grouping complete")
     return groups, _dedupe_keep_order(uniques)
 
 
@@ -1142,7 +1183,8 @@ def find_groups(signatures,
                 fuzzy_enabled=True,
                 fuzzy_vertex_tol=0,
                 fuzzy_size_tol=0.04,
-                fuzzy_score_min=0.92):
+                fuzzy_score_min=0.92,
+                progress_cb=None):
     """
     Returns (groups_safe, groups_fuzzy, uniques).
 
@@ -1155,7 +1197,8 @@ def find_groups(signatures,
     method = (detect_method or "signature").lower()
     if method in ("topology", "geometry", "exact"):
         groups_safe, uniques = find_groups_uvoptimizer_style(
-            signatures, method=method, tolerance=compare_tolerance, ignore_scale=ignore_scale
+            signatures, method=method, tolerance=compare_tolerance,
+            ignore_scale=ignore_scale, progress_cb=progress_cb
         )
         return groups_safe, {}, uniques
 
@@ -1197,7 +1240,10 @@ def find_groups(signatures,
 
     clusters = []  # each: {"reps": [sig,...], "items": [sig,...], "scores": [float,...]}
 
-    for sig in remaining:
+    total_remaining = max(1, len(remaining))
+    for sig_index, sig in enumerate(remaining):
+        if progress_cb:
+            progress_cb(sig_index, total_remaining, "Fuzzy grouping {}".format(_short(sig.transform)))
         best_cluster = None
         best_score   = 0.
 
@@ -1723,15 +1769,26 @@ class InstanceCleaner(object):
         self.signatures             = []
         self.signature_by_transform = {}
 
+        method = (detect_method or "signature").lower()
+        uvoptimizer_mode = method in ("topology", "geometry", "exact")
+
         total = len(transforms)
         for i, tf in enumerate(transforms):
             if progress_cb:
-                progress_cb(int(i*100./max(1, total)), tf)
-            sig = _compute_signature(tf, strict_tol=strict_tol)
+                progress_cb(int(i*60./max(1, total)), "Scanning {}".format(_short(tf)))
+            sig = (_compute_light_signature(tf) if uvoptimizer_mode
+                   else _compute_signature(tf, strict_tol=strict_tol))
             if sig:
                 self.signatures.append(sig)
                 self.signature_by_transform[sig.transform] = sig
 
+        def grouping_progress(current, total_count, message):
+            if progress_cb:
+                pct = 60 + int(float(current) * 35.0 / float(max(1, total_count)))
+                progress_cb(min(95, pct), message)
+
+        if progress_cb:
+            progress_cb(60, "Grouping meshes...")
         self.groups_safe, self.groups_fuzzy, self.uniques = find_groups(
             self.signatures,
             detect_method=detect_method,
@@ -1741,7 +1798,10 @@ class InstanceCleaner(object):
             fuzzy_vertex_tol=fuzzy_vertex_tol,
             fuzzy_size_tol=fuzzy_size_tol,
             fuzzy_score_min=fuzzy_score_min,
+            progress_cb=grouping_progress,
         )
+        if progress_cb:
+            progress_cb(95, "Building group list...")
 
         self.validated_groups = {}
         existing_names   = self._existing_display_names_by_internal_id()
@@ -2402,7 +2462,7 @@ class ColorBtn(QPushButton):
         hover = QColor(bg).lighter(130).name()
         self.setStyleSheet(
             "QPushButton {{ background:{bg}; color:{fg}; border:1px solid #222;"
-            " border-radius:3px; font-weight:bold; font-size:11px; padding:2px 6px; }}"
+            " border-radius:3px; font-weight:bold; font-size:9px; padding:1px 4px; }}"
             "QPushButton:hover {{ background:{hover}; border-color:#444; }}"
             "QPushButton:pressed {{ background:#1a1a1a; }}"
             "QPushButton:disabled {{ background:#242424; color:#555; border-color:#222; }}"
@@ -2710,6 +2770,8 @@ class InstanceCleanerUI(QDialog):
 
         self.scan_mode_combo = QComboBox()
         self.scan_mode_combo.addItems(["Scene", "Selected Mesh(es)", "Find Selected"])
+        self.scan_mode_combo.setCurrentIndex(2)
+        self.scan_mode_combo.setToolTip("Default is Find Selected to avoid launching a full-scene scan by accident. Choose Scene when you really want to rescan everything.")
         left.addLayout(self._row("Source", self.scan_mode_combo))
 
         self.strict_tol_slider = ParamSlider("Strict tol", 0.0001, 0.02, 0.001, 4, 90)
@@ -2722,7 +2784,8 @@ class InstanceCleanerUI(QDialog):
             "Topology (UVOptimizer)",
             "Signature + Fuzzy (current)",
         ])
-        self.detect_method_combo.setToolTip("Choose how similar meshes are detected. Exact + Ignore Scale + 0.3000 tolerance is the requested default.")
+        self.detect_method_combo.setCurrentIndex(1)
+        self.detect_method_combo.setToolTip("Same comparison choices as UVOptimizer.py. Geometry is the default because Exact is much slower on full scenes.")
         left.addLayout(self._row("Method", self.detect_method_combo))
 
         self.ignore_scale_cb = QCheckBox("Ignore scale")
@@ -2804,14 +2867,9 @@ class InstanceCleanerUI(QDialog):
         master_row.addWidget(org_mst_btn)
         left.addLayout(master_row)
 
-        find_master_row = QHBoxLayout()
-        find_sel_btn = ColorBtn("FIND SELECTED", "Highlight group of selection", "#3a3320","#e0c060", h=24)
-        set_mst_btn  = ColorBtn("SET SEL MASTER", "Use selected mesh as the master/reference for its group", "#203a2a","#80e0a0", h=24)
-        find_sel_btn.clicked.connect(self.do_frame_selected_group)
+        set_mst_btn = ColorBtn("SET SEL MASTER", "Use selected mesh as the master/reference for its group", "#203a2a","#80e0a0", h=24)
         set_mst_btn.clicked.connect(self.do_set_selected_as_master)
-        find_master_row.addWidget(find_sel_btn)
-        find_master_row.addWidget(set_mst_btn)
-        left.addLayout(find_master_row)
+        left.addWidget(set_mst_btn)
 
         # --- PROCESS ---
         left.addWidget(SectionLabel("PROCESS"))

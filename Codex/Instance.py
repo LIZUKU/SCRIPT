@@ -1365,6 +1365,28 @@ def _verify_instance_matches_original(instance, original, tolerance=ALIGN_VERIFY
     return False, norm
 
 
+def _verify_instance_ordered_points(instance, original, tolerance=ALIGN_VERIFY_TOL_DEFAULT):
+    """Strict ordered-vertex verification used before any fuzzy nearest check.
+
+    The nearest-point verifier is useful for meshes with reordered vertices, but
+    symmetric parts can also pass it when they are rotated 180 degrees.  This
+    strict test keeps the normal path deterministic for duplicated meshes that
+    still share vertex order.
+    """
+    if not _exists(instance) or not _exists(original):
+        return False, None
+    inst_pts = _points_array(instance, om2.MSpace.kWorld)
+    orig_pts = _points_array(original, om2.MSpace.kWorld)
+    if not inst_pts or not orig_pts or len(inst_pts) != len(orig_pts):
+        return False, None
+    _, size = _normalize_point_list(orig_pts)
+    rms = _point_list_rms(inst_pts, orig_pts)
+    if rms is None:
+        return False, None
+    norm = rms / max(size, 1e-8)
+    return norm <= max(float(tolerance), 0.0), norm
+
+
 def _nearest_point_match_score(src_points, dst_points, world_tolerance):
     if not src_points or not dst_points:
         return 0.0, None
@@ -1943,7 +1965,7 @@ def find_groups(signatures,
 # ---------------------------------------------------------------------------
 # SVD-based alignment
 # ---------------------------------------------------------------------------
-def _svd_align(master_pts_obj, target_pts_world):
+def _svd_align(master_pts_obj, target_pts_world, allow_reflection=False):
     """
     Compute a 4x4 world matrix (flat list, row-major Maya convention) mapping
     master_pts_obj (Nx3) onto target_pts_world (Nx3) via SVD.
@@ -1979,7 +2001,7 @@ def _svd_align(master_pts_obj, target_pts_world):
         return None, None
 
     R = Vt.T.dot(U.T)
-    if np.linalg.det(R) < 0:
+    if np.linalg.det(R) < 0 and not allow_reflection:
         Vt[-1, :] *= -1
         R = Vt.T.dot(U.T)
 
@@ -2020,7 +2042,7 @@ def _compute_alignment(master_transform, original_transform):
     dst = np.array([[(p*tgt_wmat).x, (p*tgt_wmat).y, (p*tgt_wmat).z]
                     for p in tgt_pts], dtype=np.float64)
 
-    matrix, rms = _svd_align(src, dst)
+    matrix, rms = _svd_align(src, dst, allow_reflection=True)
     if matrix is None:
         return None, None
 
@@ -2069,6 +2091,84 @@ def _bbox_fit_align(instance, original):
         ))
     except Exception:
         pass
+
+
+def _align_instance_to_original(instance, master_transform, original_transform,
+                                match_type=MATCH_SAFE,
+                                use_pca_icp_alignment=True):
+    """Align an instance to the still-visible original/backup.
+
+    Prefer the original transform + bbox-center offset first.  Because masters
+    are recentered for clean storage, this is the closest equivalent to a
+    frozen-transform placement and it preserves signed scales / mirrored parent
+    transforms that SVD rotation-only alignment can misread as a 180° flip.
+    PCA+ICP is intentionally kept as a late fallback: on repeated or symmetric
+    meshes its nearest-neighbor score can look good even when the part is spun
+    the wrong way around.
+    """
+    if not (_exists(instance) and _exists(master_transform) and _exists(original_transform)):
+        return False, None, False, None
+
+    best_ok = False
+    best_err = None
+    pca_icp_ok = False
+    pca_icp_err = None
+
+    # 1) Deterministic placement: original matrix, then compensate for the
+    # master geometry that was centered on its transform.
+    _fallback_align(instance, original_transform)
+    best_ok, best_err = _verify_instance_ordered_points(
+        instance, original_transform, ALIGN_VERIFY_TOL_DEFAULT)
+    if best_ok:
+        return True, best_err, pca_icp_ok, pca_icp_err
+
+    # If vertex order changed but the visual point cloud matches, keep this
+    # safer transform-derived orientation instead of jumping straight to ICP.
+    cloud_ok, cloud_err = _verify_instance_matches_original(
+        instance, original_transform, ALIGN_VERIFY_TOL_DEFAULT)
+    if cloud_ok:
+        return True, cloud_err, pca_icp_ok, pca_icp_err
+
+    # 2) Ordered SVD.  This can recover non-centered or edited pivots and now
+    # accepts reflection matrices so mirrored duplicates do not get forced into
+    # an incorrect pure rotation.
+    mat, err = _compute_alignment(master_transform, original_transform)
+    if mat:
+        tol = ALIGN_ERROR_TOL_SAFE if match_type == MATCH_SAFE else ALIGN_ERROR_TOL_FUZZY
+        if err is None or err <= tol:
+            _apply_world_matrix(instance, mat)
+            best_ok, best_err = _verify_instance_ordered_points(
+                instance, original_transform, ALIGN_VERIFY_TOL_DEFAULT)
+            if best_ok:
+                return True, best_err, pca_icp_ok, pca_icp_err
+            cloud_ok, cloud_err = _verify_instance_matches_original(
+                instance, original_transform, ALIGN_VERIFY_TOL_DEFAULT)
+            if cloud_ok:
+                return True, cloud_err, pca_icp_ok, pca_icp_err
+
+    # 3) Fuzzy bbox fit for non-safe matches.
+    if match_type != MATCH_SAFE:
+        _bbox_fit_align(instance, original_transform)
+        cloud_ok, cloud_err = _verify_instance_matches_original(
+            instance, original_transform, ALIGN_VERIFY_TOL_DEFAULT)
+        if cloud_ok:
+            return True, cloud_err, pca_icp_ok, pca_icp_err
+
+    # 4) Last-resort PCA+ICP only.  This is useful when vertex order differs,
+    # but no longer overrides the transform-derived orientation above.
+    if use_pca_icp_alignment:
+        pca_icp_ok, pca_icp_err = _pca_icp_align_instance_to_backup(instance, original_transform)
+        if pca_icp_ok:
+            best_ok, best_err = _verify_instance_ordered_points(
+                instance, original_transform, ALIGN_VERIFY_TOL_DEFAULT)
+            if best_ok:
+                return True, best_err, pca_icp_ok, pca_icp_err
+            cloud_ok, cloud_err = _verify_instance_matches_original(
+                instance, original_transform, ALIGN_VERIFY_TOL_DEFAULT)
+            if cloud_ok or _pca_icp_score_is_usable(pca_icp_err, original_transform):
+                return True, cloud_err if cloud_err is not None else pca_icp_err, pca_icp_ok, pca_icp_err
+
+    return False, best_err, pca_icp_ok, pca_icp_err
 
 
 # ---------------------------------------------------------------------------
@@ -2204,61 +2304,20 @@ class MasterManager(object):
             pca_icp_err = None
 
             try:
-                if use_pca_icp_alignment:
-                    pca_icp_ok, pca_icp_err = _pca_icp_align_instance_to_backup(inst, full_mesh)
-                    if not pca_icp_ok:
-                        cmds.warning("[IC] PCA+ICP alignment failed for {}. Falling back.".format(_short(full_mesh)))
-
-                if not pca_icp_ok:
-                    mat, err = _compute_alignment(master_path, full_mesh)
-
-                    if match_type == MATCH_SAFE:
-                        tol = ALIGN_ERROR_TOL_SAFE
-                        fb  = _fallback_align
-                    else:
-                        tol = ALIGN_ERROR_TOL_FUZZY
-                        fb  = _bbox_fit_align
-
-                    if mat and (err is None or err <= tol):
-                        _apply_world_matrix(inst, mat)
-                    else:
-                        fb(inst, full_mesh)
-
-                    _refine_instance_orientation_to_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
-
-                ok, verify_err = _verify_instance_matches_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
+                ok, verify_err, pca_icp_ok, pca_icp_err = _align_instance_to_original(
+                    inst, master_path, full_mesh,
+                    match_type=match_type,
+                    use_pca_icp_alignment=use_pca_icp_alignment)
                 if not ok:
-                    _fallback_align(inst, full_mesh)
-                    if use_pca_icp_alignment:
-                        pca_icp_ok, pca_icp_err = _pca_icp_align_instance_to_backup(inst, full_mesh)
-                    else:
-                        _refine_instance_orientation_to_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
-                    ok, verify_err = _verify_instance_matches_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
-                    if not ok and match_type != MATCH_SAFE:
-                        _bbox_fit_align(inst, full_mesh)
-                        if use_pca_icp_alignment:
-                            pca_icp_ok, pca_icp_err = _pca_icp_align_instance_to_backup(inst, full_mesh)
-                        else:
-                            _refine_instance_orientation_to_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
-                        ok, verify_err = _verify_instance_matches_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
-                    if not ok and pca_icp_ok and _pca_icp_score_is_usable(pca_icp_err, full_mesh):
-                        ok = True
-                        _add_ic_attr(inst, ATTR_IC_STATUS, "trusted_pca_icp_alignment", "string")
-                    if not ok:
-                        cmds.warning("[IC] Alignment verify failed for {} (err: {}).".format(
-                            _short(full_mesh), "n/a" if verify_err is None else "{:.5f}".format(verify_err)))
+                    cmds.warning("[IC] Alignment verify failed for {} (err: {}).".format(
+                        _short(full_mesh), "n/a" if verify_err is None else "{:.5f}".format(verify_err)))
+                elif pca_icp_ok and _pca_icp_score_is_usable(pca_icp_err, full_mesh):
+                    _add_ic_attr(inst, ATTR_IC_STATUS, "trusted_pca_icp_alignment", "string")
             except Exception as e:
                 cmds.warning("[IC] Alignment failed for {}: {}".format(full_mesh, e))
                 try:
                     _fallback_align(inst, full_mesh)
-                    if use_pca_icp_alignment:
-                        pca_icp_ok, pca_icp_err = _pca_icp_align_instance_to_backup(inst, full_mesh)
-                    else:
-                        _refine_instance_orientation_to_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
                     ok, verify_err = _verify_instance_matches_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
-                    if not ok and pca_icp_ok and _pca_icp_score_is_usable(pca_icp_err, full_mesh):
-                        ok = True
-                        _add_ic_attr(inst, ATTR_IC_STATUS, "trusted_pca_icp_alignment", "string")
                     if not ok:
                         cmds.warning("[IC] Fallback verify failed for {} (err: {}).".format(
                             _short(full_mesh), "n/a" if verify_err is None else "{:.5f}".format(verify_err)))

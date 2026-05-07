@@ -2096,42 +2096,22 @@ def _bbox_fit_align(instance, original):
 def _align_instance_to_original(instance, master_transform, original_transform,
                                 match_type=MATCH_SAFE,
                                 use_pca_icp_alignment=True):
-    """Align an instance to the still-visible original/backup with PCA+ICP only.
+    """Place an instance with the standalone PCA-candidates + ICP algorithm only.
 
-    The instance is created from the centered master, then this routine uses the
-    same PCA orientation candidates + brute-force nearest-neighbor ICP pass as
-    the standalone selection script.  Older transform/SVD/bbox orientation
-    fallbacks are intentionally bypassed here because they can fight the PCA+ICP
-    solution and leave difficult meshes at the wrong backup orientation.
+    This intentionally does not run the old ordered-vertex verification, nearest
+    cloud verifier, SVD, bounding-box, or manual orientation-search fallbacks.
+    The replacement placement is exactly the simple mesh-A-to-mesh-B pass: sample
+    world vertices, choose the best PCA orientation candidate, refine with
+    brute-force nearest-neighbor ICP, then apply the final row-vector Maya delta
+    matrix to the new instance.
     """
-    if not (_exists(instance) and _exists(master_transform) and _exists(original_transform)):
-        return False, None, False, None
+    del master_transform, match_type, use_pca_icp_alignment
 
-    if not use_pca_icp_alignment:
-        cmds.warning("[IC] PCA+ICP alignment is disabled; no alternate alignment algorithm will run.")
+    if not (_exists(instance) and _exists(original_transform)):
         return False, None, False, None
 
     pca_icp_ok, pca_icp_err = _pca_icp_align_instance_to_backup(instance, original_transform)
-    if not pca_icp_ok:
-        return False, pca_icp_err, pca_icp_ok, pca_icp_err
-
-    # Keep the verification as a trust check only.  Ordered vertices can fail on
-    # valid duplicates with reordered points, so a usable PCA+ICP nearest-point
-    # score is enough to accept the placement.
-    ordered_ok, ordered_err = _verify_instance_ordered_points(
-        instance, original_transform, ALIGN_VERIFY_TOL_DEFAULT)
-    if ordered_ok:
-        return True, ordered_err, pca_icp_ok, pca_icp_err
-
-    cloud_ok, cloud_err = _verify_instance_matches_original(
-        instance, original_transform, ALIGN_VERIFY_TOL_DEFAULT)
-    if cloud_ok:
-        return True, cloud_err, pca_icp_ok, pca_icp_err
-
-    if _pca_icp_score_is_usable(pca_icp_err, original_transform):
-        return True, pca_icp_err, pca_icp_ok, pca_icp_err
-
-    return False, cloud_err if cloud_err is not None else pca_icp_err, pca_icp_ok, pca_icp_err
+    return pca_icp_ok, pca_icp_err, pca_icp_ok, pca_icp_err
 
 
 # ---------------------------------------------------------------------------
@@ -2272,10 +2252,10 @@ class MasterManager(object):
                     match_type=match_type,
                     use_pca_icp_alignment=use_pca_icp_alignment)
                 if not ok:
-                    cmds.warning("[IC] Alignment verify failed for {} (err: {}).".format(
+                    cmds.warning("[IC] PCA+ICP alignment did not converge for {} (score: {}).".format(
                         _short(full_mesh), "n/a" if verify_err is None else "{:.5f}".format(verify_err)))
-                elif pca_icp_ok and _pca_icp_score_is_usable(pca_icp_err, full_mesh):
-                    _add_ic_attr(inst, ATTR_IC_STATUS, "trusted_pca_icp_alignment", "string")
+                elif pca_icp_ok:
+                    _add_ic_attr(inst, ATTR_IC_STATUS, "pca_icp_alignment", "string")
             except Exception as e:
                 cmds.warning("[IC] PCA+ICP alignment failed for {}: {}".format(full_mesh, e))
 
@@ -3786,12 +3766,11 @@ class InstanceCleanerUI(QDialog):
         self.master_spacing_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
         left.addLayout(self._row("Spacing", self.master_spacing_spin))
 
-        self.pca_icp_align_cb = QCheckBox("PCA+ICP match to backup")
-        self.pca_icp_align_cb.setChecked(True)
-        self.pca_icp_align_cb.setToolTip(
-            "Default: use the PCA candidate + ICP algorithm to align each new "
-            "instance to the still-visible original/backup before moving it to BACKUPS.")
-        left.addWidget(self.pca_icp_align_cb)
+        self.pca_icp_align_lbl = QLabel("Alignment: PCA candidates + ICP only")
+        self.pca_icp_align_lbl.setToolTip(
+            "Replacement always uses the standalone PCA orientation candidate + "
+            "brute-force ICP algorithm; no alternate alignment fallback is used.")
+        left.addWidget(self.pca_icp_align_lbl)
 
         proc_row = QHBoxLayout()
         self.process_btn = ColorBtn(
@@ -4521,7 +4500,7 @@ class InstanceCleanerUI(QDialog):
                 master_spacing=self.master_spacing_spin.value(),
                 keep_hidden_backups=True,
                 delete_originals=False,
-                use_pca_icp_alignment=self.pca_icp_align_cb.isChecked(),
+                use_pca_icp_alignment=True,
                 progress_cb=progress_cb,
                 cancel_cb=combined_cancel_cb,
                 labels=labels,

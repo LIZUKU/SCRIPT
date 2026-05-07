@@ -3468,15 +3468,17 @@ class ColorBtn(QPushButton):
         base_bg = self._base_bg
         base_fg = self._base_fg
         border = QColor(base_bg).lighter(150).name()
-        if label in ("OK", "OK + NEXT") or label.startswith("ACCEPT") or label == "PROCESS":
-            base_bg = self._base_bg if self._base_bg != "#2d2d2d" else "#7b1625"
-            base_fg, border = "#ffe7eb", "#d3455b"
-        elif label in ("NO", "NO + NEXT", "STOP") or label.startswith("REJECT"):
-            base_bg = self._base_bg if self._base_bg != "#2d2d2d" else "#4b0e19"
+        positive_labels = ("OK", "OK + NEXT", "SAFE OK")
+        destructive_labels = ("NO", "NO + NEXT", "STOP", "CANCEL", "CANCEL PROCESS")
+        if label in positive_labels or label.startswith("ACCEPT"):
+            base_bg = "#24583a"
+            base_fg, border = "#d9ffe7", "#4e9b67"
+        elif label in destructive_labels or label.startswith("REJECT"):
+            base_bg = "#4b0e19"
             base_fg, border = "#ffd7df", "#a3293d"
         elif "FUZZ" in label:
-            base_bg = self._base_bg if self._base_bg != "#2d2d2d" else "#5a141f"
-            base_fg, border = "#ffd8de", "#b73449"
+            base_bg = "#49341f"
+            base_fg, border = "#ffd59a", "#8c6236"
 
         hover = QColor(base_bg).lighter(136).name()
         pressed = QColor(base_bg).darker(122).name()
@@ -3511,7 +3513,7 @@ class SectionLabel(QLabel):
         self.setStyleSheet(
             "color:#d9dde3; font-family:Segoe UI, Arial, sans-serif; font-size:{font}px; "
             "font-weight:800; letter-spacing:.9px; padding:{pt}px {px}px {pb}px {px}px; "
-            "border-left:{bar}px solid #cf243d; background:#1b1d21; border-radius:{radius}px;"
+            "border-left:{bar}px solid #515863; background:#1b1d21; border-radius:{radius}px;"
             .format(font=self._s(9), pt=self._s(4), pb=self._s(3), px=self._s(6),
                     bar=self._s(3), radius=self._s(4))
         )
@@ -3652,11 +3654,11 @@ class GroupItem(QWidget):
         self._actions_layout = actions
         actions.setSpacing(3)
         self.src_btn       = ColorBtn("SRC", "Select source meshes", "#33363d","#d7dce4", 46,21)
-        self.master_btn    = ColorBtn("MST", "Select master",        "#8f1e32","#ffe2e7", 46,21)
+        self.master_btn    = ColorBtn("MST", "Select master",        "#33363d","#d7dce4", 46,21)
         self.instances_btn = ColorBtn("INS", "Select instances",     "#33363d","#d7dce4", 46,21)
         self.backups_btn   = ColorBtn("BKP", "Select backups",       "#33363d","#d7dce4", 46,21)
 
-        self.acc_btn = ColorBtn("OK",  "Accept group", "#8f1e32","#ffe2e7", 30,21)
+        self.acc_btn = ColorBtn("OK",  "Accept group", "#24583a","#d9ffe7", 30,21)
         self.rej_btn = ColorBtn("NO",  "Reject group", "#4b0e19","#ffd7df", 30,21)
 
         self.src_btn.clicked.connect(lambda: self.select_clicked.emit(self.label))
@@ -3744,9 +3746,9 @@ class GroupItem(QWidget):
         self.rej_btn.setVisible(not bool(processed))
 
         if processed:
-            self._set_badge("DONE", "#5d2330")
+            self._set_badge("DONE", "#4b5563")
             self.status_lbl.setText("Processed — SRC falls back to backups")
-            bg, border, color = "#24272d", "#7f3042", "#f1c6cf"
+            bg, border, color = "#24272d", "#4b5563", "#cfd6df"
         elif accepted is False:
             self._set_badge("REJECT", "#6d1728")
             self.status_lbl.setText("Rejected")
@@ -3773,7 +3775,7 @@ class GroupItem(QWidget):
             bg, border, color = "#24262b", "#50545d", "#c9c1c3"
 
         bw     = 2 if self._highlighted else 1
-        border = "#d2a45c" if self._highlighted else border
+        border = "#8a7352" if self._highlighted else border
         self.status_lbl.setStyleSheet("color:{}; font-size:{}px;".format(color, self._s(8)))
         self.setStyleSheet(
             "#GroupItemCard {{ background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 {}, stop:1 {}); "
@@ -3867,7 +3869,7 @@ class InstanceCleanerUI(QDialog):
         if hasattr(self, "header_status_label"):
             self.header_status_label.setMinimumWidth(self._s(104))
             self.header_status_label.setStyleSheet(
-                "background:#2b1118; color:#ffdfe5; border:1px solid #8f1e32; "
+                "background:#202329; color:#d8dde5; border:1px solid #353a42; "
                 "border-radius:{}px; font-size:{}px; font-weight:900; padding:{}px {}px;"
                 .format(self._s(10), self._s(9), self._s(4), self._s(8)))
         for chip in (getattr(self, "stat_groups_label", None), getattr(self, "stat_safe_label", None), getattr(self, "stat_fuzzy_label", None)):
@@ -3901,14 +3903,14 @@ class InstanceCleanerUI(QDialog):
             }}
             QLabel#TitleLabel {{ color:#eef1f5; font-size:{title_font}px; font-weight:800; letter-spacing:.2px; }}
             QLabel#SubtitleLabel {{ color:#8f969f; font-size:{small_font}px; }}
-            QLabel#StatChip {{ background:#211f23; color:#f0d4d8; border:1px solid #403039;
+            QLabel#StatChip {{ background:#202329; color:#d8dde5; border:1px solid #353a42;
                                border-radius:{chip_radius}px; font-size:{small_font}px; font-weight:800; padding:{chip_vpad}px {chip_hpad}px; }}
-            QLabel#StatChip[role=accent] {{ background:#2b1118; color:#ffdfe5; border-color:#8f1e32; }}
-            QLabel#StatChip[role=warn] {{ background:#27161a; color:#f2b6c0; border-color:#64202d; }}
+            QLabel#StatChip[role=accent] {{ background:#1d2a23; color:#c9f6da; border-color:#3d7a52; }}
+            QLabel#StatChip[role=warn] {{ background:#2b251c; color:#ffd59a; border-color:#7b5a33; }}
             QLabel {{ color:#aeb4bd; font-size:{label_font}px; }}
             QLineEdit {{ background:#1f2125; color:#e8ebf0; border:1px solid #30343a;
-                        border-radius:{radius}px; padding:{field_vpad}px {field_hpad}px; font-size:{field_font}px; selection-background-color:#9f1d31; }}
-            QLineEdit:focus {{ border-color:#cf243d; background:#23262b; }}
+                        border-radius:{radius}px; padding:{field_vpad}px {field_hpad}px; font-size:{field_font}px; selection-background-color:#4e667f; }}
+            QLineEdit:focus {{ border-color:#5d6a7a; background:#23262b; }}
             QCheckBox {{ color:#b8bec7; font-size:{field_font}px; spacing:{spacing}px; }}
             QCheckBox::indicator {{ width:{indicator}px; height:{indicator}px; }}
             QWidget#LeftPanel, QWidget#RightPanel {{ background:#191b1f; border:1px solid #2a2d33; border-radius:{panel_radius}px; }}
@@ -3922,17 +3924,17 @@ class InstanceCleanerUI(QDialog):
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height:0; }}
             QSlider::groove:horizontal {{ height:{slider_h}px; background:#2a2d33; border-radius:{slider_r}px; }}
             QSlider::handle:horizontal {{ background:#9aa3ad; border:1px solid #5f6873; width:{handle_w}px; margin:-{handle_m}px 0; border-radius:{handle_r}px; }}
-            QSlider::sub-page:horizontal {{ background:#cf243d; border-radius:{slider_r}px; }}
+            QSlider::sub-page:horizontal {{ background:#6b7480; border-radius:{slider_r}px; }}
             QSpinBox, QDoubleSpinBox {{ background:#1f2125; color:#e8ebf0; border:1px solid #30343a;
                                        border-radius:{radius}px; padding:{spin_pad}px; font-size:{field_font}px; }}
-            QSpinBox:focus, QDoubleSpinBox:focus {{ border-color:#cf243d; background:#23262b; }}
+            QSpinBox:focus, QDoubleSpinBox:focus {{ border-color:#5d6a7a; background:#23262b; }}
             QComboBox {{ background:#1f2125; color:#e8ebf0; border:1px solid #30343a;
                         border-radius:{radius}px; padding:{field_vpad}px {field_hpad}px; font-size:{field_font}px; }}
             QComboBox:hover {{ border-color:#4b515c; }}
-            QComboBox QAbstractItemView {{ background:#1f2125; color:#e8ebf0; border:1px solid #30343a; selection-background-color:#9f1d31; }}
+            QComboBox QAbstractItemView {{ background:#1f2125; color:#e8ebf0; border:1px solid #30343a; selection-background-color:#4e667f; }}
             QProgressBar {{ background:#141517; border:1px solid #30343a; border-radius:{radius}px;
                            text-align:center; color:#bfc5cd; font-size:{small_font}px; font-weight:700; }}
-            QProgressBar::chunk {{ background:#cf243d; border-radius:{chunk_r}px; }}
+            QProgressBar::chunk {{ background:#4e667f; border-radius:{chunk_r}px; }}
         """.format(
             title_font=self._s(14), label_font=self._s(9), field_font=self._s(9), small_font=self._s(8),
             radius=self._s(4), panel_radius=self._s(6), field_vpad=self._s(3), field_hpad=self._s(7),
@@ -3961,7 +3963,7 @@ class InstanceCleanerUI(QDialog):
         self.header_status_label.setAlignment(Qt.AlignCenter)
         self.header_status_label.setMinimumWidth(self._s(104))
         self.header_status_label.setStyleSheet(
-            "background:#2b1118; color:#ffdfe5; border:1px solid #8f1e32; "
+            "background:#202329; color:#d8dde5; border:1px solid #353a42; "
             "border-radius:{}px; font-size:{}px; font-weight:900; padding:{}px {}px;"
             .format(self._s(10), self._s(9), self._s(4), self._s(8)))
         self.stat_groups_label = self._make_stat_chip("Groups 0")
@@ -3998,7 +4000,7 @@ class InstanceCleanerUI(QDialog):
         right = self._track_layout(QVBoxLayout(right_col), spacing=4, margins=(6,6,6,6))
 
         body.addWidget(self.left_scroll, 1)
-        body.addWidget(right_col, 2)
+        body.addWidget(right_col, 1)
         self.left_col = left_content
         self.right_col = right_col
 
@@ -4089,10 +4091,10 @@ class InstanceCleanerUI(QDialog):
         self.status_label.setStyleSheet("color:#8b8285; font-size:{}px;".format(self._s(9)))
         scan.addWidget(self.status_label)
 
-        scan_btn = ColorBtn("REFRESH SCENE", "Force Source to Scene and run a full scan", "#8f1e32","#ffe2e7", h=24)
+        scan_btn = ColorBtn("REFRESH SCENE", "Force Source to Scene and run a full scan", "#33363d","#d7dce4", h=24)
         scan_current_btn = ColorBtn("REFRESH MODE", "Scan using the current Source combo (Scene or Selected Mesh(es))", "#33363d","#d7dce4", h=24)
         find_btn = ColorBtn("FIND SELECTED", "Fast-find meshes matching the current selection", "#33363d","#d7dce4", h=24)
-        show_all_btn = ColorBtn("SHOW ALL", "Clear selection-find filter and show all scanned groups", "#8f1e32","#ffe2e7", h=24)
+        show_all_btn = ColorBtn("SHOW ALL", "Clear selection-find filter and show all scanned groups", "#33363d","#d7dce4", h=24)
         self._connect_button(scan_btn, "Refresh scene", self.do_refresh_scene)
         self._connect_button(scan_current_btn, "Refresh current mode", self.do_refresh_current)
         self._connect_button(find_btn, "Find selected", self.do_find_selected)
@@ -4105,8 +4107,8 @@ class InstanceCleanerUI(QDialog):
         groups.addWidget(SectionLabel("GROUPS"))
 
         bulk = self._track_layout(QHBoxLayout(), spacing=4, margins=(0,0,0,0))
-        acc_safe_btn = ColorBtn("ACCEPT SAFE", "Accept only safe groups", "#8f1e32","#ffe2e7", h=24)
-        acc_all_btn  = ColorBtn("ACCEPT ALL",  "Accept safe + fuzzy",     "#581522","#ffc7d0", h=24)
+        acc_safe_btn = ColorBtn("ACCEPT SAFE", "Accept only safe groups", "#24583a","#d9ffe7", h=24)
+        acc_all_btn  = ColorBtn("ACCEPT ALL",  "Accept safe + fuzzy",     "#24583a","#d9ffe7", h=24)
         rej_all_btn  = ColorBtn("REJECT ALL",  "",                         "#4b0e19","#ffd7df", h=24)
         self._connect_button(acc_safe_btn, "Accept safe", self.do_accept_safe)
         self._connect_button(acc_all_btn, "Accept all", self.do_accept_all)
@@ -4116,13 +4118,13 @@ class InstanceCleanerUI(QDialog):
         bulk.addWidget(rej_all_btn)
         groups.addLayout(bulk)
 
-        merge_btn = ColorBtn("MERGE GROUPS", "Merge groups from selection", "#581522","#ffc7d0", h=24)
+        merge_btn = ColorBtn("MERGE GROUPS", "Merge groups from selection", "#33363d","#d7dce4", h=24)
         split_btn = ColorBtn("SPLIT OUT",    "Split selected out of group",  "#33363d","#d7dce4", h=24)
         add_sel_btn = ColorBtn("ADD SEL", "Add selected viewport mesh(es) to the highlighted group", "#33363d", "#d7dce4", h=24)
         rem_sel_btn = ColorBtn("REMOVE SEL", "Remove selected viewport mesh(es) from the highlighted group", "#33363d", "#d7dce4", h=24)
-        sel_mst_btn = ColorBtn("SEL MASTERS", "Select all masters", "#8f1e32","#ffe2e7", h=24)
+        sel_mst_btn = ColorBtn("SEL MASTERS", "Select all masters", "#33363d","#d7dce4", h=24)
         org_mst_btn = ColorBtn("ORGANIZE",   "Organize masters", "#33363d","#d7dce4", h=24)
-        set_mst_btn = ColorBtn("SET MASTER", "Use selected mesh as the master/reference for its group", "#8f1e32","#ffe2e7", h=24)
+        set_mst_btn = ColorBtn("SET MASTER", "Use selected mesh as the master/reference for its group", "#33363d","#d7dce4", h=24)
         self._connect_button(merge_btn, "Merge selected groups", self.do_merge_selected_groups)
         self._connect_button(split_btn, "Split selected out", self.do_split_selected_from_group)
         self._connect_button(add_sel_btn, "Add selected to group", self.do_add_selected_to_group)
@@ -4148,7 +4150,7 @@ class InstanceCleanerUI(QDialog):
         self.process_btn = ColorBtn(
             "PROCESS",
             "One process action: processes the find-selected/current context when active, otherwise accepted groups",
-            "#8f1e32", "#ffe2e7", h=24)
+            "#33363d", "#d7dce4", h=24)
         self.cancel_btn       = ColorBtn("CANCEL PROCESS", "Restore before latest batch", "#581522", "#ffc7d0", h=24)
         self.stop_process_btn = ColorBtn("STOP",           "Stop current operation safely", "#4b0e19", "#ffd7df", h=24)
         self.stop_process_btn.setEnabled(False)
@@ -4175,7 +4177,7 @@ class InstanceCleanerUI(QDialog):
 
         rev_row = self._track_layout(QHBoxLayout(), spacing=4, margins=(0,0,0,0))
         self.prev_btn       = ColorBtn("◀", "Previous group",               "#33363d","#d7dce4", 36, 26)
-        self.review_src_btn = ColorBtn("SRC ISOLATE + FRAME", "Isolate + frame current group", "#8f1e32","#ffe2e7", h=24)
+        self.review_src_btn = ColorBtn("SRC ISOLATE + FRAME", "Isolate + frame current group", "#33363d","#d7dce4", h=24)
         self.next_btn       = ColorBtn("▶", "Next group",                   "#33363d","#d7dce4", 36, 26)
         self._connect_button(self.prev_btn, "Previous group", lambda: self._navigate_review(-1))
         self._connect_button(self.next_btn, "Next group", lambda: self._navigate_review(1))
@@ -4186,7 +4188,7 @@ class InstanceCleanerUI(QDialog):
         right.addLayout(rev_row)
 
         rev_row2 = self._track_layout(QHBoxLayout(), spacing=4, margins=(0,0,0,0))
-        self.accept_next_btn = ColorBtn("OK + NEXT", "Accept then next",          "#8f1e32","#ffe2e7", h=24)
+        self.accept_next_btn = ColorBtn("OK + NEXT", "Accept then next",          "#24583a","#d9ffe7", h=24)
         self.reject_next_btn = ColorBtn("NO + NEXT", "Reject then next",          "#4b0e19","#ffd7df", h=24)
         self.exit_iso_btn    = ColorBtn("EXIT ISO",  "Exit isolate all panels",   "#33363d","#d7dce4", h=24)
         self._connect_button(self.accept_next_btn, "Accept and next", self.do_accept_current_and_next)
@@ -4229,13 +4231,13 @@ class InstanceCleanerUI(QDialog):
         self.groups_scroll.setFrameShape(QFrame.NoFrame)
         self.groups_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         self.groups_scroll.setStyleSheet("""
-            QScrollArea { background-color:#151922; border:1px solid #252d38; border-radius:8px; }
-            QScrollArea > QWidget > QWidget { background-color:#151922; }
+            QScrollArea { background-color:#14171c; border:1px solid #242a33; border-radius:8px; }
+            QScrollArea > QWidget > QWidget { background-color:#14171c; }
         """)
-        self.groups_scroll.viewport().setStyleSheet("background-color:#151922;")
+        self.groups_scroll.viewport().setStyleSheet("background-color:#14171c;")
 
         self.groups_container = QWidget()
-        self.groups_container.setStyleSheet("background-color:#151922;")
+        self.groups_container.setStyleSheet("background-color:#14171c;")
         self.groups_layout = QVBoxLayout(self.groups_container)
         self.groups_layout.setContentsMargins(self._s(6), self._s(6), self._s(6), self._s(6))
         self.groups_layout.setSpacing(self._s(6))
@@ -4276,9 +4278,9 @@ class InstanceCleanerUI(QDialog):
         if not hasattr(self, "header_status_label"):
             return
         palettes = {
-            "ready": ("#2b1118", "#ffdfe5", "#8f1e32"),
-            "busy":  ("#34131c", "#ffc7d0", "#a3293d"),
-            "warn":  ("#3a141d", "#ffb4c0", "#8a2234"),
+            "ready": ("#202329", "#d8dde5", "#353a42"),
+            "busy":  ("#1f2a35", "#dbeafe", "#4e667f"),
+            "warn":  ("#30271a", "#ffd59a", "#8c6236"),
             "error": ("#4b0e19", "#ffd7df", "#a3293d"),
         }
         bg, fg, border = palettes.get(tone, palettes["ready"])
@@ -4651,6 +4653,11 @@ class InstanceCleanerUI(QDialog):
         else:
             self.groups_empty.setText("No global groups found.\nTry REFRESH SCENE, Signature + Fuzzy, or lower Min copies.")
         self.groups_empty.setVisible(not has_items)
+        if has_items and len(filtered) <= 1:
+            # One card should not make the group list look like a giant empty CTA.
+            self.groups_scroll.setMaximumHeight(self._s(220))
+        else:
+            self.groups_scroll.setMaximumHeight(16777215)
 
         report = self.cleaner.get_report()
         self._update_stat_chips()

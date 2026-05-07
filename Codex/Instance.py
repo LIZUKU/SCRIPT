@@ -3440,7 +3440,10 @@ class ColorBtn(QPushButton):
         super(ColorBtn, self).__init__(text, parent)
         self._base_w = w
         self._base_h = int(h or 24)
+        self._base_bg = bg or "#2d2d2d"
+        self._base_fg = fg or "#a0a0a0"
         self._ui_scale = 1.0
+        self.setCursor(Qt.PointingHandCursor)
         self.setToolTip(tip)
         self.setSizePolicy(QSizePolicy.MinimumExpanding if w else QSizePolicy.Expanding, QSizePolicy.Preferred)
         self._apply_scaled_metrics()
@@ -3462,23 +3465,28 @@ class ColorBtn(QPushButton):
             self.setMinimumWidth(self._s(42))
 
         label = (self.text() or "").upper()
-        base_bg = "#2f2f2f"
-        base_fg = "#b8b8b8"
-        border = "#3a3a3a"
+        base_bg = self._base_bg
+        base_fg = self._base_fg
+        border = QColor(base_bg).lighter(142).name()
         if label in ("OK", "OK + NEXT") or label.startswith("ACCEPT") or label == "PROCESS":
-            base_bg, base_fg, border = "#263126", "#a8d8a8", "#3e5a3e"
+            base_bg = self._base_bg if self._base_bg != "#2d2d2d" else "#21482c"
+            base_fg, border = "#b8ffc8", "#4fa865"
         elif label in ("NO", "NO + NEXT", "STOP") or label.startswith("REJECT"):
-            base_bg, base_fg, border = "#322828", "#e0aaaa", "#5a3e3e"
+            base_bg = self._base_bg if self._base_bg != "#2d2d2d" else "#4a2222"
+            base_fg, border = "#ffc2c2", "#a84f4f"
 
-        hover = QColor(base_bg).lighter(122).name()
+        hover = QColor(base_bg).lighter(128).name()
+        pressed = QColor(base_bg).darker(118).name()
         self.setStyleSheet(
-            "QPushButton {{ background:{bg}; color:{fg}; border:1px solid {border};"
-            " border-radius:{radius}px; font-weight:600; font-size:{font}px; padding:{pv}px {ph}px; }}"
-            "QPushButton:hover {{ background:{hover}; border-color:#5a5a5a; }}"
-            "QPushButton:pressed {{ background:#202020; }}"
+            "QPushButton {{ background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 {top}, stop:1 {bg});"
+            " color:{fg}; border:1px solid {border}; border-radius:{radius}px;"
+            " font-weight:700; font-size:{font}px; letter-spacing:.3px; padding:{pv}px {ph}px; }}"
+            "QPushButton:hover {{ background:{hover}; border-color:{hover_border}; color:#ffffff; }}"
+            "QPushButton:pressed {{ background:{pressed}; padding-top:{press_pad}px; }}"
             "QPushButton:disabled {{ background:#242424; color:#555; border-color:#2a2a2a; }}"
-            .format(bg=base_bg, fg=base_fg, border=border, hover=hover,
-                    radius=self._s(3), font=self._s(8), pv=self._s(1), ph=self._s(4))
+            .format(top=QColor(base_bg).lighter(112).name(), bg=base_bg, fg=base_fg, border=border,
+                    hover=hover, hover_border=QColor(border).lighter(135).name(), pressed=pressed,
+                    radius=self._s(5), font=self._s(9), pv=self._s(2), ph=self._s(7), press_pad=self._s(3))
         )
         self.updateGeometry()
 
@@ -3498,9 +3506,11 @@ class SectionLabel(QLabel):
 
     def _apply_scaled_metrics(self):
         self.setStyleSheet(
-            "color:#555; font-size:{font}px; font-weight:bold; "
-            "padding:{pt}px 0 {pb}px 0; border-bottom:1px solid #2a2a2a;"
-            .format(font=self._s(9), pt=self._s(4), pb=self._s(2))
+            "color:#9fb8d8; font-size:{font}px; font-weight:800; letter-spacing:1.2px; "
+            "padding:{pt}px {px}px {pb}px {px}px; border-left:{bar}px solid #4f8cff; "
+            "border-bottom:1px solid #2d3440; background:#20252d; border-radius:{radius}px;"
+            .format(font=self._s(10), pt=self._s(6), pb=self._s(5), px=self._s(7),
+                    bar=self._s(3), radius=self._s(4))
         )
         self.updateGeometry()
 
@@ -3787,8 +3797,8 @@ class InstanceCleanerUI(QDialog):
         self._user_resized = False
 
         self.setWindowTitle("Instance Cleaner")
-        self.setMinimumSize(self._s(300), self._s(320))
-        self.resize(self._s(720), self._s(560))
+        self.setMinimumSize(self._s(360), self._s(380))
+        self.resize(self._s(860), self._s(640))
         self.setWindowFlags(Qt.Window | Qt.WindowCloseButtonHint)
 
         self._build_ui()
@@ -3835,14 +3845,23 @@ class InstanceCleanerUI(QDialog):
             self.progress_bar.setMinimumHeight(self._s(16))
             self.progress_bar.setMaximumHeight(self._s(22))
         if hasattr(self, "left_scroll"):
-            self.left_scroll.setMinimumWidth(self._s(280))
+            self.left_scroll.setMinimumWidth(self._s(320))
             self.left_scroll.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         if hasattr(self, "right_col"):
-            self.right_col.setMinimumWidth(self._s(290) if self.right_col.isVisible() else 0)
+            self.right_col.setMinimumWidth(self._s(360) if self.right_col.isVisible() else 0)
             self.right_col.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         if hasattr(self, "groups_scroll"):
-            self.groups_scroll.setMinimumHeight(self._s(120))
+            self.groups_scroll.setMinimumHeight(self._s(140))
             self.groups_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        if hasattr(self, "groups_layout"):
+            self.groups_layout.setContentsMargins(self._s(6), self._s(6), self._s(6), self._s(6))
+            self.groups_layout.setSpacing(self._s(6))
+        if hasattr(self, "header_status_label"):
+            self.header_status_label.setMinimumWidth(self._s(76))
+            self.header_status_label.setStyleSheet(
+                "background:#16251d; color:#8ff0a4; border:1px solid #2d6b3c; "
+                "border-radius:{}px; font-size:{}px; font-weight:800; padding:{}px {}px;"
+                .format(self._s(10), self._s(9), self._s(4), self._s(8)))
         self.updateGeometry()
 
     def _track_layout(self, layout, spacing=4, margins=(0,0,0,0)):
@@ -3857,33 +3876,45 @@ class InstanceCleanerUI(QDialog):
 
     def _apply_stylesheet(self):
         self.setStyleSheet("""
-            QDialog {{ background-color:#1e1e1e; }}
-            QLabel {{ color:#707070; font-size:{label_font}px; }}
-            QLineEdit {{ background:#252525; color:#a0a0a0; border:1px solid #303030;
-                        border-radius:{radius}px; padding:{field_vpad}px {field_hpad}px; font-size:{field_font}px; }}
-            QCheckBox {{ color:#888888; font-size:{field_font}px; spacing:{spacing}px; }}
+            QDialog {{ background-color:#171a20; }}
+            QWidget#HeaderPanel {{
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #202b3a, stop:1 #1b2028);
+                border:1px solid #2e3d50; border-radius:{panel_radius}px;
+            }}
+            QLabel#TitleLabel {{ color:#f1f6ff; font-size:{title_font}px; font-weight:900; letter-spacing:.5px; }}
+            QLabel#SubtitleLabel {{ color:#8fa6c3; font-size:{small_font}px; }}
+            QLabel {{ color:#8a93a3; font-size:{label_font}px; }}
+            QLineEdit {{ background:#222832; color:#d9e2ef; border:1px solid #354052;
+                        border-radius:{radius}px; padding:{field_vpad}px {field_hpad}px; font-size:{field_font}px; selection-background-color:#4f8cff; }}
+            QLineEdit:focus {{ border-color:#4f8cff; background:#252d39; }}
+            QCheckBox {{ color:#aab4c3; font-size:{field_font}px; spacing:{spacing}px; }}
+            QCheckBox::indicator {{ width:{indicator}px; height:{indicator}px; }}
             QScrollArea {{ border:none; background:transparent;  }}
-            QScrollBar:vertical {{ background:#141414; width:{scroll_w}px; border-radius:{scroll_r}px; }}
-            QScrollBar::handle:vertical {{ background:#555; border-radius:{scroll_r}px; min-height:{scroll_min}px; }}
-            QScrollBar::handle:vertical:hover {{ background:#777; }}
+            QScrollBar:vertical {{ background:#11151b; width:{scroll_w}px; border-radius:{scroll_r}px; margin:0; }}
+            QScrollBar::handle:vertical {{ background:#3f4c60; border-radius:{scroll_r}px; min-height:{scroll_min}px; }}
+            QScrollBar::handle:vertical:hover {{ background:#5d6f8c; }}
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height:0; }}
-            QSlider::groove:horizontal {{ height:{slider_h}px; background:#2a2a2a; border-radius:{slider_r}px;  }}
-            QSlider::handle:horizontal {{ background:#8a8a8a; width:{handle_w}px; margin:-{handle_m}px 0; border-radius:{handle_r}px; }}
-            QSlider::sub-page:horizontal {{ background:#707070; border-radius:{slider_r}px; }}
-            QSpinBox, QDoubleSpinBox {{ background:#252525; color:#a0a0a0; border:1px solid #303030;
+            QSlider::groove:horizontal {{ height:{slider_h}px; background:#27303c; border-radius:{slider_r}px;  }}
+            QSlider::handle:horizontal {{ background:#d7e6ff; border:1px solid #4f8cff; width:{handle_w}px; margin:-{handle_m}px 0; border-radius:{handle_r}px; }}
+            QSlider::sub-page:horizontal {{ background:#4f8cff; border-radius:{slider_r}px; }}
+            QSpinBox, QDoubleSpinBox {{ background:#222832; color:#d9e2ef; border:1px solid #354052;
                                        border-radius:{radius}px; padding:{spin_pad}px; font-size:{field_font}px; }}
-            QComboBox {{ background:#252525; color:#a0a0a0; border:1px solid #303030;
+            QSpinBox:focus, QDoubleSpinBox:focus {{ border-color:#4f8cff; background:#252d39; }}
+            QComboBox {{ background:#222832; color:#d9e2ef; border:1px solid #354052;
                         border-radius:{radius}px; padding:{field_vpad}px {field_hpad}px; font-size:{field_font}px; }}
-            QProgressBar {{ background:#1a1a1a; border:1px solid #303030; border-radius:{radius}px;
-                           text-align:center; color:#707070; font-size:{small_font}px; }}
-            QProgressBar::chunk {{ background:#707070; border-radius:{chunk_r}px; }}
+            QComboBox:hover {{ border-color:#53647d; }}
+            QComboBox QAbstractItemView {{ background:#202630; color:#d9e2ef; border:1px solid #354052; selection-background-color:#355b91; }}
+            QProgressBar {{ background:#11151b; border:1px solid #303a49; border-radius:{radius}px;
+                           text-align:center; color:#9fb8d8; font-size:{small_font}px; font-weight:700; }}
+            QProgressBar::chunk {{ background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #4f8cff, stop:1 #7edc9b); border-radius:{chunk_r}px; }}
         """.format(
-            label_font=self._s(10), field_font=self._s(10), small_font=self._s(9),
-            radius=self._s(3), field_vpad=self._s(4), field_hpad=self._s(8),
-            spin_pad=self._s(2), spacing=self._s(4), scroll_w=self._s(10),
-            scroll_r=self._s(5), scroll_min=self._s(34), slider_h=self._s(4),
-            slider_r=self._s(2), handle_w=self._s(10), handle_m=self._s(3),
-            handle_r=self._s(5), chunk_r=self._s(2)))
+            title_font=self._s(16), label_font=self._s(10), field_font=self._s(10), small_font=self._s(9),
+            radius=self._s(5), panel_radius=self._s(8), field_vpad=self._s(5), field_hpad=self._s(9),
+            spin_pad=self._s(3), spacing=self._s(5), indicator=self._s(14), scroll_w=self._s(11),
+            scroll_r=self._s(5), scroll_min=self._s(36), slider_h=self._s(5),
+            slider_r=self._s(3), handle_w=self._s(13), handle_m=self._s(5),
+            handle_r=self._s(7), chunk_r=self._s(4)))
+
 
 
     def _build_ui(self):
@@ -3893,7 +3924,33 @@ class InstanceCleanerUI(QDialog):
         self._field_widgets = []
         self._small_labels = []
 
-        root = self._track_layout(QHBoxLayout(self), spacing=6, margins=(6,6,6,6))
+        root = self._track_layout(QVBoxLayout(self), spacing=8, margins=(8,8,8,8))
+
+        header_panel = QWidget()
+        header_panel.setObjectName("HeaderPanel")
+        header_panel.setAttribute(Qt.WA_StyledBackground, True)
+        header_layout = self._track_layout(QHBoxLayout(header_panel), spacing=10, margins=(12,10,12,10))
+        title_block = self._track_layout(QVBoxLayout(), spacing=2, margins=(0,0,0,0))
+        title_label = QLabel("Instance Cleaner")
+        title_label.setObjectName("TitleLabel")
+        subtitle_label = QLabel("Detect duplicates, review groups, and convert them to clean Maya instances")
+        subtitle_label.setObjectName("SubtitleLabel")
+        subtitle_label.setWordWrap(True)
+        title_block.addWidget(title_label)
+        title_block.addWidget(subtitle_label)
+        header_layout.addLayout(title_block, 1)
+        self.header_status_label = QLabel("READY")
+        self.header_status_label.setAlignment(Qt.AlignCenter)
+        self.header_status_label.setMinimumWidth(self._s(76))
+        self.header_status_label.setStyleSheet(
+            "background:#16251d; color:#8ff0a4; border:1px solid #2d6b3c; "
+            "border-radius:{}px; font-size:{}px; font-weight:800; padding:{}px {}px;"
+            .format(self._s(10), self._s(9), self._s(4), self._s(8)))
+        header_layout.addWidget(self.header_status_label)
+        root.addWidget(header_panel)
+
+        body = self._track_layout(QHBoxLayout(), spacing=8, margins=(0,0,0,0))
+        root.addLayout(body, 1)
 
         left_content = QWidget()
         left = self._track_layout(QVBoxLayout(left_content), spacing=4, margins=(0,0,0,0))
@@ -3908,12 +3965,12 @@ class InstanceCleanerUI(QDialog):
         self.left_scroll.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
 
         right_col = QWidget()
-        right_col.setMinimumWidth(self._s(290))
+        right_col.setMinimumWidth(self._s(360))
         right_col.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         right = self._track_layout(QVBoxLayout(right_col), spacing=4, margins=(0,0,0,0))
 
-        root.addWidget(self.left_scroll, 1)
-        root.addWidget(right_col, 2)
+        body.addWidget(self.left_scroll, 1)
+        body.addWidget(right_col, 2)
         self.left_col = left_content
         self.right_col = right_col
 
@@ -3922,7 +3979,7 @@ class InstanceCleanerUI(QDialog):
         ui_lbl.setMinimumWidth(self._s(82))
         self._row_labels.append(ui_lbl)
         self.ui_scale_combo = QComboBox()
-        self.ui_scale_combo.addItems(["100%", "90%", "80%", "70%"] )
+        self.ui_scale_combo.addItems(["125%", "110%", "100%", "90%", "80%", "70%"] )
         self.ui_scale_combo.setCurrentText("100%")
         self.ui_scale_combo.currentIndexChanged.connect(
             lambda _idx: self.set_ui_scale(float(self.ui_scale_combo.currentText().rstrip('%')) / 100.0))
@@ -4168,16 +4225,16 @@ class InstanceCleanerUI(QDialog):
         self.groups_scroll.setFrameShape(QFrame.NoFrame)
         self.groups_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         self.groups_scroll.setStyleSheet("""
-            QScrollArea { background-color:#1e1e1e; border:none; }
-            QScrollArea > QWidget > QWidget { background-color:#1e1e1e; }
+            QScrollArea { background-color:#151922; border:1px solid #252d38; border-radius:8px; }
+            QScrollArea > QWidget > QWidget { background-color:#151922; }
         """)
-        self.groups_scroll.viewport().setStyleSheet("background-color:#1e1e1e;")
+        self.groups_scroll.viewport().setStyleSheet("background-color:#151922;")
 
         self.groups_container = QWidget()
-        self.groups_container.setStyleSheet("background-color:#1e1e1e;")
+        self.groups_container.setStyleSheet("background-color:#151922;")
         self.groups_layout = QVBoxLayout(self.groups_container)
-        self.groups_layout.setContentsMargins(0,0,0,0)
-        self.groups_layout.setSpacing(4)
+        self.groups_layout.setContentsMargins(self._s(6), self._s(6), self._s(6), self._s(6))
+        self.groups_layout.setSpacing(self._s(6))
 
         self.groups_empty = QLabel("No groups found.\nTry REFRESH SCENE, Signature + Fuzzy, or lower Min copies.")
         self.groups_empty.setAlignment(Qt.AlignCenter)
@@ -4192,17 +4249,39 @@ class InstanceCleanerUI(QDialog):
     def _connect_button(self, button, action_name, callback):
         button.clicked.connect(lambda _checked=False: self._run_ui_action(action_name, callback))
 
+    def _set_header_state(self, text="READY", tone="ready"):
+        if not hasattr(self, "header_status_label"):
+            return
+        palettes = {
+            "ready": ("#16251d", "#8ff0a4", "#2d6b3c"),
+            "busy":  ("#17243a", "#9fc7ff", "#365f9b"),
+            "warn":  ("#352817", "#ffd48a", "#8a6429"),
+            "error": ("#351a1a", "#ff9d9d", "#8a3d3d"),
+        }
+        bg, fg, border = palettes.get(tone, palettes["ready"])
+        self.header_status_label.setText(str(text or "READY").upper())
+        self.header_status_label.setStyleSheet(
+            "background:{}; color:{}; border:1px solid {}; border-radius:{}px; "
+            "font-size:{}px; font-weight:800; padding:{}px {}px;"
+            .format(bg, fg, border, self._s(10), self._s(9), self._s(4), self._s(8)))
+
     def _run_ui_action(self, action_name, callback, *args, **kwargs):
         if self._is_processing and action_name != "Stop process":
             self.status_label.setText("{} ignored: processing is running".format(action_name))
+            self._set_header_state("BUSY", "warn")
             return None
         try:
             self.status_label.setText("{}...".format(action_name))
+            self._set_header_state("WORKING", "busy")
             QApplication.processEvents()
-            return callback(*args, **kwargs)
+            result = callback(*args, **kwargs)
+            if not self._is_processing:
+                self._set_header_state("READY", "ready")
+            return result
         except Exception as e:
             message = "{} failed: {}".format(action_name, e)
             self.status_label.setText(message)
+            self._set_header_state("ERROR", "error")
             self.progress_bar.setValue(0)
             try:
                 cmds.warning("[IC] {}\n{}".format(message, traceback.format_exc()))
@@ -4563,12 +4642,12 @@ class InstanceCleanerUI(QDialog):
         self.right_col.setVisible(not compact)
         if compact:
             self.right_col.setMinimumWidth(0)
-            self.setMinimumSize(self._s(300), self._s(320))
-            target_w, target_h = self._s(360), self._s(500)
+            self.setMinimumSize(self._s(360), self._s(380))
+            target_w, target_h = self._s(430), self._s(560)
         else:
-            self.right_col.setMinimumWidth(self._s(290))
-            self.setMinimumSize(self._s(560), self._s(340))
-            target_w, target_h = self._s(720), self._s(560)
+            self.right_col.setMinimumWidth(self._s(360))
+            self.setMinimumSize(self._s(720), self._s(480))
+            target_w, target_h = self._s(860), self._s(640)
 
         if allow_resize or (force and not self._user_resized):
             self.resize(max(self.width(), target_w), max(self.height(), target_h))

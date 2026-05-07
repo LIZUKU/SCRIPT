@@ -7,8 +7,8 @@ Finds identical or similar meshes, then can replace duplicates with Maya instanc
 Scan modes/actions:
   - Scene: compare every mesh in the scene.
   - Selected Mesh(es): compare only the selected mesh roots and their children.
-  - Find Selected is a separate action: it keeps/scans the scene cache, then
-    filters the group list to the groups matching the current selection.
+  - Find Selected is a separate fast action: it compares the selected source mesh
+    against scene meshes without rebuilding the full scene group cache.
 
 Requires: Maya 2020+, numpy (bundled with Maya), PySide2 or PySide6.
 """
@@ -2201,6 +2201,78 @@ class InstanceCleaner(object):
         self._append_processed_groups()
         return len(self.validated_groups)
 
+
+    def find_fast_group_for_source(self, source_mesh, method="geometry", tolerance=0.01, ignore_scale=True, min_copies=2):
+        """Fast selected-source lookup without rebuilding all scene groups.
+
+        Compares one selected source mesh against every eligible scene mesh in
+        O(n), then stores a single temporary accepted group when enough copies
+        are found.
+        """
+        for label in list(self.validated_groups.keys()):
+            if str(label).startswith("fast_selected_"):
+                del self.validated_groups[label]
+
+        source_candidates = _collect_mesh_transforms_from_roots([source_mesh])
+        source = next((m for m in source_candidates if _exists(m) and _has_mesh_shape(m)), None)
+        if not source:
+            self._renumber_groups()
+            return None, []
+        source = _long(source)
+
+        method = (method or "geometry").lower()
+        if method == "signature":
+            method = "geometry"
+
+        def _matches(candidate):
+            if method == "topology":
+                return _compare_mesh_topology(source, candidate, ignore_scale=ignore_scale, tolerance=tolerance)
+            if method == "exact":
+                return _compare_mesh_exact(source, candidate, ignore_scale=ignore_scale, tolerance=tolerance)
+            return _compare_mesh_geometry(source, candidate, ignore_scale=ignore_scale, tolerance=tolerance)
+
+        scene_meshes = _dedupe_keep_order(_iter_mesh_transforms(None))
+        matches = []
+        total = len(scene_meshes)
+        for i, mesh in enumerate(scene_meshes):
+            if not mesh or not _exists(mesh):
+                continue
+            mesh = _long(mesh)
+            if mesh.startswith("|" + ROOT_GROUP):
+                continue
+            if bool(_get_ic_attr(mesh, ATTR_IC_PROCESSED, False)):
+                continue
+            if _matches(mesh):
+                matches.append(mesh)
+            if total > 500 and (i + 1) % 50 == 0:
+                try:
+                    QApplication.processEvents()
+                except Exception:
+                    pass
+
+        matches = _dedupe_keep_order(matches)
+        if len(matches) < int(min_copies):
+            self._renumber_groups()
+            return None, matches
+
+        hash_part = _hash_blob(source, matches, method, tolerance, ignore_scale)[:10]
+        label = "fast_selected_" + hash_part
+        used_names = set(g.get("display_name", "") for g in self.validated_groups.values())
+        dname = _make_clean_group_name(source, used_names)
+        self.validated_groups[label] = {
+            "meshes":            matches,
+            "type":              MATCH_SAFE,
+            "accepted":          True,
+            "group_id":          0,
+            "processed":         False,
+            "internal_id":       label,
+            "display_name":      dname,
+            "score":             1.0,
+            "source_match_type": MATCH_SAFE,
+        }
+        self._renumber_groups()
+        return label, matches
+
     def accept_group(self, label):
         if label in self.validated_groups and not self.validated_groups[label].get("processed"):
             self.validated_groups[label]["accepted"] = True
@@ -2266,10 +2338,10 @@ class InstanceCleaner(object):
             return self._find_by_type(label, "backup")
         return [m for m in self.validated_groups.get(label, {}).get("meshes", []) if _exists(m)]
 
-    def find_labels_for_nodes(self, nodes):
+    def find_labels_for_nodes(self, nodes, allow_compute=False):
         labels = []
         for node in _collect_mesh_transforms_from_roots(nodes, include_ic=True):
-            label = self.find_group_for_mesh(node)
+            label = self.find_group_for_mesh(node, allow_compute=allow_compute)
             if label and label not in labels:
                 labels.append(label)
         return labels
@@ -2359,7 +2431,7 @@ class InstanceCleaner(object):
                          _collect_mesh_transforms_from_roots(nodes) if _exists(m)])
         labels = []
         for mesh in seed_meshes:
-            label = self.find_group_for_mesh(mesh)
+            label = self.find_group_for_mesh(mesh, allow_compute=True)
             if label and label not in labels:
                 labels.append(label)
 
@@ -2462,7 +2534,7 @@ class InstanceCleaner(object):
                 latest = v
         return latest
 
-    def find_group_for_mesh(self, mesh):
+    def find_group_for_mesh(self, mesh, allow_compute=False):
         if not mesh or not _exists(mesh):
             return None
         mesh = _long(mesh)
@@ -2479,10 +2551,14 @@ class InstanceCleaner(object):
 
         sel_sig = self.signature_by_transform.get(mesh)
         if sel_sig is None:
+            if not allow_compute:
+                return None
             try:
                 sel_sig = _compute_signature(mesh, strict_tol=0.001)
             except Exception:
                 return None
+            if sel_sig is not None:
+                self.signature_by_transform[mesh] = sel_sig
         if not sel_sig:
             return None
 
@@ -2499,6 +2575,8 @@ class InstanceCleaner(object):
             rep_long = _long(rep)
             rep_sig = self.signature_by_transform.get(rep_long)
             if rep_sig is None:
+                if not allow_compute:
+                    continue
                 try:
                     rep_sig = _compute_signature(rep_long, strict_tol=0.001)
                 except Exception:
@@ -3194,9 +3272,13 @@ class InstanceCleanerUI(QDialog):
         self._connect_button(scan_btn, "Refresh scene", self.do_refresh_scene)
         left.addWidget(scan_btn)
 
-        find_btn = ColorBtn("FIND SELECTED IN GROUPS", "Find the selected mesh/root in the current scan", "#2a243a","#c0a0ff", h=28)
+        find_btn = ColorBtn("FIND SELECTED IN GROUPS", "Fast-find meshes matching the current selection", "#2a243a","#c0a0ff", h=28)
         self._connect_button(find_btn, "Find selected", self.do_find_selected)
         left.addWidget(find_btn)
+
+        show_all_btn = ColorBtn("SHOW ALL GROUPS", "Clear selection-find filter and show all scanned groups", "#24302a","#90d0a0", h=26)
+        self._connect_button(show_all_btn, "Show all groups", self.do_show_all_groups)
+        left.addWidget(show_all_btn)
 
         # --- GROUPS ---
         left.addWidget(SectionLabel("GROUPS"))
@@ -3421,7 +3503,7 @@ class InstanceCleanerUI(QDialog):
         selected = _get_selected_transforms()
         if not selected:
             return None
-        labels = self.cleaner.find_labels_for_nodes(selected)
+        labels = self.cleaner.find_labels_for_nodes(selected, allow_compute=False)
         return labels[0] if labels else None
 
     def _on_group_checked_changed(self, label, checked):
@@ -3463,7 +3545,9 @@ class InstanceCleanerUI(QDialog):
     # -- Actions --
 
     def do_frame_selected_group(self):
-        label = self._find_group_from_selection()
+        selected = _get_selected_transforms()
+        labels = self.cleaner.find_labels_for_nodes(selected, allow_compute=True) if selected else []
+        label = labels[0] if labels else None
         if not label:
             self.status_label.setText("Selection not found in current scan")
             return
@@ -3484,51 +3568,24 @@ class InstanceCleanerUI(QDialog):
         return "signature"
 
     def do_refresh_scene(self):
-        old_mode = self.scan_mode_combo.currentText()
         self.scan_mode_combo.setCurrentText("Scene")
-        try:
-            return self.do_scan()
-        finally:
-            if self.scan_mode_combo.findText(old_mode) >= 0:
-                self.scan_mode_combo.setCurrentText(old_mode)
+        return self.do_scan()
 
     def do_scan(self):
         self._find_selected_filter = None
         roots          = None
         selection_only = False
-        find_selected  = False
-        selected_roots = []
         mode           = self.scan_mode_combo.currentText()
 
-        if mode in ("Selected Mesh(es)", "Find Selected"):
+        if mode == "Selected Mesh(es)":
             selected_roots = _get_selected_transforms()
             if not selected_roots:
-                self.cleaner.scan(
-                    roots=[], selection_only=True,
-                    strict_tol=self.strict_tol_slider.value(),
-                    detect_method=self._get_detect_method(),
-                    compare_tolerance=self.compare_tolerance_spin.value(),
-                    ignore_scale=self.ignore_scale_cb.isChecked(),
-                    fuzzy_enabled=self.fuzzy_enabled_cb.isChecked(),
-                    fuzzy_vertex_tol=self.fuzzy_vertex_spin.value(),
-                    fuzzy_size_tol=self.fuzzy_size_slider.value(),
-                    fuzzy_score_min=self.fuzzy_score_slider.value(),
-                    min_copies=self.min_copies_spin.value(),
-                )
                 self.progress_bar.setValue(0)
-                self.status_label.setText("Select at least one mesh first.")
-                self.refresh_group_list()
+                self.status_label.setText("Select at least one mesh first. Existing scan kept.")
                 return
-
-        if mode == "Selected Mesh(es)":
             roots          = selected_roots
             selection_only = True
-        elif mode == "Find Selected":
-            roots          = None
-            selection_only = False
-            find_selected  = True
 
-        # FIX : progress_cb avec 2 arguments (percent, message)
         def progress_cb(percent, message):
             self.progress_bar.setValue(max(0, min(100, int(percent))))
             self.status_label.setText(_short(str(message)))
@@ -3549,25 +3606,12 @@ class InstanceCleanerUI(QDialog):
             progress_cb=progress_cb,
         )
 
-        if find_selected:
-            labels = self.cleaner.find_labels_for_nodes(selected_roots)
-            self._find_selected_filter = set(labels)
-            count  = len(labels)
-            self.current_group_label = labels[0] if labels else None
-
         self.progress_bar.setValue(100)
         report = self.cleaner.get_report()
-        if find_selected:
-            self.status_label.setText(
-                "Found {} group(s) for selection | {} safe | {} fuzzy".format(
-                    count, report["safe_groups"], report["fuzzy_groups"]))
-        else:
-            self.status_label.setText(
-                "{} groups | {} safe | {} fuzzy | {} unique".format(
-                    count, report["safe_groups"], report["fuzzy_groups"], report["unique_meshes"]))
+        self.status_label.setText(
+            "{} groups | {} safe | {} fuzzy | {} unique".format(
+                count, report["safe_groups"], report["fuzzy_groups"], report["unique_meshes"]))
         self.refresh_group_list()
-        if find_selected and self.current_group_label in self.group_items:
-            self._highlight_group_item(self.current_group_label, frame=True, select=False)
 
     def do_find_selected(self):
         selected_roots = _get_selected_transforms()
@@ -3575,27 +3619,37 @@ class InstanceCleanerUI(QDialog):
             self.status_label.setText("Select at least one mesh first.")
             return
 
-        if not self.cleaner.validated_groups:
-            old_mode = self.scan_mode_combo.currentText()
-            self.scan_mode_combo.setCurrentText("Scene")
-            try:
-                self.do_scan()
-            finally:
-                if self.scan_mode_combo.findText(old_mode) >= 0:
-                    self.scan_mode_combo.setCurrentText(old_mode)
+        source = selected_roots[0]
+        method = self._get_detect_method()
+        if method == "signature":
+            method = "geometry"
 
-        labels = self.cleaner.find_labels_for_nodes(selected_roots)
-        self._find_selected_filter = set(labels)
-        self.current_group_label = labels[0] if labels else None
+        label, matches = self.cleaner.find_fast_group_for_source(
+            source,
+            method=method,
+            tolerance=self.compare_tolerance_spin.value(),
+            ignore_scale=self.ignore_scale_cb.isChecked(),
+            min_copies=self.min_copies_spin.value(),
+        )
+
+        if label is None:
+            self._find_selected_filter = set()
+            self.current_group_label = None
+            self.refresh_group_list()
+            self.status_label.setText(
+                "No matching group found for selection | {} candidate(s)".format(len(matches)))
+            return
+
+        self._find_selected_filter = set([label])
+        self.current_group_label = label
         self.refresh_group_list()
+        self._highlight_group_item(label, frame=True, select=False)
+        self.status_label.setText("Fast find: {} matching mesh(es)".format(len(matches)))
 
-        if self.current_group_label in self.group_items:
-            self._highlight_group_item(self.current_group_label, frame=True, select=False)
-
-        report = self.cleaner.get_report()
-        self.status_label.setText(
-            "Found {} group(s) for selection | {} safe | {} fuzzy".format(
-                len(labels), report["safe_groups"], report["fuzzy_groups"]))
+    def do_show_all_groups(self):
+        self._find_selected_filter = None
+        self.refresh_group_list()
+        self.status_label.setText("Showing all groups")
 
     def _passes_filter(self, info, filter_text):
         if filter_text == "Safe"      and info["type"] != MATCH_SAFE:   return False
@@ -3667,9 +3721,9 @@ class InstanceCleanerUI(QDialog):
                 w.set_highlighted(True)
 
         if self._find_selected_filter is not None:
-            self.groups_empty.setText("No groups found for the current selection.\nTry REFRESH SCENE, Signature + Fuzzy, or lower Min copies.")
+            self.groups_empty.setText("No groups found for the current selection.\nTry another mesh or use SHOW ALL GROUPS.")
         else:
-            self.groups_empty.setText("No groups found.\nTry REFRESH SCENE, Signature + Fuzzy, or lower Min copies.")
+            self.groups_empty.setText("No global groups found.\nTry REFRESH SCENE, Signature + Fuzzy, or lower Min copies.")
         self.groups_empty.setVisible(not has_items)
 
         report = self.cleaner.get_report()
@@ -3685,20 +3739,14 @@ class InstanceCleanerUI(QDialog):
 
     def _update_window_compactness(self, total_count, force=False):
         compact = total_count == 0
-        if not force and self._compact_state == compact:
-            return
         self._compact_state = compact
-
-        target_width = 1120
-        target_height = 620
 
         self.right_col.setVisible(True)
         self.right_col.setMinimumWidth(520)
         self.setMinimumSize(980, 560)
 
-        current = self.size()
-        if force or current.width() < target_width or current.height() < target_height:
-            self.resize(max(current.width(), target_width), max(current.height(), target_height))
+        if force:
+            self.resize(1120, 620)
 
     def on_accept_group(self, label):
         self.cleaner.accept_group(label)
@@ -3769,7 +3817,7 @@ class InstanceCleanerUI(QDialog):
 
     def do_merge_selected_groups(self):
         selected = _get_selected_transforms()
-        labels   = self.cleaner.find_labels_for_nodes(selected)
+        labels   = self.cleaner.find_labels_for_nodes(selected, allow_compute=True)
         checked  = [l for l in self.visible_group_order
                     if l in self.checked_group_labels and l in self.cleaner.validated_groups]
         for label in checked:
@@ -3946,13 +3994,13 @@ class InstanceCleanerUI(QDialog):
             "Canceled | restored {} | del inst {} | del masters {}".format(
                 stats.get("restored",0), stats.get("deleted_instances",0),
                 stats.get("deleted_masters",0)))
-        self.do_scan()
+        self.do_refresh_scene()
 
     def do_convert_instances(self):
         stats = self.cleaner.convert_instances_to_geometry()
         self.status_label.setText(
             "Converted {} instances to geo".format(stats.get("converted",0)))
-        self.do_scan()
+        self.do_refresh_scene()
 
     def keyPressEvent(self, event):
         focus = QApplication.focusWidget()

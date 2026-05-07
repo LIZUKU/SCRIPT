@@ -1,29 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-Instance Cleaner V3.2 - Fixed
-------------------------------
-Corrections vs V3.0 :
-  - find_groups_uvoptimizer_style : f-string double .format() corrigée.
-  - scan() : signature progress_cb unifiée (percent, message) sur tous les
-    appelants ; grouping_progress adapté en conséquence.
-  - _compute_light_signature : loose_hash désormais distinct de strict_hash.
-  - _row_vector_delta_matrix_np : transposition corrigée pour convention
-    row-vector Maya (rotation en haut à gauche, translation en ligne 3).
-  - GroupItem._build / refresh : acc_btn / rej_btn créés inconditionnellement
-    puis cachés via setVisible() pour éviter AttributeError sur processed groups.
-  - merge_groups : acc_values initialisé vide ; la valeur de la cible est
-    incluse dans la boucle comme les autres.
-  - replace_with_instances : suppression du double _add_to_layer() en fin de
-    méthode (déjà fait dans la boucle individuelle).
-  - _candidate_rotation_matrices : déduplication robuste + skip de la matrice
-    identité combinée (rx=ry=rz=0).
-  - _update_window_compactness : setMinimumWidth / setMaximumWidth appelés
-    uniquement quand la valeur change réellement.
-  - UI : les boutons passent par un wrapper robuste qui affiche les erreurs
-    dans le statut + Script Editor au lieu de donner l’impression de ne rien faire.
-  - UI : REFRESH SCAN lance Scene par défaut ; Find Selected ne détruit plus
-    la liste de groupes en cache.
-  - Divers guards None supplémentaires et commentaires clarifiés.
+Instance Cleaner
+----------------
+Finds identical or similar meshes, then can replace duplicates with Maya instances.
+
+Scan modes:
+  - Scene: compare every mesh in the scene.
+  - Selected Mesh(es): compare only the selected mesh roots and their children.
+  - Find Selected: use the current selection as seed(s), scan the whole scene,
+    then show only the groups matching those seed meshes.
 
 Requires: Maya 2020+, numpy (bundled with Maya), PySide2 or PySide6.
 """
@@ -3068,10 +3053,9 @@ class InstanceCleanerUI(QDialog):
         self._cancel_requested    = False
         self._compact_state       = None
 
-        self.setWindowTitle("Instance Cleaner V3.2 — Fixed")
-        self.setMinimumWidth(900)
-        self.resize(1040, 600)
-        self.setMinimumHeight(540)
+        self.setWindowTitle("Instance Cleaner")
+        self.setMinimumSize(430, 560)
+        self.resize(460, 620)
         self.setWindowFlags(Qt.Window | Qt.WindowCloseButtonHint)
 
         self._build_ui()
@@ -3114,8 +3098,7 @@ class InstanceCleanerUI(QDialog):
         left.setSpacing(6)
 
         right_col = QWidget()
-        right_col.setMinimumWidth(500)
-        right_col.setMaximumWidth(540)
+        right_col.setMinimumWidth(520)
         right = QVBoxLayout(right_col)
         right.setContentsMargins(0,0,0,0)
         right.setSpacing(6)
@@ -3132,8 +3115,8 @@ class InstanceCleanerUI(QDialog):
         self.scan_mode_combo.addItems(["Scene", "Selected Mesh(es)", "Find Selected"])
         self.scan_mode_combo.setCurrentIndex(0)
         self.scan_mode_combo.setToolTip(
-            "Scene performs a real refresh/rescan. Use Selected Mesh(es) to limit the scan, "
-            "or Find Selected to locate selected meshes in the current scan.")
+            "Scene scans everything. Selected Mesh(es) scans only the selection. "
+            "Find Selected scans the scene and keeps only matches to the selection.")
         left.addLayout(self._row("Source", self.scan_mode_combo))
 
         self.strict_tol_slider = ParamSlider("Strict tol", 0.0001, 0.02, 0.001, 4, 90)
@@ -3194,7 +3177,7 @@ class InstanceCleanerUI(QDialog):
         self.status_label.setStyleSheet("color:#505050; font-size:9px;")
         left.addWidget(self.status_label)
 
-        scan_btn = ColorBtn("REFRESH SCAN", "Rescan scene or selection", "#1a2a3a","#60a0d0", h=32)
+        scan_btn = ColorBtn("SCAN", "", "#1a2a3a","#60a0d0", h=32)
         self._connect_button(scan_btn, "Refresh scan", self.do_scan)
         left.addWidget(scan_btn)
 
@@ -3509,7 +3492,7 @@ class InstanceCleanerUI(QDialog):
                     min_copies=self.min_copies_spin.value(),
                 )
                 self.progress_bar.setValue(0)
-                self.status_label.setText("No selection. Choose Scene for a full refresh, or select mesh roots first.")
+                self.status_label.setText("Select at least one mesh first.")
                 self.refresh_group_list()
                 return
 
@@ -3517,24 +3500,8 @@ class InstanceCleanerUI(QDialog):
             roots          = selected_roots
             selection_only = True
         elif mode == "Find Selected":
-            if self.cleaner.validated_groups:
-                labels = self.cleaner.find_labels_for_nodes(selected_roots)
-                self.progress_bar.setValue(100)
-                if labels:
-                    if self.filter_combo.currentText() != "All":
-                        self.filter_combo.setCurrentText("All")
-                    if self.search_edit.text():
-                        self.search_edit.clear()
-                    self.refresh_group_list()
-                    self.current_group_label = labels[0]
-                    self._highlight_group_item(labels[0], frame=True, select=False)
-                else:
-                    self.status_label.setText("Find selected: no cached matching group")
-                self.status_label.setText(
-                    "Find selected: {} cached matching group(s)".format(len(labels)))
-                return
-            roots          = selected_roots
-            selection_only = True
+            roots          = None
+            selection_only = False
             find_selected  = True
 
         # FIX : progress_cb avec 2 arguments (percent, message)
@@ -3567,7 +3534,7 @@ class InstanceCleanerUI(QDialog):
         report = self.cleaner.get_report()
         if find_selected:
             self.status_label.setText(
-                "Find selected: {} matching group(s) | {} safe | {} fuzzy".format(
+                "Found {} group(s) for selection | {} safe | {} fuzzy".format(
                     count, report["safe_groups"], report["fuzzy_groups"]))
         else:
             self.status_label.setText(
@@ -3662,21 +3629,21 @@ class InstanceCleanerUI(QDialog):
         if not force and self._compact_state == compact:
             return
         self._compact_state = compact
+
+        target_width = 460 if compact else 1120
+        target_height = 620
+
         if compact:
             self.right_col.setVisible(False)
-            self.setMinimumWidth(330)
-            if force:
-                self.resize(380, 540)
+            self.setMinimumSize(430, 560)
         else:
             self.right_col.setVisible(True)
-            # FIX : setMinimumWidth / setMaximumWidth appelés seulement quand
-            # l'état change réellement (guard via _compact_state) pour éviter
-            # les appels redondants qui peuvent causer des glitches Qt.
-            self.right_col.setMinimumWidth(500)
-            self.right_col.setMaximumWidth(540)
-            self.setMinimumWidth(900)
-            if force:
-                self.resize(1040, 600)
+            self.right_col.setMinimumWidth(520)
+            self.setMinimumSize(980, 560)
+
+        current = self.size()
+        if force or current.width() < target_width or current.height() < target_height:
+            self.resize(max(current.width(), target_width), max(current.height(), target_height))
 
     def on_accept_group(self, label):
         self.cleaner.accept_group(label)

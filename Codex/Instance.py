@@ -128,6 +128,105 @@ class ProcessCanceled(Exception):
     pass
 
 
+class ICProgressDialog(QDialog):
+    """Small modal progress window with one coherent cancel state.
+
+    The callback returned by :meth:`callback` accepts both legacy
+    ``(percent, message)`` and process ``(current, total, message)`` calls,
+    plus keyword details used by newer scan/find/process code.
+    """
+    def __init__(self, title="Instance Cleaner Progress", parent=None):
+        super(ICProgressDialog, self).__init__(parent or maya_main_window())
+        self._canceled = False
+        self._log_lines = []
+        self.setWindowTitle(title)
+        self.setModal(False)
+        self.setMinimumWidth(460)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(6)
+
+        self.step_lbl = QLabel("Step: waiting")
+        self.group_lbl = QLabel("Group: -")
+        self.mesh_lbl = QLabel("Mesh: -")
+        self.count_lbl = QLabel("0 / 0 (0%)")
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 100)
+        self.bar.setValue(0)
+        self.log_lbl = QLabel("")
+        self.log_lbl.setWordWrap(True)
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.clicked.connect(self.cancel)
+
+        layout.addWidget(self.step_lbl)
+        layout.addWidget(self.group_lbl)
+        layout.addWidget(self.mesh_lbl)
+        layout.addWidget(self.count_lbl)
+        layout.addWidget(self.bar)
+        layout.addWidget(self.log_lbl)
+        layout.addWidget(self.cancel_btn)
+
+    def cancel(self):
+        self._canceled = True
+        self.cancel_btn.setEnabled(False)
+        self.cancel_btn.setText("Cancel requested...")
+        self.step_lbl.setText("Step: cancel requested")
+
+    def was_canceled(self):
+        QApplication.processEvents()
+        return bool(self._canceled)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self.cancel()
+            event.accept()
+            return
+        super(ICProgressDialog, self).keyPressEvent(event)
+
+    def update_progress(self, current=None, total=None, percent=None, message="",
+                        step=None, group=None, mesh=None, log=None):
+        if total is None:
+            total = 100
+        total = max(1, int(total or 1))
+        if current is None:
+            current = int(percent or 0)
+            if percent is not None and total != 100:
+                current = int(float(percent) * float(total) / 100.0)
+        current = max(0, min(int(current or 0), total))
+        if percent is None:
+            percent = int(float(current) / float(total) * 100.0)
+        percent = max(0, min(100, int(percent)))
+
+        text = str(message or "")
+        if step is None and text:
+            step = text
+        self.step_lbl.setText("Step: {}".format(step or "working"))
+        self.group_lbl.setText("Group: {}".format(_short(str(group)) if group else "-"))
+        self.mesh_lbl.setText("Mesh: {}".format(_short(str(mesh)) if mesh else "-"))
+        self.count_lbl.setText("{} / {} ({}%)".format(current, total, percent))
+        self.bar.setValue(percent)
+
+        entry = log or text
+        if entry:
+            entry = _short(str(entry))
+            if not self._log_lines or self._log_lines[-1] != entry:
+                self._log_lines.append(entry)
+                self._log_lines = self._log_lines[-5:]
+            self.log_lbl.setText("\n".join(self._log_lines))
+        QApplication.processEvents()
+
+    def callback(self):
+        def _cb(*args, **kwargs):
+            if len(args) == 2 and "percent" not in kwargs:
+                kwargs["percent"], kwargs["message"] = args
+            elif len(args) >= 3:
+                kwargs["current"], kwargs["total"], kwargs["message"] = args[:3]
+            self.update_progress(**kwargs)
+        return _cb
+
+
 # ---------------------------------------------------------------------------
 # Basic utils
 # ---------------------------------------------------------------------------
@@ -1151,7 +1250,8 @@ def _uvoptimizer_compare_score(mesh1, mesh2, method="exact", tolerance=0.30, ign
     return 0.0
 
 
-def find_groups_uvoptimizer_style(signatures, method="exact", tolerance=0.30, ignore_scale=True, progress_cb=None):
+def find_groups_uvoptimizer_style(signatures, method="exact", tolerance=0.30, ignore_scale=True,
+                                    progress_cb=None, cancel_cb=None):
     """Pairwise all-scene grouping using UVOptimizer-like methods/options."""
     groups    = {}
     uniques   = []
@@ -1163,10 +1263,13 @@ def find_groups_uvoptimizer_style(signatures, method="exact", tolerance=0.30, ig
     total       = max(1, len(remaining))
 
     for source_index, source in enumerate(remaining):
+        if cancel_cb and cancel_cb():
+            raise ProcessCanceled()
         if progress_cb:
-            # FIX : progress_cb attend (percent, message) — on calcule un pourcentage
             pct = int(float(source_index) / float(total) * 100.)
-            progress_cb(pct, "Grouping {}".format(_short(source.transform)))
+            progress_cb(percent=pct, message="Grouping {}".format(_short(source.transform)),
+                        step="Grouping", group="UVOptimizer", mesh=source.transform,
+                        current=source_index, total=total)
 
         if source.transform in processed:
             continue
@@ -1175,6 +1278,8 @@ def find_groups_uvoptimizer_style(signatures, method="exact", tolerance=0.30, ig
         processed.add(source.transform)
 
         for candidate in remaining:
+            if cancel_cb and cancel_cb():
+                raise ProcessCanceled()
             if candidate.transform in processed:
                 continue
             if _uvoptimizer_compare_score(source.transform, candidate.transform, method, tolerance, ignore_scale) >= 1.0:
@@ -1193,7 +1298,7 @@ def find_groups_uvoptimizer_style(signatures, method="exact", tolerance=0.30, ig
             uniques.extend(matches)
 
     if progress_cb:
-        progress_cb(100, "Grouping complete")
+        progress_cb(percent=100, message="Grouping complete", step="Grouping", current=total, total=total)
 
     return groups, _dedupe_keep_order(uniques)
 
@@ -1687,13 +1792,14 @@ def find_groups(signatures,
                 fuzzy_vertex_tol=0,
                 fuzzy_size_tol=0.04,
                 fuzzy_score_min=0.92,
-                progress_cb=None):
-    """Returns (groups_safe, groups_fuzzy, uniques)."""
+                progress_cb=None,
+                cancel_cb=None):
+    """Returns (groups_safe, groups_fuzzy, uniques). Raises ProcessCanceled via cancel_cb."""
     method = (detect_method or "signature").lower()
     if method in ("topology", "geometry", "exact"):
         groups_safe, uniques = find_groups_uvoptimizer_style(
             signatures, method=method, tolerance=compare_tolerance,
-            ignore_scale=ignore_scale, progress_cb=progress_cb
+            ignore_scale=ignore_scale, progress_cb=progress_cb, cancel_cb=cancel_cb
         )
         return groups_safe, {}, uniques
 
@@ -1704,9 +1810,13 @@ def find_groups(signatures,
 
     strict_buckets = defaultdict(list)
     for sig in signatures:
+        if cancel_cb and cancel_cb():
+            raise ProcessCanceled()
         strict_buckets[sig.strict_hash].append(sig)
 
     for sh, bucket in strict_buckets.items():
+        if cancel_cb and cancel_cb():
+            raise ProcessCanceled()
         if len(bucket) <= 1:
             continue
         ref        = bucket[0]
@@ -1734,14 +1844,20 @@ def find_groups(signatures,
     total_remaining = max(1, len(remaining))
 
     for sig_index, sig in enumerate(remaining):
+        if cancel_cb and cancel_cb():
+            raise ProcessCanceled()
         if progress_cb:
             pct = int(float(sig_index) / float(total_remaining) * 100.)
-            progress_cb(pct, "Fuzzy grouping {}".format(_short(sig.transform)))
+            progress_cb(percent=pct, message="Fuzzy grouping {}".format(_short(sig.transform)),
+                        step="Fuzzy grouping", group="Fuzzy", mesh=sig.transform,
+                        current=sig_index, total=total_remaining)
 
         best_cluster = None
         best_score   = 0.
 
         for cluster in clusters:
+            if cancel_cb and cancel_cb():
+                raise ProcessCanceled()
             cluster_best = max(
                 _fuzzy_score(sig, rep, vertex_tol=fuzzy_vertex_tol, size_tol=fuzzy_size_tol)
                 for rep in cluster["reps"]
@@ -2025,7 +2141,9 @@ class MasterManager(object):
                 if progress_state is not None:
                     progress_state["current"] = progress_state.get("current", 0) + 1
                     if progress_cb:
-                        progress_cb(progress_state["current"], progress_state.get("total", 1), "")
+                        progress_cb(current=progress_state["current"], total=progress_state.get("total", 1),
+                                    message="Instance creation failed", step="Process",
+                                    group=display_name, mesh=full_mesh)
                 continue
 
             ok = False
@@ -2101,8 +2219,9 @@ class MasterManager(object):
                     progress_state["current"] = progress_state.get("current", 0) + 1
                     progress_state["alignment_skipped"] = progress_state.get("alignment_skipped", 0) + 1
                     if progress_cb:
-                        progress_cb(progress_state["current"], progress_state.get("total", 1),
-                                    "Skipped alignment {}".format(_short(full_mesh)))
+                        progress_cb(current=progress_state["current"], total=progress_state.get("total", 1),
+                                    message="Skipped alignment {}".format(_short(full_mesh)),
+                                    step="Process", group=display_name, mesh=full_mesh)
                 continue
 
             try:
@@ -2170,8 +2289,10 @@ class MasterManager(object):
             if progress_state is not None:
                 progress_state["current"] = progress_state.get("current", 0) + 1
                 if progress_cb:
-                    progress_cb(progress_state["current"], progress_state.get("total", 1),
-                                "Processing {}".format(_short(full_mesh)))
+                    progress_cb(current=progress_state["current"], total=progress_state.get("total", 1),
+                                message="Processing {}".format(_short(full_mesh)),
+                                step="Process", group=display_name, mesh=full_mesh,
+                                log="Instanced {}".format(_short(full_mesh)))
 
         # Layers masters / backups mis à jour une fois après la boucle
         # (pas les instances : déjà fait individuellement dans la boucle)
@@ -2278,9 +2399,9 @@ class InstanceCleaner(object):
              detect_method="signature", compare_tolerance=0.30, ignore_scale=True,
              fuzzy_enabled=True, fuzzy_vertex_tol=0,
              fuzzy_size_tol=0.04, fuzzy_score_min=0.92,
-             min_copies=2, progress_cb=None):
+             min_copies=2, progress_cb=None, cancel_cb=None):
         """
-        progress_cb(percent: int, message: str) — unified 2-argument signature.
+        progress_cb accepts legacy (percent, message) or keyword details; cancel_cb aborts cleanly.
         """
         if roots is None and root:
             roots = [root]
@@ -2309,10 +2430,14 @@ class InstanceCleaner(object):
 
         total = len(transforms)
         for i, tf in enumerate(transforms):
+            if cancel_cb and cancel_cb():
+                raise ProcessCanceled()
             if progress_cb:
-                # FIX : 2 arguments (percent, message)
-                progress_cb(int(i * 60. / max(1, total)),
-                            "Scanning {}".format(_short(tf)))
+                progress_cb(percent=int(i * 60. / max(1, total)),
+                            message="Scanning {}".format(_short(tf)),
+                            step="Scene scan" if not selection_only else "Selection scan",
+                            group="Scene" if not selection_only else "Selection",
+                            mesh=tf, current=i, total=max(1, total))
             sig = (_compute_light_signature(tf) if uvoptimizer_mode
                    else _compute_signature(tf, strict_tol=strict_tol))
             if sig:
@@ -2320,13 +2445,15 @@ class InstanceCleaner(object):
                 self.signature_by_transform[sig.transform] = sig
 
         # FIX : grouping_progress adapté pour n'émettre que 2 arguments
-        def grouping_progress(percent, message):
+        def grouping_progress(*args, **kwargs):
             if progress_cb:
+                percent = kwargs.pop("percent", args[0] if args else 0)
+                message = kwargs.pop("message", args[1] if len(args) > 1 else "Grouping meshes")
                 mapped = 60 + int(float(percent) * 35. / 100.)
-                progress_cb(min(95, mapped), message)
+                progress_cb(percent=min(95, mapped), message=message, **kwargs)
 
         if progress_cb:
-            progress_cb(60, "Grouping meshes...")
+            progress_cb(percent=60, message="Grouping meshes...", step="Grouping", current=0, total=max(1, total))
 
         self.groups_safe, self.groups_fuzzy, self.uniques = find_groups(
             self.signatures,
@@ -2338,10 +2465,13 @@ class InstanceCleaner(object):
             fuzzy_size_tol=fuzzy_size_tol,
             fuzzy_score_min=fuzzy_score_min,
             progress_cb=grouping_progress,
+            cancel_cb=cancel_cb,
         )
 
+        if cancel_cb and cancel_cb():
+            raise ProcessCanceled()
         if progress_cb:
-            progress_cb(95, "Building group list...")
+            progress_cb(percent=95, message="Building group list...", step="Build group list", current=total, total=max(1, total))
 
         self.validated_groups = {}
         existing_names = self._existing_display_names_by_internal_id()
@@ -2391,7 +2521,8 @@ class InstanceCleaner(object):
         return len(self.validated_groups)
 
 
-    def find_fast_group_for_source(self, source_mesh, method="geometry", tolerance=0.01, ignore_scale=True, min_copies=2):
+    def find_fast_group_for_source(self, source_mesh, method="geometry", tolerance=0.01, ignore_scale=True,
+                                   min_copies=2, progress_cb=None, cancel_cb=None):
         """Fast selected-source lookup without rebuilding all scene groups.
 
         Compares one selected source mesh against every eligible scene mesh in
@@ -2402,6 +2533,8 @@ class InstanceCleaner(object):
             if str(label).startswith("fast_selected_"):
                 del self.validated_groups[label]
 
+        if cancel_cb and cancel_cb():
+            raise ProcessCanceled()
         source_candidates = _collect_mesh_transforms_from_roots([source_mesh])
         source = next((m for m in source_candidates if _exists(m) and _has_mesh_shape(m)), None)
         if not source:
@@ -2424,6 +2557,13 @@ class InstanceCleaner(object):
         matches = []
         total = len(scene_meshes)
         for i, mesh in enumerate(scene_meshes):
+            if cancel_cb and cancel_cb():
+                raise ProcessCanceled()
+            if progress_cb:
+                pct = int(float(i) / float(max(1, total)) * 100.0)
+                progress_cb(percent=pct, message="Fast-find {}".format(_short(mesh)),
+                            step="Find selected fast group", group=_short(source),
+                            mesh=mesh, current=i, total=max(1, total))
             if not mesh or not _exists(mesh):
                 continue
             mesh = _long(mesh)
@@ -2440,6 +2580,11 @@ class InstanceCleaner(object):
                     pass
 
         matches = _dedupe_keep_order(matches)
+        if progress_cb:
+            progress_cb(percent=100, message="Fast-find complete: {} match(es)".format(len(matches)),
+                        step="Find selected fast group", group=_short(source),
+                        mesh=source, current=total, total=max(1, total),
+                        log="{} match(es) found".format(len(matches)))
         if len(matches) < int(min_copies):
             self._renumber_groups()
             return None, matches
@@ -2790,15 +2935,26 @@ class InstanceCleaner(object):
                                    delete_originals=False,
                                    use_pca_icp_alignment=True,
                                    progress_cb=None,
-                                   cancel_cb=None):
-        accepted = {
-            label: info
-            for label, info in self.validated_groups.items()
-            if info["accepted"] is True and not info.get("processed")
-        }
+                                   cancel_cb=None,
+                                   labels=None):
+        requested_labels = None if labels is None else [l for l in labels if l in self.validated_groups]
+        if requested_labels is None:
+            accepted = {
+                label: info
+                for label, info in self.validated_groups.items()
+                if info["accepted"] is True and not info.get("processed")
+            }
+            process_scope = "accepted groups"
+        else:
+            accepted = {
+                label: self.validated_groups[label]
+                for label in requested_labels
+                if not self.validated_groups[label].get("processed")
+            }
+            process_scope = "requested group(s)"
 
         if not accepted:
-            cmds.warning("[IC] No accepted groups to process.")
+            cmds.warning("[IC] No unprocessed {} to process.".format(process_scope))
             return {}
 
         if delete_originals:
@@ -2816,6 +2972,8 @@ class InstanceCleaner(object):
             "canceled":          False,
             "rollback":          None,
             "alignment_skipped": 0,
+            "processed_labels": [],
+            "process_scope": process_scope,
         }
 
         total_meshes = sum(
@@ -2854,8 +3012,9 @@ class InstanceCleaner(object):
                     existed = self.master_manager.find_existing_master(internal_id)
 
                     if progress_cb:
-                        progress_cb(progress_state["current"], progress_state["total"],
-                                    "Creating master {}".format(display_name))
+                        progress_cb(current=progress_state["current"], total=progress_state["total"],
+                                    message="Creating master {}".format(display_name),
+                                    step="Create master", group=display_name, mesh=reference_mesh)
 
                     master = self.master_manager.create_master(
                         internal_id, display_name, reference_mesh,
@@ -2888,6 +3047,15 @@ class InstanceCleaner(object):
                     stats["originals_visible"]  += len(originals)
                     stats["alignment_skipped"] += progress_state.get("alignment_skipped", 0)
                     progress_state["alignment_skipped"] = 0
+                    if instances or backups or originals:
+                        info["processed"] = True
+                        info["accepted"] = False
+                        info["processed_batch"] = batch_id
+                        if str(label).startswith("fast_selected_"):
+                            info["temporary_fast_group"] = False
+                        stats["processed_labels"].append(label)
+                    else:
+                        stats["groups_skipped"] += 1
                     process_index += 1
 
         except ProcessCanceled:
@@ -3556,14 +3724,17 @@ class InstanceCleanerUI(QDialog):
         left.addWidget(self.pca_icp_align_cb)
 
         proc_row = QHBoxLayout()
-        self.process_btn      = ColorBtn("PROCESS ACCEPTED",  "", "#1e3a1a","#80e060", h=34)
+        self.process_btn      = ColorBtn("PROCESS ACCEPTED",  "Process accepted groups; respects a find-selected filter", "#1e3a1a","#80e060", h=34)
+        self.process_current_btn = ColorBtn("PROCESS CURRENT", "Process only the highlighted/filtered group", "#1a2f1a","#70d070", h=34)
         self.cancel_btn       = ColorBtn("CANCEL PROCESS",    "Restore before latest batch", "#3a2a1a","#e0a060", h=34)
-        self.stop_process_btn = ColorBtn("STOP",              "Stop current process safely", "#4a1515","#ff7070", h=34)
+        self.stop_process_btn = ColorBtn("STOP",              "Stop current operation safely", "#4a1515","#ff7070", h=34)
         self.stop_process_btn.setEnabled(False)
         self._connect_button(self.process_btn, "Process accepted", self.do_process)
+        self._connect_button(self.process_current_btn, "Process current", self.do_process_current)
         self._connect_button(self.cancel_btn, "Cancel process", self.do_cancel_process)
         self._connect_button(self.stop_process_btn, "Stop process", self.do_stop_process)
         proc_row.addWidget(self.process_btn)
+        proc_row.addWidget(self.process_current_btn)
         proc_row.addWidget(self.cancel_btn)
         proc_row.addWidget(self.stop_process_btn)
         left.addLayout(proc_row)
@@ -3793,7 +3964,14 @@ class InstanceCleanerUI(QDialog):
     def do_refresh_current(self):
         return self.do_scan()
 
+    def _make_progress(self, title):
+        dlg = ICProgressDialog(title, self)
+        dlg.show()
+        QApplication.processEvents()
+        return dlg, dlg.callback(), dlg.was_canceled
+
     def do_scan(self):
+        previous_filter = self._find_selected_filter
         self._find_selected_filter = None
         roots          = None
         selection_only = False
@@ -3803,42 +3981,72 @@ class InstanceCleanerUI(QDialog):
             selected_roots = _get_selected_transforms()
             if not selected_roots:
                 self.progress_bar.setValue(0)
-                self.status_label.setText("Select at least one mesh first. Existing scan kept.")
+                self._find_selected_filter = previous_filter
+                self.status_label.setText("Selection scan canceled: select at least one mesh. Existing scan kept.")
                 return
             roots          = selected_roots
             selection_only = True
 
-        def progress_cb(percent, message):
-            self.progress_bar.setValue(max(0, min(100, int(percent))))
-            self.status_label.setText(_short(str(message)))
+        dlg, progress_cb, cancel_cb = self._make_progress("Instance Cleaner - {} scan".format(mode))
+
+        def local_progress(*args, **kwargs):
+            progress_cb(*args, **kwargs)
+            percent = kwargs.get("percent", args[0] if len(args) == 2 else None)
+            if percent is None and "current" in kwargs:
+                percent = int(float(kwargs.get("current", 0)) / float(max(1, kwargs.get("total", 1))) * 100.0)
+            self.progress_bar.setValue(max(0, min(100, int(percent or 0))))
+            self.status_label.setText(_short(str(kwargs.get("message", args[1] if len(args) > 1 else "Scanning"))))
             QApplication.processEvents()
 
         self.progress_bar.setValue(0)
-        count = self.cleaner.scan(
-            roots=roots, selection_only=selection_only,
-            strict_tol=self.strict_tol_slider.value(),
-            detect_method=self._get_detect_method(),
-            compare_tolerance=self.compare_tolerance_spin.value(),
-            ignore_scale=self.ignore_scale_cb.isChecked(),
-            fuzzy_enabled=self.fuzzy_enabled_cb.isChecked(),
-            fuzzy_vertex_tol=self.fuzzy_vertex_spin.value(),
-            fuzzy_size_tol=self.fuzzy_size_slider.value(),
-            fuzzy_score_min=self.fuzzy_score_slider.value(),
-            min_copies=self.min_copies_spin.value(),
-            progress_cb=progress_cb,
+        previous_state = (
+            list(self.cleaner.signatures),
+            dict(self.cleaner.signature_by_transform),
+            dict(self.cleaner.groups_safe),
+            dict(self.cleaner.groups_fuzzy),
+            list(self.cleaner.uniques),
+            dict((k, dict(v)) for k, v in self.cleaner.validated_groups.items()),
         )
+        try:
+            count = self.cleaner.scan(
+                roots=roots, selection_only=selection_only,
+                strict_tol=self.strict_tol_slider.value(),
+                detect_method=self._get_detect_method(),
+                compare_tolerance=self.compare_tolerance_spin.value(),
+                ignore_scale=self.ignore_scale_cb.isChecked(),
+                fuzzy_enabled=self.fuzzy_enabled_cb.isChecked(),
+                fuzzy_vertex_tol=self.fuzzy_vertex_spin.value(),
+                fuzzy_size_tol=self.fuzzy_size_slider.value(),
+                fuzzy_score_min=self.fuzzy_score_slider.value(),
+                min_copies=self.min_copies_spin.value(),
+                progress_cb=local_progress,
+                cancel_cb=cancel_cb,
+            )
+        except ProcessCanceled:
+            (self.cleaner.signatures, self.cleaner.signature_by_transform,
+             self.cleaner.groups_safe, self.cleaner.groups_fuzzy,
+             self.cleaner.uniques, self.cleaner.validated_groups) = previous_state
+            self.progress_bar.setValue(0)
+            self.status_label.setText("{} scan canceled. Previous scan restored.".format(mode))
+            cmds.warning("[IC] {} scan canceled by user; previous scan restored.".format(mode))
+            self.refresh_group_list()
+            dlg.close()
+            return
+        finally:
+            dlg.close()
 
         self.progress_bar.setValue(100)
         report = self.cleaner.get_report()
+        scope = "Scene scan" if not selection_only else "Selection scan"
         self.status_label.setText(
-            "{} groups | {} safe | {} fuzzy | {} unique".format(
-                count, report["safe_groups"], report["fuzzy_groups"], report["unique_meshes"]))
+            "{} complete: {} groups | {} safe | {} fuzzy | {} unique".format(
+                scope, count, report["safe_groups"], report["fuzzy_groups"], report["unique_meshes"]))
         self.refresh_group_list()
 
     def do_find_selected(self):
         selected_roots = _get_selected_transforms()
         if not selected_roots:
-            self.status_label.setText("Select at least one mesh first.")
+            self.status_label.setText("Find selected: select at least one mesh. Existing scan kept.")
             return
 
         source = selected_roots[0]
@@ -3846,32 +4054,53 @@ class InstanceCleanerUI(QDialog):
         if method == "signature":
             method = "geometry"
 
-        label, matches = self.cleaner.find_fast_group_for_source(
-            source,
-            method=method,
-            tolerance=self.compare_tolerance_spin.value(),
-            ignore_scale=self.ignore_scale_cb.isChecked(),
-            min_copies=self.min_copies_spin.value(),
-        )
+        dlg, progress_cb, cancel_cb = self._make_progress("Instance Cleaner - Find Selected")
+        try:
+            label, matches = self.cleaner.find_fast_group_for_source(
+                source,
+                method=method,
+                tolerance=self.compare_tolerance_spin.value(),
+                ignore_scale=self.ignore_scale_cb.isChecked(),
+                min_copies=self.min_copies_spin.value(),
+                progress_cb=progress_cb,
+                cancel_cb=cancel_cb,
+            )
+        except ProcessCanceled:
+            dlg.close()
+            self.status_label.setText("Find selected canceled. Existing scan kept.")
+            cmds.warning("[IC] Find selected canceled by user.")
+            return
+        finally:
+            dlg.close()
 
         if label is None:
             self._find_selected_filter = set()
             self.current_group_label = None
             self.refresh_group_list()
             self.status_label.setText(
-                "No matching group found for selection | {} candidate(s)".format(len(matches)))
+                "Find selected: no group found for {} | {} candidate match(es), need min {}.".format(
+                    _short(source), len(matches), self.min_copies_spin.value()))
+            cmds.warning("[IC] Find selected found no processable group for {}. Existing scan kept.".format(_short(source)))
             return
 
         self._find_selected_filter = set([label])
         self.current_group_label = label
+        self.filter_combo.setCurrentText("All")
+        self.search_edit.clear()
         self.refresh_group_list()
+        nodes = self.cleaner.select_group(label)
+        _isolate_nodes(nodes, add=False, frame=True)
         self._highlight_group_item(label, frame=True, select=False)
-        self.status_label.setText("Fast find: {} matching mesh(es)".format(len(matches)))
+        info = self.cleaner.validated_groups.get(label, {})
+        self.status_label.setText(
+            "Find selected: {} match(es) in current group '{}' | selected in Maya.".format(
+                len(nodes), info.get("display_name", label)))
 
     def do_show_all_groups(self):
         self._find_selected_filter = None
         self.refresh_group_list()
-        self.status_label.setText("Showing all groups")
+        self.status_label.setText("Showing all scanned groups. Current group: {}".format(
+            self.cleaner.validated_groups.get(self.current_group_label, {}).get("display_name", "none")))
 
     def _passes_filter(self, info, filter_text):
         if filter_text == "Safe"      and info["type"] != MATCH_SAFE:   return False
@@ -4158,24 +4387,59 @@ class InstanceCleanerUI(QDialog):
     def _set_processing_ui(self, state):
         self._is_processing = bool(state)
         self.process_btn.setEnabled(not state)
+        self.process_current_btn.setEnabled(not state)
         self.cancel_btn.setEnabled(not state)
         self.stop_process_btn.setEnabled(state)
 
-    def do_process(self):
+    def _labels_for_current_process_context(self, force_current=False):
+        if force_current:
+            label = self.current_group_label
+            if self._find_selected_filter:
+                label = next(iter(self._find_selected_filter))
+            return [label] if label in self.cleaner.validated_groups else []
+        if self._find_selected_filter is not None:
+            labels = [l for l in self._find_selected_filter if l in self.cleaner.validated_groups]
+            return labels
+        return None
+
+    def do_process_current(self):
+        return self.do_process(force_current=True)
+
+    def do_process(self, force_current=False):
+        labels = self._labels_for_current_process_context(force_current=force_current)
+        contextual = labels is not None
+        if contextual and not labels:
+            self.status_label.setText("Process current: no current/filtered group to process.")
+            return
+
+        if contextual:
+            accepted_other = [l for l, info in self.cleaner.validated_groups.items()
+                              if info.get("accepted") is True and not info.get("processed") and l not in labels]
+            if accepted_other and not force_current:
+                reply = QMessageBox.question(
+                    self, "Process filtered group?",
+                    "Find-selected context is active. Process only the filtered/current group now?\n\n"
+                    "Choose No to process all accepted groups instead ({} other accepted group(s)).".format(len(accepted_other)),
+                    QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+                    QMessageBox.Yes)
+                if reply == QMessageBox.Cancel:
+                    self.status_label.setText("Process canceled before start.")
+                    return
+                if reply == QMessageBox.No:
+                    labels = None
+                    contextual = False
+        elif self.current_group_label and force_current:
+            labels = [self.current_group_label]
+            contextual = True
+
         self._cancel_requested = False
         self._set_processing_ui(True)
+        title = "Instance Cleaner - Process {}".format("current/filtered group" if contextual else "accepted groups")
+        dlg, progress_cb, cancel_cb = self._make_progress(title)
 
-        # FIX : progress_cb à 3 arguments (current, total, message) pour
-        # create_masters_and_replace qui transmet les valeurs brutes.
-        def progress_cb(current, total, message):
-            pct = int(float(current) / float(max(1, total)) * 100.)
-            self.progress_bar.setValue(max(0, min(100, pct)))
-            self.status_label.setText(str(message))
+        def combined_cancel_cb():
             QApplication.processEvents()
-
-        def cancel_cb():
-            QApplication.processEvents()
-            return self._cancel_requested
+            return self._cancel_requested or cancel_cb()
 
         try:
             stats = self.cleaner.create_masters_and_replace(
@@ -4184,45 +4448,57 @@ class InstanceCleanerUI(QDialog):
                 delete_originals=False,
                 use_pca_icp_alignment=self.pca_icp_align_cb.isChecked(),
                 progress_cb=progress_cb,
-                cancel_cb=cancel_cb,
+                cancel_cb=combined_cancel_cb,
+                labels=labels,
             )
         except Exception as e:
             cmds.warning("[IC] Process exception: {}".format(e))
             stats = {}
         finally:
+            dlg.close()
             self._set_processing_ui(False)
 
         if not stats:
             self.progress_bar.setValue(0)
+            self.status_label.setText("Process: no matching unprocessed group in the requested scope.")
             return
 
+        processed_labels = stats.get("processed_labels", [])
         if stats.get("canceled"):
             rb = stats.get("rollback") or {}
+            self.progress_bar.setValue(0)
             self.status_label.setText(
-                "Stopped | restored {} | del inst {} | del masters {}".format(
+                "Process stopped | restored {} | del inst {} | del masters {}".format(
                     rb.get("restored",0), rb.get("deleted_instances",0), rb.get("deleted_masters",0)))
         else:
+            self.progress_bar.setValue(100)
             self.status_label.setText(
-                "Done | masters {} | instances {} | backups {} | skipped {}".format(
-                    stats["masters_created"], stats["instances_created"],
+                "Process complete ({}): masters {} | instances {} | backups {} | skipped {}".format(
+                    stats.get("process_scope", "scope"), stats["masters_created"], stats["instances_created"],
                     stats["backups_created"], stats["groups_skipped"]))
 
-        self.progress_bar.setValue(100)
-        self.do_refresh_scene()
+        # Refresh only UI state; do not trigger a global scene scan, especially after find-selected.
+        self.refresh_group_list()
+        keep_label = processed_labels[0] if processed_labels else (labels[0] if labels else self.current_group_label)
+        if keep_label in self.cleaner.validated_groups:
+            if self._find_selected_filter is not None:
+                self._find_selected_filter = set([keep_label])
+                self.refresh_group_list()
+            self._highlight_group_item(keep_label, frame=True, select=False)
 
     def do_cancel_process(self):
         stats = self.cleaner.cancel_last_process()
         self.status_label.setText(
-            "Canceled | restored {} | del inst {} | del masters {}".format(
+            "Cancel latest process complete | restored {} | del inst {} | del masters {}. Use REFRESH CURRENT MODE if you need a rescan.".format(
                 stats.get("restored",0), stats.get("deleted_instances",0),
                 stats.get("deleted_masters",0)))
-        self.do_refresh_scene()
+        self.refresh_group_list()
 
     def do_convert_instances(self):
         stats = self.cleaner.convert_instances_to_geometry()
         self.status_label.setText(
-            "Converted {} instances to geo".format(stats.get("converted",0)))
-        self.do_refresh_scene()
+            "Converted {} instances to geo. Use REFRESH CURRENT MODE if you need a rescan.".format(stats.get("converted",0)))
+        self.refresh_group_list()
 
     def keyPressEvent(self, event):
         focus = QApplication.focusWidget()

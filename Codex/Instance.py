@@ -3480,13 +3480,13 @@ class ColorBtn(QPushButton):
         self.setStyleSheet(
             "QPushButton {{ background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 {top}, stop:1 {bg});"
             " color:{fg}; border:1px solid {border}; border-radius:{radius}px;"
-            " font-weight:700; font-size:{font}px; letter-spacing:.3px; padding:{pv}px {ph}px; }}"
-            "QPushButton:hover {{ background:{hover}; border-color:{hover_border}; color:#ffffff; }}"
+            " font-weight:800; font-size:{font}px; letter-spacing:.35px; padding:{pv}px {ph}px; }}"
+            "QPushButton:hover {{ background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 {hover_top}, stop:1 {hover}); border-color:{hover_border}; color:#ffffff; }}"
             "QPushButton:pressed {{ background:{pressed}; padding-top:{press_pad}px; }}"
-            "QPushButton:disabled {{ background:#242424; color:#555; border-color:#2a2a2a; }}"
+            "QPushButton:disabled {{ background:#20242b; color:#556070; border-color:#29313c; }}"
             .format(top=QColor(base_bg).lighter(112).name(), bg=base_bg, fg=base_fg, border=border,
-                    hover=hover, hover_border=QColor(border).lighter(135).name(), pressed=pressed,
-                    radius=self._s(5), font=self._s(9), pv=self._s(2), ph=self._s(7), press_pad=self._s(3))
+                    hover=hover, hover_top=QColor(hover).lighter(112).name(), hover_border=QColor(border).lighter(145).name(), pressed=pressed,
+                    radius=self._s(7), font=self._s(9), pv=self._s(3), ph=self._s(8), press_pad=self._s(4))
         )
         self.updateGeometry()
 
@@ -3506,11 +3506,11 @@ class SectionLabel(QLabel):
 
     def _apply_scaled_metrics(self):
         self.setStyleSheet(
-            "color:#9fb8d8; font-size:{font}px; font-weight:800; letter-spacing:1.2px; "
-            "padding:{pt}px {px}px {pb}px {px}px; border-left:{bar}px solid #4f8cff; "
-            "border-bottom:1px solid #2d3440; background:#20252d; border-radius:{radius}px;"
+            "color:#d4e5ff; font-size:{font}px; font-weight:900; letter-spacing:1.4px; "
+            "padding:{pt}px {px}px {pb}px {px}px; border-left:{bar}px solid #5fa0ff; "
+            "border:1px solid #303a49; background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #222a36, stop:1 #1a2029); border-radius:{radius}px;"
             .format(font=self._s(10), pt=self._s(6), pb=self._s(5), px=self._s(7),
-                    bar=self._s(3), radius=self._s(4))
+                    bar=self._s(4), radius=self._s(7))
         )
         self.updateGeometry()
 
@@ -3618,8 +3618,8 @@ class GroupItem(QWidget):
     def _build(self):
         layout = QVBoxLayout(self)
         self._card_layout = layout
-        layout.setContentsMargins(6,5,6,5)
-        layout.setSpacing(4)
+        layout.setContentsMargins(8,7,8,7)
+        layout.setSpacing(5)
 
         header = QHBoxLayout()
         self._header_layout = header
@@ -3628,7 +3628,7 @@ class GroupItem(QWidget):
         self.group_check.stateChanged.connect(
             lambda _v: self.checked_changed.emit(self.label, self.group_check.isChecked()))
         self.badge       = QLabel("")
-        self.badge.setMinimumSize(60, 18)
+        self.badge.setMinimumSize(68, 20)
         self.badge.setAlignment(Qt.AlignCenter)
         self.name_label  = QLabel(self.info.get("display_name", self.label))
         self.name_label.setStyleSheet("color:#e0e0e0; font-size:10px; font-weight:bold;")
@@ -3683,13 +3683,13 @@ class GroupItem(QWidget):
     def set_ui_scale(self, scale):
         self._ui_scale = float(scale or 1.0)
         if hasattr(self, "_card_layout"):
-            self._card_layout.setContentsMargins(self._s(6), self._s(5), self._s(6), self._s(5))
-            self._card_layout.setSpacing(self._s(4))
+            self._card_layout.setContentsMargins(self._s(8), self._s(7), self._s(8), self._s(7))
+            self._card_layout.setSpacing(self._s(5))
         if hasattr(self, "_header_layout"):
             self._header_layout.setSpacing(self._s(4))
         if hasattr(self, "_actions_layout"):
             self._actions_layout.setSpacing(self._s(3))
-        self.badge.setMinimumSize(self._s(60), self._s(18))
+        self.badge.setMinimumSize(self._s(68), self._s(20))
         self.score_label.setMinimumWidth(self._s(48))
         self.name_label.setStyleSheet("color:#e0e0e0; font-size:{}px; font-weight:bold;".format(self._s(10)))
         self.count_label.setStyleSheet("color:#d0d0d0; font-size:{}px;".format(self._s(9)))
@@ -3706,7 +3706,9 @@ class GroupItem(QWidget):
     def _set_badge(self, text, bg, fg="#ffffff"):
         self.badge.setText(text)
         self.badge.setStyleSheet(
-            "background:{}; color:{}; font-size:{}px; font-weight:bold; border-radius:{}px;".format(bg, fg, self._s(8), self._s(2))
+            "background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 {}, stop:1 {}); color:{}; "
+            "font-size:{}px; font-weight:900; border:1px solid {}; border-radius:{}px;"
+            .format(QColor(bg).lighter(120).name(), bg, fg, self._s(8), QColor(bg).lighter(145).name(), self._s(6))
         )
 
     def set_highlighted(self, state):
@@ -3771,7 +3773,9 @@ class GroupItem(QWidget):
         border = "#d8c85a" if self._highlighted else border
         self.status_lbl.setStyleSheet("color:{}; font-size:{}px;".format(color, self._s(8)))
         self.setStyleSheet(
-            "#GroupItemCard {{ background:{}; border:{}px solid {}; border-radius:{}px; }}".format(bg, bw, border, self._s(4))
+            "#GroupItemCard {{ background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 {}, stop:1 {}); "
+            "border:{}px solid {}; border-radius:{}px; }}"
+            .format(QColor(bg).lighter(112).name(), bg, bw, border, self._s(8))
         )
 
 
@@ -3797,14 +3801,15 @@ class InstanceCleanerUI(QDialog):
         self._user_resized = False
 
         self.setWindowTitle("Instance Cleaner")
-        self.setMinimumSize(self._s(360), self._s(380))
-        self.resize(self._s(860), self._s(640))
+        self.setMinimumSize(self._s(380), self._s(430))
+        self.resize(self._s(940), self._s(700))
         self.setWindowFlags(Qt.Window | Qt.WindowCloseButtonHint)
 
         self._build_ui()
         self._apply_stylesheet()
         self._start_selection_watcher()
         self._update_window_compactness(0, force=True)
+        self._update_stat_chips()
 
     def _s(self, value):
         return max(1, int(round(float(value) * float(getattr(self, "ui_scale", 1.0)))))
@@ -3845,10 +3850,10 @@ class InstanceCleanerUI(QDialog):
             self.progress_bar.setMinimumHeight(self._s(16))
             self.progress_bar.setMaximumHeight(self._s(22))
         if hasattr(self, "left_scroll"):
-            self.left_scroll.setMinimumWidth(self._s(320))
+            self.left_scroll.setMinimumWidth(self._s(340))
             self.left_scroll.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         if hasattr(self, "right_col"):
-            self.right_col.setMinimumWidth(self._s(360) if self.right_col.isVisible() else 0)
+            self.right_col.setMinimumWidth(self._s(400) if self.right_col.isVisible() else 0)
             self.right_col.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         if hasattr(self, "groups_scroll"):
             self.groups_scroll.setMinimumHeight(self._s(140))
@@ -3862,6 +3867,9 @@ class InstanceCleanerUI(QDialog):
                 "background:#16251d; color:#8ff0a4; border:1px solid #2d6b3c; "
                 "border-radius:{}px; font-size:{}px; font-weight:800; padding:{}px {}px;"
                 .format(self._s(10), self._s(9), self._s(4), self._s(8)))
+        for chip in (getattr(self, "stat_groups_label", None), getattr(self, "stat_safe_label", None), getattr(self, "stat_fuzzy_label", None)):
+            if chip:
+                chip.setMinimumWidth(self._s(70))
         self.updateGeometry()
 
     def _track_layout(self, layout, spacing=4, margins=(0,0,0,0)):
@@ -3876,19 +3884,24 @@ class InstanceCleanerUI(QDialog):
 
     def _apply_stylesheet(self):
         self.setStyleSheet("""
-            QDialog {{ background-color:#171a20; }}
+            QDialog {{ background-color:#11151b; }}
             QWidget#HeaderPanel {{
                 background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #202b3a, stop:1 #1b2028);
-                border:1px solid #2e3d50; border-radius:{panel_radius}px;
+                border:1px solid #35475e; border-radius:{panel_radius}px;
             }}
             QLabel#TitleLabel {{ color:#f1f6ff; font-size:{title_font}px; font-weight:900; letter-spacing:.5px; }}
-            QLabel#SubtitleLabel {{ color:#8fa6c3; font-size:{small_font}px; }}
+            QLabel#SubtitleLabel {{ color:#9fb3cf; font-size:{small_font}px; }}
+            QLabel#StatChip {{ background:#18202a; color:#c8d8ec; border:1px solid #303c4c;
+                               border-radius:{chip_radius}px; font-size:{small_font}px; font-weight:800; padding:{chip_vpad}px {chip_hpad}px; }}
+            QLabel#StatChip[role=accent] {{ background:#16251d; color:#93f0a8; border-color:#2d6b3c; }}
+            QLabel#StatChip[role=warn] {{ background:#352817; color:#ffd48a; border-color:#8a6429; }}
             QLabel {{ color:#8a93a3; font-size:{label_font}px; }}
             QLineEdit {{ background:#222832; color:#d9e2ef; border:1px solid #354052;
                         border-radius:{radius}px; padding:{field_vpad}px {field_hpad}px; font-size:{field_font}px; selection-background-color:#4f8cff; }}
             QLineEdit:focus {{ border-color:#4f8cff; background:#252d39; }}
             QCheckBox {{ color:#aab4c3; font-size:{field_font}px; spacing:{spacing}px; }}
             QCheckBox::indicator {{ width:{indicator}px; height:{indicator}px; }}
+            QWidget#LeftPanel, QWidget#RightPanel {{ background:#161b23; border:1px solid #252f3b; border-radius:{panel_radius}px; }}
             QScrollArea {{ border:none; background:transparent;  }}
             QScrollBar:vertical {{ background:#11151b; width:{scroll_w}px; border-radius:{scroll_r}px; margin:0; }}
             QScrollBar::handle:vertical {{ background:#3f4c60; border-radius:{scroll_r}px; min-height:{scroll_min}px; }}
@@ -3913,7 +3926,8 @@ class InstanceCleanerUI(QDialog):
             spin_pad=self._s(3), spacing=self._s(5), indicator=self._s(14), scroll_w=self._s(11),
             scroll_r=self._s(5), scroll_min=self._s(36), slider_h=self._s(5),
             slider_r=self._s(3), handle_w=self._s(13), handle_m=self._s(5),
-            handle_r=self._s(7), chunk_r=self._s(4)))
+            handle_r=self._s(7), chunk_r=self._s(4),
+            chip_radius=self._s(10), chip_vpad=self._s(4), chip_hpad=self._s(8)))
 
 
 
@@ -3947,13 +3961,23 @@ class InstanceCleanerUI(QDialog):
             "border-radius:{}px; font-size:{}px; font-weight:800; padding:{}px {}px;"
             .format(self._s(10), self._s(9), self._s(4), self._s(8)))
         header_layout.addWidget(self.header_status_label)
+        stats_row = self._track_layout(QHBoxLayout(), spacing=4, margins=(0,0,0,0))
+        self.stat_groups_label = self._make_stat_chip("Groups 0", "")
+        self.stat_safe_label = self._make_stat_chip("Safe 0", "accent")
+        self.stat_fuzzy_label = self._make_stat_chip("Fuzzy 0", "warn")
+        stats_row.addWidget(self.stat_groups_label)
+        stats_row.addWidget(self.stat_safe_label)
+        stats_row.addWidget(self.stat_fuzzy_label)
+        header_layout.addLayout(stats_row)
         root.addWidget(header_panel)
 
         body = self._track_layout(QHBoxLayout(), spacing=8, margins=(0,0,0,0))
         root.addLayout(body, 1)
 
         left_content = QWidget()
-        left = self._track_layout(QVBoxLayout(left_content), spacing=4, margins=(0,0,0,0))
+        left_content.setObjectName("LeftPanel")
+        left_content.setAttribute(Qt.WA_StyledBackground, True)
+        left = self._track_layout(QVBoxLayout(left_content), spacing=6, margins=(8,8,8,8))
         left_content.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.MinimumExpanding)
 
         self.left_scroll = QScrollArea()
@@ -3965,9 +3989,11 @@ class InstanceCleanerUI(QDialog):
         self.left_scroll.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
 
         right_col = QWidget()
-        right_col.setMinimumWidth(self._s(360))
+        right_col.setObjectName("RightPanel")
+        right_col.setAttribute(Qt.WA_StyledBackground, True)
+        right_col.setMinimumWidth(self._s(400))
         right_col.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        right = self._track_layout(QVBoxLayout(right_col), spacing=4, margins=(0,0,0,0))
+        right = self._track_layout(QVBoxLayout(right_col), spacing=6, margins=(8,8,8,8))
 
         body.addWidget(self.left_scroll, 1)
         body.addWidget(right_col, 2)
@@ -4246,6 +4272,25 @@ class InstanceCleanerUI(QDialog):
         self.groups_scroll.setWidget(self.groups_container)
         right.addWidget(self.groups_scroll, 1)
 
+    def _make_stat_chip(self, text, role=""):
+        chip = QLabel(text)
+        chip.setObjectName("StatChip")
+        chip.setProperty("role", role)
+        chip.setAlignment(Qt.AlignCenter)
+        chip.setMinimumWidth(self._s(70))
+        return chip
+
+    def _update_stat_chips(self):
+        if not hasattr(self, "stat_groups_label"):
+            return
+        report = self.cleaner.get_report()
+        self.stat_groups_label.setText("Groups {}".format(len(self.cleaner.validated_groups)))
+        self.stat_safe_label.setText("Safe {}".format(report.get("safe_groups", 0)))
+        self.stat_fuzzy_label.setText("Fuzzy {}".format(report.get("fuzzy_groups", 0)))
+        for chip in (self.stat_groups_label, self.stat_safe_label, self.stat_fuzzy_label):
+            chip.style().unpolish(chip)
+            chip.style().polish(chip)
+
     def _connect_button(self, button, action_name, callback):
         button.clicked.connect(lambda _checked=False: self._run_ui_action(action_name, callback))
 
@@ -4366,6 +4411,7 @@ class InstanceCleanerUI(QDialog):
         if label and label in self.group_items:
             self.group_items[label].refresh()
         report = self.cleaner.get_report()
+        self._update_stat_chips()
         self.groups_count_label.setText(
             "Visible {} / {} | Safe {} | Fuzzy {} | Accepted {} | Done {} | Unique {}".format(
                 len(self.visible_group_order), len(self.cleaner.validated_groups),
@@ -4622,6 +4668,7 @@ class InstanceCleanerUI(QDialog):
         self.groups_empty.setVisible(not has_items)
 
         report = self.cleaner.get_report()
+        self._update_stat_chips()
         self.groups_count_label.setText(
             "Visible {} / {} | Safe {} | Fuzzy {} | Accepted {} | Done {} | Unique {}".format(
                 len(filtered), len(all_items),
@@ -4642,12 +4689,12 @@ class InstanceCleanerUI(QDialog):
         self.right_col.setVisible(not compact)
         if compact:
             self.right_col.setMinimumWidth(0)
-            self.setMinimumSize(self._s(360), self._s(380))
-            target_w, target_h = self._s(430), self._s(560)
+            self.setMinimumSize(self._s(380), self._s(430))
+            target_w, target_h = self._s(460), self._s(600)
         else:
-            self.right_col.setMinimumWidth(self._s(360))
-            self.setMinimumSize(self._s(720), self._s(480))
-            target_w, target_h = self._s(860), self._s(640)
+            self.right_col.setMinimumWidth(self._s(400))
+            self.setMinimumSize(self._s(760), self._s(520))
+            target_w, target_h = self._s(940), self._s(700)
 
         if allow_resize or (force and not self._user_resized):
             self.resize(max(self.width(), target_w), max(self.height(), target_h))

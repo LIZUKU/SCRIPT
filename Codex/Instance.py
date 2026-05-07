@@ -76,6 +76,10 @@ ATTR_IC_ORIG_PARENT = "ic_original_parent"
 ATTR_IC_ORIG_NAME   = "ic_original_name"
 ATTR_IC_MATCH_TYPE  = "ic_match_type"
 ATTR_IC_SCORE       = "ic_match_score"
+ATTR_IC_ORIG_VIS     = "ic_original_visibility"
+ATTR_IC_ORIG_LAYERS  = "ic_original_display_layers"
+ATTR_IC_ORIG_MATRIX  = "ic_original_world_matrix"
+ATTR_IC_STATUS      = "ic_status"
 
 MATCH_SAFE      = "safe"
 MATCH_FUZZY     = "fuzzy"
@@ -184,25 +188,44 @@ def _get_dag_path(node_name):
 
 
 def _get_mesh_fn(transform_name):
-    """Return (MFnMesh, MDagPath) for the first non-intermediate mesh shape under transform_name."""
+    """Return (MFnMesh, MDagPath) for the first valid non-intermediate mesh shape.
+
+    Maya transforms can contain multiple mesh shapes.  ``extendToShape()`` may
+    choose an intermediate construction-history shape, so walk every child shape
+    and return the first non-intermediate mesh instead.
+    """
     try:
-        dag = _get_dag_path(transform_name)
-        if dag.apiType() == om2.MFn.kMesh:
-            dag.pop()
-        dag.extendToShape()
-        if dag.apiType() != om2.MFn.kMesh:
+        if not transform_name or not _exists(transform_name):
             return None, None
-        fn = om2.MFnMesh(dag)
-        dep = om2.MFnDependencyNode(dag.node())
-        try:
-            if dep.findPlug("intermediateObject", False).asBool():
-                return None, None
-        except Exception:
-            pass
-        return fn, dag
+        candidates = []
+        if cmds.nodeType(transform_name) == "mesh":
+            candidates = cmds.ls(transform_name, long=True) or []
+        else:
+            candidates = cmds.listRelatives(transform_name, shapes=True, fullPath=True, noIntermediate=True) or []
+            if not candidates:
+                candidates = cmds.listRelatives(transform_name, shapes=True, fullPath=True) or []
+        for shape in candidates:
+            try:
+                if cmds.nodeType(shape) != "mesh":
+                    continue
+                dag = _get_dag_path(shape)
+                if dag.apiType() != om2.MFn.kMesh:
+                    continue
+                dep = om2.MFnDependencyNode(dag.node())
+                try:
+                    if dep.findPlug("intermediateObject", False).asBool():
+                        continue
+                except Exception:
+                    pass
+                fn = om2.MFnMesh(dag)
+                if fn.numVertices <= 0 or fn.numPolygons <= 0:
+                    continue
+                return fn, dag
+            except Exception:
+                continue
+        return None, None
     except Exception:
         return None, None
-
 
 def _has_mesh_shape(transform_name):
     fn, _ = _get_mesh_fn(transform_name)
@@ -613,7 +636,8 @@ def _tag_node(node, ic_type, group_id, source="", group_name="", match_type="", 
 def _clear_ic_attrs(node):
     for attr in (ATTR_IC_TYPE, ATTR_IC_GROUP, ATTR_IC_SOURCE, ATTR_IC_PROCESSED,
                  ATTR_IC_GROUP_NAME, ATTR_IC_BATCH, ATTR_IC_ORIG_PARENT,
-                 ATTR_IC_ORIG_NAME, ATTR_IC_MATCH_TYPE, ATTR_IC_SCORE):
+                 ATTR_IC_ORIG_NAME, ATTR_IC_MATCH_TYPE, ATTR_IC_SCORE,
+                 ATTR_IC_ORIG_VIS, ATTR_IC_ORIG_LAYERS, ATTR_IC_ORIG_MATRIX, ATTR_IC_STATUS):
         try:
             if _exists(node) and cmds.attributeQuery(attr, node=node, exists=True):
                 cmds.deleteAttr(node + "." + attr)
@@ -761,6 +785,103 @@ def _point_cloud_descriptors(points, tol=0.001):
     return dist_quant, radial_quant, axis_ratio
 
 
+def _mesh_canonical_topology_hash(transform_name):
+    """Strict order-independent topology fingerprint for safe/geometry modes."""
+    fn, _ = _get_mesh_fn(transform_name)
+    if fn is None:
+        return ""
+    try:
+        vertex_count = fn.numVertices
+        edge_count = fn.numEdges
+        face_count = fn.numPolygons
+        valences = [0] * vertex_count
+        edge_pairs = []
+        for eid in range(edge_count):
+            v1, v2 = fn.getEdgeVertices(eid)
+            if 0 <= v1 < vertex_count:
+                valences[v1] += 1
+            if 0 <= v2 < vertex_count:
+                valences[v2] += 1
+            edge_pairs.append((min(v1, v2), max(v1, v2)))
+        face_degrees = []
+        face_valence_rings = []
+        edge_face_use = defaultdict(int)
+        for fid in range(face_count):
+            verts = list(fn.getPolygonVertices(fid))
+            face_degrees.append(len(verts))
+            face_valence_rings.append(tuple(sorted(valences[v] for v in verts)))
+            for i, v1 in enumerate(verts):
+                v2 = verts[(i + 1) % len(verts)]
+                edge_face_use[(min(v1, v2), max(v1, v2))] += 1
+        edge_valence_pairs = sorted((min(valences[a], valences[b]), max(valences[a], valences[b])) for a, b in edge_pairs)
+        boundary_edges = sum(1 for use in edge_face_use.values() if use == 1)
+        nonmanifold_edges = sum(1 for use in edge_face_use.values() if use > 2)
+        return _hash_blob(
+            vertex_count, edge_count, face_count,
+            tuple(sorted(valences)),
+            tuple(sorted(face_degrees)),
+            tuple(edge_valence_pairs),
+            tuple(sorted(face_valence_rings)),
+            boundary_edges, nonmanifold_edges,
+        )
+    except Exception:
+        return ""
+
+
+def _mesh_strict_signature_hash(transform_name, strict_tol=0.001):
+    sig = _compute_signature(transform_name, strict_tol=strict_tol)
+    return sig.strict_hash if sig else ""
+
+
+def _restore_display_layers(node, encoded_layers):
+    if not encoded_layers:
+        return
+    layers = [l for l in str(encoded_layers).split(";") if l]
+    for layer in layers:
+        try:
+            if not _exists(layer):
+                cmds.createDisplayLayer(name=layer, empty=True)
+            cmds.editDisplayLayerMembers(layer, node, noRecurse=True)
+        except Exception:
+            pass
+
+
+def _display_layers_for(node):
+    try:
+        return [l for l in (cmds.listConnections(node, type="displayLayer") or []) if l != "defaultLayer"]
+    except Exception:
+        return []
+
+
+def _is_instanced_mesh_transform(node):
+    try:
+        for sh in (cmds.listRelatives(node, shapes=True, fullPath=True, noIntermediate=True) or []):
+            if cmds.nodeType(sh) != "mesh":
+                continue
+            parents = cmds.listRelatives(sh, allParents=True, fullPath=True) or []
+            if len(parents) > 1:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _duplicate_independent_transform(node, name):
+    """Duplicate a transform and verify the result owns non-instanced shapes."""
+    dup = cmds.duplicate(node, rr=True, instanceLeaf=False, name=name)[0]
+    if _is_instanced_mesh_transform(dup):
+        # Second duplicate usually materializes unique shapes from an instanced DAG.
+        dup2 = cmds.duplicate(dup, rr=True, instanceLeaf=False, name=name + "_unique")[0]
+        try:
+            cmds.delete(dup)
+        except Exception:
+            pass
+        dup = dup2
+    if _is_instanced_mesh_transform(dup):
+        raise RuntimeError("duplicate is still sharing an instanced mesh shape")
+    return dup
+
+
 # ---------------------------------------------------------------------------
 # MeshSignature
 # ---------------------------------------------------------------------------
@@ -769,12 +890,12 @@ class MeshSignature(object):
         "transform", "vertex_count", "edge_count", "face_count",
         "bbox_size", "edge_quant", "edge_hist", "face_quant", "face_hist",
         "valence_hist", "poly_degree_hist", "distance_quant", "radial_quant",
-        "axis_ratio", "strict_hash", "loose_hash",
+        "axis_ratio", "canonical_hash", "strict_hash", "loose_hash",
     )
 
     def __init__(self):
         for s in self.__slots__:
-            setattr(self, s, "" if s in ("transform","strict_hash","loose_hash") else
+            setattr(self, s, "" if s in ("transform","canonical_hash","strict_hash","loose_hash") else
                     (1.,1.,1.) if s == "bbox_size" else
                     0 if s in ("vertex_count","edge_count","face_count") else
                     tuple())
@@ -831,8 +952,10 @@ def _compute_signature(transform_name, strict_tol=0.001):
 
     sig.distance_quant, sig.radial_quant, sig.axis_ratio = \
         _point_cloud_descriptors(points, tol=strict_tol)
+    sig.canonical_hash = _mesh_canonical_topology_hash(transform_name)
 
     sig.strict_hash = _hash_blob(
+        sig.canonical_hash,
         sig.vertex_count, sig.edge_count, sig.face_count,
         sig.edge_quant, sig.face_quant,
         sig.valence_hist, sig.poly_degree_hist,
@@ -871,7 +994,8 @@ def _compute_light_signature(transform_name):
     # FIX : strict_hash et loose_hash calculés séparément (même valeur ici
     # car le mode léger n'a pas d'autres données, mais ce sont bien deux
     # attributs distincts qui ne se référencent pas l'un l'autre).
-    topo_hash = _hash_blob(sig.vertex_count, sig.edge_count, sig.face_count)
+    sig.canonical_hash = _mesh_canonical_topology_hash(transform_name)
+    topo_hash = sig.canonical_hash or _hash_blob(sig.vertex_count, sig.edge_count, sig.face_count)
     sig.strict_hash = topo_hash
     sig.loose_hash  = topo_hash
     return sig
@@ -903,23 +1027,29 @@ def _mesh_compare_hash(mesh_transform, ignore_scale=False):
 
 
 def _compare_mesh_topology(mesh1, mesh2, ignore_scale=False, tolerance=0.01):
-    h1 = _mesh_compare_hash(mesh1, ignore_scale=ignore_scale)
-    h2 = _mesh_compare_hash(mesh2, ignore_scale=ignore_scale)
-    return bool(h1 and h2 and h1[:3] == h2[:3])
+    """Compare canonical topology, not just vertex/edge/face counts."""
+    h1 = _mesh_canonical_topology_hash(mesh1)
+    h2 = _mesh_canonical_topology_hash(mesh2)
+    return bool(h1 and h2 and h1 == h2)
 
 
 def _compare_mesh_geometry(mesh1, mesh2, ignore_scale=False, tolerance=0.01):
-    h1 = _mesh_compare_hash(mesh1, ignore_scale=ignore_scale)
-    h2 = _mesh_compare_hash(mesh2, ignore_scale=ignore_scale)
-    if not h1 or not h2 or h1[:3] != h2[:3]:
+    """Compare topology plus strict normalized geometric descriptors.
+
+    Counts/area/volume alone are intentionally insufficient because many
+    unrelated meshes can share those values.
+    """
+    if not _compare_mesh_topology(mesh1, mesh2, ignore_scale=ignore_scale, tolerance=tolerance):
+        return False
+    s1 = _compute_signature(mesh1, strict_tol=max(min(float(tolerance), 0.02), 0.0005))
+    s2 = _compute_signature(mesh2, strict_tol=max(min(float(tolerance), 0.02), 0.0005))
+    if not s1 or not s2:
         return False
     tol = max(float(tolerance), 0.0)
-    for idx in (3, 4):
-        a = abs(float(h1[idx]))
-        b = abs(float(h2[idx]))
-        if a > 1e-8 and abs(a - b) / a > tol:
-            return False
-    return True
+    return (_avg_abs_delta(s1.edge_quant, s2.edge_quant) <= max(tol * 0.25, 0.003) and
+            _avg_abs_delta(s1.face_quant, s2.face_quant) <= max(tol * 0.25, 0.003) and
+            _avg_abs_delta(s1.distance_quant, s2.distance_quant) <= max(tol * 0.20, 0.004) and
+            _avg_abs_delta(s1.radial_quant, s2.radial_quant) <= max(tol * 0.20, 0.004))
 
 
 def _points_array(transform_name, space=om2.MSpace.kObject):
@@ -964,24 +1094,51 @@ def _point_list_rms(a, b):
 
 
 def _compare_mesh_exact(mesh1, mesh2, ignore_scale=False, tolerance=0.001):
+    """Exact ordered-vertex comparison after best-fit translate/rotate/scale.
+
+    Translation and rotation are always normalized via SVD.  ``ignore_scale``
+    controls whether uniform scale differences are also accepted.  This still
+    requires identical topology and vertex order.
+    """
     if not _compare_mesh_topology(mesh1, mesh2, ignore_scale=ignore_scale):
         return False
-    p1 = _points_array(mesh1, om2.MSpace.kWorld)
-    p2 = _points_array(mesh2, om2.MSpace.kWorld)
+    p1 = _points_array(mesh1, om2.MSpace.kObject)
+    p2 = _points_array(mesh2, om2.MSpace.kObject)
     if not p1 or not p2 or len(p1) != len(p2):
         return False
     tol = max(float(tolerance), 0.0)
-    if ignore_scale:
-        p1, _ = _normalize_point_list(p1)
-        p2, _ = _normalize_point_list(p2)
-    for a, b in zip(p1, p2):
-        dx = a[0] - b[0]
-        dy = a[1] - b[1]
-        dz = a[2] - b[2]
-        if math.sqrt(dx*dx + dy*dy + dz*dz) > tol:
+    if not HAS_NUMPY:
+        if ignore_scale:
+            p1, _ = _normalize_point_list(p1)
+            p2, _ = _normalize_point_list(p2)
+        rms = _point_list_rms(p1, p2)
+        return bool(rms is not None and rms <= tol)
+    src = np.array(p1, dtype=np.float64)
+    dst = np.array(p2, dtype=np.float64)
+    if not ignore_scale:
+        # Unit-scale comparison: remove translation/rotation only, and fail on scale deltas.
+        src_c = src.mean(axis=0)
+        dst_c = dst.mean(axis=0)
+        a = src - src_c
+        b = dst - dst_c
+        h = a.T.dot(b)
+        try:
+            u, _, vt = np.linalg.svd(h)
+        except np.linalg.LinAlgError:
             return False
-    return True
-
+        r = vt.T.dot(u.T)
+        if np.linalg.det(r) < 0:
+            vt[-1, :] *= -1
+            r = vt.T.dot(u.T)
+        predicted = a.dot(r) + dst_c
+        diff = predicted - dst
+        rms = math.sqrt(float(np.mean(np.sum(diff * diff, axis=1))))
+    else:
+        matrix, rms = _svd_align(src, dst)
+        if rms is None:
+            return False
+    _, size = _normalize_point_list(p2)
+    return (rms / max(size, 1e-8)) <= tol
 
 def _uvoptimizer_compare_score(mesh1, mesh2, method="exact", tolerance=0.30, ignore_scale=True):
     method = (method or "signature").lower()
@@ -1871,6 +2028,9 @@ class MasterManager(object):
                         progress_cb(progress_state["current"], progress_state.get("total", 1), "")
                 continue
 
+            ok = False
+            verify_err = None
+
             # --- Align ---
             try:
                 pca_icp_ok = False
@@ -1929,6 +2089,22 @@ class MasterManager(object):
                 except Exception:
                     pass
 
+            if not locals().get("ok", False):
+                try:
+                    if _exists(inst):
+                        _add_ic_attr(inst, ATTR_IC_STATUS, "failed_alignment", "string")
+                        cmds.delete(inst)
+                except Exception:
+                    pass
+                _add_ic_attr(full_mesh, ATTR_IC_STATUS, "skipped_failed_alignment", "string")
+                if progress_state is not None:
+                    progress_state["current"] = progress_state.get("current", 0) + 1
+                    progress_state["alignment_skipped"] = progress_state.get("alignment_skipped", 0) + 1
+                    if progress_cb:
+                        progress_cb(progress_state["current"], progress_state.get("total", 1),
+                                    "Skipped alignment {}".format(_short(full_mesh)))
+                continue
+
             try:
                 inst = cmds.ls(inst, long=True)[0]
                 cmds.setAttr(inst+".visibility", 1)
@@ -1954,17 +2130,23 @@ class MasterManager(object):
                 elif keep_hidden_backups:
                     orig_parent = (cmds.listRelatives(full_mesh, parent=True, fullPath=True) or [""])[0]
                     orig_name   = _short(full_mesh)
+                    orig_vis    = bool(cmds.getAttr(full_mesh + ".visibility"))
+                    orig_layers = ";".join(_display_layers_for(full_mesh))
+                    orig_matrix = ",".join(str(v) for v in _get_world_matrix(full_mesh))
                     bkp = cmds.parent(full_mesh, backup_grp, absolute=True)[0]
                     bkp = cmds.rename(bkp, "{}_BACKUP_{:03d}".format(display_name, idx))
                     bkp = cmds.ls(bkp, long=True)[0]
                     try:
-                        cmds.setAttr(bkp+".visibility", 1)
+                        cmds.setAttr(bkp+".visibility", 0)
                     except Exception:
                         pass
                     _tag_node(bkp, "backup", group_id, internal_id, display_name, match_type, score)
                     _add_ic_attr(bkp, ATTR_IC_PROCESSED,   True,        "bool")
                     _add_ic_attr(bkp, ATTR_IC_ORIG_PARENT, orig_parent, "string")
                     _add_ic_attr(bkp, ATTR_IC_ORIG_NAME,   orig_name,   "string")
+                    _add_ic_attr(bkp, ATTR_IC_ORIG_VIS,    int(orig_vis), "int")
+                    _add_ic_attr(bkp, ATTR_IC_ORIG_LAYERS, orig_layers, "string")
+                    _add_ic_attr(bkp, ATTR_IC_ORIG_MATRIX, orig_matrix, "string")
                     if batch_id is not None:
                         _add_ic_attr(bkp, ATTR_IC_BATCH, batch_id, "int")
                     _add_to_layer(lb, [bkp])
@@ -2105,8 +2287,15 @@ class InstanceCleaner(object):
 
         if roots is not None:
             transforms = _collect_mesh_transforms_from_roots(roots)
+        elif selection_only:
+            selected_roots = _get_selected_transforms()
+            if not selected_roots:
+                cmds.warning("[IC] scan(selection_only=True) requires roots or a current Maya selection.")
+                transforms = []
+            else:
+                transforms = _collect_mesh_transforms_from_roots(selected_roots)
         else:
-            transforms = [] if selection_only else _iter_mesh_transforms(None)
+            transforms = _iter_mesh_transforms(None)
 
         transforms = _dedupe_keep_order(transforms)
         transforms = [t for t in transforms
@@ -2612,6 +2801,9 @@ class InstanceCleaner(object):
             cmds.warning("[IC] No accepted groups to process.")
             return {}
 
+        if delete_originals:
+            cmds.warning("[IC] delete_originals=True permanently deletes source meshes; cancel_last_process cannot restore them. Prefer keep_hidden_backups=True for rollback-safe processing.")
+
         batch_id                = self._next_batch_id()
         self.last_process_batch = batch_id
 
@@ -2623,6 +2815,7 @@ class InstanceCleaner(object):
             "groups_skipped":    0,
             "canceled":          False,
             "rollback":          None,
+            "alignment_skipped": 0,
         }
 
         total_meshes = sum(
@@ -2693,6 +2886,8 @@ class InstanceCleaner(object):
                     stats["instances_created"]  += len(instances)
                     stats["backups_created"]    += len(backups)
                     stats["originals_visible"]  += len(originals)
+                    stats["alignment_skipped"] += progress_state.get("alignment_skipped", 0)
+                    progress_state["alignment_skipped"] = 0
                     process_index += 1
 
         except ProcessCanceled:
@@ -2727,10 +2922,17 @@ class InstanceCleaner(object):
                     continue
                 if node_bid != int(batch_id):
                     continue
-                if _get_ic_attr(node, ATTR_IC_TYPE, "") == "instance":
+                node_type = _get_ic_attr(node, ATTR_IC_TYPE, "")
+                if node_type == "instance":
                     try:
                         cmds.delete(node)
                         deleted_instances += 1
+                    except Exception:
+                        pass
+                elif node_type == "original_visible":
+                    try:
+                        _remove_from_display_layers([node])
+                        _clear_ic_attrs(node)
                     except Exception:
                         pass
 
@@ -2751,6 +2953,9 @@ class InstanceCleaner(object):
 
                     orig_parent = _get_ic_attr(bkp, ATTR_IC_ORIG_PARENT, "")
                     orig_name   = _get_ic_attr(bkp, ATTR_IC_ORIG_NAME, _short(bkp))
+                    orig_vis    = _get_ic_attr(bkp, ATTR_IC_ORIG_VIS, 1)
+                    orig_layers = _get_ic_attr(bkp, ATTR_IC_ORIG_LAYERS, "")
+                    orig_matrix = _get_ic_attr(bkp, ATTR_IC_ORIG_MATRIX, "")
 
                     _remove_from_display_layers([bkp])
 
@@ -2769,9 +2974,17 @@ class InstanceCleaner(object):
 
                     bkp = cmds.ls(bkp, long=True)[0]
                     try:
-                        cmds.setAttr(bkp+".visibility", 1)
+                        if orig_matrix:
+                            vals = [float(v) for v in str(orig_matrix).split(",") if v != ""]
+                            if len(vals) == 16:
+                                _apply_world_matrix(bkp, vals)
                     except Exception:
                         pass
+                    try:
+                        cmds.setAttr(bkp+".visibility", bool(int(orig_vis)))
+                    except Exception:
+                        pass
+                    _restore_display_layers(bkp, orig_layers)
                     _clear_ic_attrs(bkp)
                     restored.append(bkp)
 
@@ -2835,7 +3048,7 @@ class InstanceCleaner(object):
                     gid      = int(_get_ic_attr(inst, ATTR_IC_GROUP, 0) or 0)
                     src      = _get_ic_attr(inst, ATTR_IC_SOURCE, "")
                     new_name = "GEO_{:03d}_{}".format(idx, _safe_name(dname))
-                    geo      = cmds.duplicate(inst, rr=True, name=new_name)[0]
+                    geo      = _duplicate_independent_transform(inst, new_name)
                     geo      = cmds.parent(geo, conv_root, absolute=True)[0]
                     _apply_world_matrix(geo, mat)
                     geo      = cmds.ls(geo, long=True)[0]
@@ -3222,8 +3435,9 @@ class InstanceCleanerUI(QDialog):
         ])
         self.detect_method_combo.setCurrentIndex(3)
         self.detect_method_combo.setToolTip(
-            "Same comparison choices as UVOptimizer.py. "
-            "Signature + Fuzzy is the default for robust instance review; UVOptimizer modes are available when needed.")
+            "Exact requires identical topology and vertex order, then normalizes translation/rotation "
+            "and optionally uniform scale via Ignore scale. Geometry uses strict descriptors, not just counts/area/volume. "
+            "Signature + Fuzzy is the default for robust instance review.")
         left.addLayout(self._row("Method", self.detect_method_combo))
 
         self.ignore_scale_cb = QCheckBox("Ignore scale")
@@ -3268,9 +3482,13 @@ class InstanceCleanerUI(QDialog):
         self.status_label.setStyleSheet("color:#505050; font-size:9px;")
         left.addWidget(self.status_label)
 
-        scan_btn = ColorBtn("REFRESH SCENE", "Run a full scene scan", "#1a2a3a","#60a0d0", h=32)
+        scan_btn = ColorBtn("REFRESH SCENE", "Force Source to Scene and run a full scan", "#1a2a3a","#60a0d0", h=32)
         self._connect_button(scan_btn, "Refresh scene", self.do_refresh_scene)
         left.addWidget(scan_btn)
+
+        scan_current_btn = ColorBtn("REFRESH CURRENT MODE", "Scan using the current Source combo (Scene or Selected Mesh(es))", "#1a2f3a","#70b0d0", h=28)
+        self._connect_button(scan_current_btn, "Refresh current mode", self.do_refresh_current)
+        left.addWidget(scan_current_btn)
 
         find_btn = ColorBtn("FIND SELECTED IN GROUPS", "Fast-find meshes matching the current selection", "#2a243a","#c0a0ff", h=28)
         self._connect_button(find_btn, "Find selected", self.do_find_selected)
@@ -3568,7 +3786,11 @@ class InstanceCleanerUI(QDialog):
         return "signature"
 
     def do_refresh_scene(self):
+        # Deliberately forces a full-scene scan; use REFRESH CURRENT MODE to respect the Source combo.
         self.scan_mode_combo.setCurrentText("Scene")
+        return self.do_scan()
+
+    def do_refresh_current(self):
         return self.do_scan()
 
     def do_scan(self):

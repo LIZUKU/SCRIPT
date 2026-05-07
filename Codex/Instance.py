@@ -141,7 +141,8 @@ class ICProgressDialog(QDialog):
         self._log_lines = []
         self.setWindowTitle(title)
         self.setModal(False)
-        self.setMinimumWidth(460)
+        self.setMinimumWidth(360)
+        self.resize(380, 170)
         self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
 
         layout = QVBoxLayout(self)
@@ -2682,9 +2683,7 @@ class InstanceCleaner(object):
             self.validated_groups[label]["accepted"] = False
 
     def select_group(self, label):
-        if label not in self.validated_groups:
-            return []
-        meshes = [m for m in self.validated_groups[label]["meshes"] if _exists(m)]
+        meshes = self.get_nodes_for_label(label, target="source")
         return _select_nodes(meshes)
 
     def _find_by_type(self, label, ic_type):
@@ -2696,9 +2695,12 @@ class InstanceCleaner(object):
             roots = cmds.ls(INSTANCES_GROUP, long=True) or []
         elif ic_type == "backup"   and _exists(BACKUP_GROUP):
             roots = cmds.ls(BACKUP_GROUP,    long=True) or []
+        elif ic_type == "original_visible":
+            roots = [None]
         found = []
         for r in roots:
-            for mesh in _iter_mesh_transforms(r, include_ic=True):
+            iterator = self._all_ic_meshes() if r is None else _iter_mesh_transforms(r, include_ic=True)
+            for mesh in iterator:
                 if (_get_ic_attr(mesh, ATTR_IC_TYPE,   "") == ic_type and
                         _get_ic_attr(mesh, ATTR_IC_SOURCE, "") == internal_id):
                     found.append(mesh)
@@ -2736,7 +2738,24 @@ class InstanceCleaner(object):
             return self._find_by_type(label, "instance")
         if target == "backups":
             return self._find_by_type(label, "backup")
-        return [m for m in self.validated_groups.get(label, {}).get("meshes", []) if _exists(m)]
+
+        info = self.validated_groups.get(label, {})
+        source_nodes = [m for m in info.get("meshes", []) if _exists(m)]
+        if source_nodes:
+            return _dedupe_keep_order(source_nodes)
+
+        # After PROCESS, originals are moved/renamed into the hidden backup area,
+        # so the old source paths in the group are no longer valid. Make the SRC
+        # button useful by falling back to those tagged backups (or visible
+        # originals when processing used that mode).
+        if info.get("processed"):
+            backups = self._find_by_type(label, "backup")
+            if backups:
+                return backups
+            originals = self._find_by_type(label, "original_visible")
+            if originals:
+                return originals
+        return []
 
     def find_labels_for_nodes(self, nodes, allow_compute=False):
         labels = []
@@ -2860,7 +2879,11 @@ class InstanceCleaner(object):
         if to_add:
             info["type"] = MATCH_FUZZY
             info["source_match_type"] = MATCH_FUZZY
-            info["accepted"] = None if info.get("accepted") is not False else False
+            # Manual additions usually mean "this is the group I want". Keep the
+            # group processable instead of silently moving it back to a pending
+            # review state, unless the user explicitly rejected it before.
+            if info.get("accepted") is not False:
+                info["accepted"] = True
             info["score"] = min(float(info.get("score", 0.85) or 0.85), 0.85)
         self._renumber_groups()
         return {"added": len(to_add), "total": len(info["meshes"]), "removed_from_other": removed_from_other}
@@ -3213,6 +3236,7 @@ class InstanceCleaner(object):
             return {"restored": 0, "deleted_instances": 0, "deleted_masters": 0}
 
         restored          = []
+        restored_by_source = defaultdict(list)
         deleted_instances = 0
         deleted_masters   = 0
 
@@ -3255,6 +3279,7 @@ class InstanceCleaner(object):
                     if _get_ic_attr(bkp, ATTR_IC_TYPE, "") != "backup":
                         continue
 
+                    source_id   = _get_ic_attr(bkp, ATTR_IC_SOURCE, "")
                     orig_parent = _get_ic_attr(bkp, ATTR_IC_ORIG_PARENT, "")
                     orig_name   = _get_ic_attr(bkp, ATTR_IC_ORIG_NAME, _short(bkp))
                     orig_vis    = _get_ic_attr(bkp, ATTR_IC_ORIG_VIS, 1)
@@ -3291,6 +3316,8 @@ class InstanceCleaner(object):
                     _restore_display_layers(bkp, orig_layers)
                     _clear_ic_attrs(bkp)
                     restored.append(bkp)
+                    if source_id:
+                        restored_by_source[source_id].append(bkp)
 
             if _exists(MASTERS_GROUP):
                 root    = cmds.ls(MASTERS_GROUP, long=True)[0]
@@ -3317,6 +3344,18 @@ class InstanceCleaner(object):
                     cmds.select(restored, r=True)
             except Exception:
                 pass
+
+        if restored_by_source:
+            for _label, _info in self.validated_groups.items():
+                if _info.get("processed_batch") != batch_id:
+                    continue
+                _internal_id = _info.get("internal_id", _label)
+                _restored = restored_by_source.get(_internal_id, [])
+                if _restored:
+                    _info["meshes"] = _dedupe_keep_order(_restored)
+                _info["processed"] = False
+                _info["accepted"] = True
+                _info.pop("processed_batch", None)
 
         if self.last_process_batch == batch_id:
             self.last_process_batch = None
@@ -3621,7 +3660,7 @@ class GroupItem(QWidget):
 
         if processed:
             self._set_badge("DONE", "#2a6f9e")
-            self.status_lbl.setText("Processed")
+            self.status_lbl.setText("Processed — SRC falls back to backups")
             bg, border, color = "#102638", "#2a6f9e", "#80c0ff"
         elif accepted is False:
             self._set_badge("REJECT", "#7a2424")
@@ -3676,8 +3715,8 @@ class InstanceCleanerUI(QDialog):
         self._find_selected_filter = None
 
         self.setWindowTitle("Instance Cleaner")
-        self.setMinimumSize(380, 520)
-        self.resize(420, 560)
+        self.setMinimumSize(340, 440)
+        self.resize(380, 500)
         self.setWindowFlags(Qt.Window | Qt.WindowCloseButtonHint)
 
         self._build_ui()
@@ -3720,7 +3759,7 @@ class InstanceCleanerUI(QDialog):
         left.setSpacing(4)
 
         right_col = QWidget()
-        right_col.setMinimumWidth(420)
+        right_col.setMinimumWidth(320)
         right = QVBoxLayout(right_col)
         right.setContentsMargins(0,0,0,0)
         right.setSpacing(4)
@@ -4355,13 +4394,14 @@ class InstanceCleanerUI(QDialog):
         self.right_col.setVisible(not compact)
         if compact:
             self.right_col.setMinimumWidth(0)
-            self.setMinimumSize(380, 520)
-            self.resize(420, 560)
+            self.setMinimumSize(340, 440)
+            if force or self.width() > 430:
+                self.resize(380, 500)
         else:
-            self.right_col.setMinimumWidth(420)
-            self.setMinimumSize(820, 520)
-            if force or self.width() < 820:
-                self.resize(880, 560)
+            self.right_col.setMinimumWidth(320)
+            self.setMinimumSize(660, 440)
+            if force or self.width() < 660:
+                self.resize(700, 500)
 
     def on_accept_group(self, label):
         self.cleaner.accept_group(label)
@@ -4635,6 +4675,18 @@ class InstanceCleanerUI(QDialog):
         elif self.current_group_label and force_current:
             labels = [self.current_group_label]
             contextual = True
+
+        # If the user is actively reviewing/editing one group (common after
+        # ADD SEL) and nothing else is accepted, PROCESS should do that current
+        # group instead of appearing to abort with "no accepted groups".
+        if labels is None:
+            accepted_now = [l for l, info in self.cleaner.validated_groups.items()
+                            if info.get("accepted") is True and not info.get("processed")]
+            cur = self.current_group_label
+            cur_info = self.cleaner.validated_groups.get(cur, {}) if cur else {}
+            if not accepted_now and cur_info and not cur_info.get("processed") and cur_info.get("accepted") is not False:
+                labels = [cur]
+                contextual = True
 
         self._cancel_requested = False
         self._set_processing_ui(True)

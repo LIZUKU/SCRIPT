@@ -669,6 +669,36 @@ def _unlock_layer_for(node):
         pass
 
 
+def _unlock_transform_for_edit(node):
+    if not _exists(node):
+        return
+    _unlock_layer_for(node)
+    attrs = (
+        "translateX", "translateY", "translateZ",
+        "rotateX", "rotateY", "rotateZ",
+        "scaleX", "scaleY", "scaleZ",
+        "visibility", "inheritsTransform",
+    )
+    for attr in attrs:
+        plug = node + "." + attr
+        try:
+            if cmds.objExists(plug) and cmds.getAttr(plug, lock=True):
+                cmds.setAttr(plug, lock=False)
+        except Exception:
+            pass
+
+
+def _parent_absolute_if_possible(node, parent):
+    if not (_exists(node) and _exists(parent)):
+        return _long(node)
+    _unlock_transform_for_edit(node)
+    try:
+        return cmds.ls(cmds.parent(node, parent, absolute=True)[0], long=True)[0]
+    except Exception as e:
+        cmds.warning("[IC] Could not move {} under {}: {}".format(_short(node), _short(parent), e))
+        return _long(node)
+
+
 def _ensure_ic_layers():
     lm = _ensure_layer(LAYER_MASTERS,   17)
     li = _ensure_layer(LAYER_INSTANCES, 14)
@@ -2152,12 +2182,12 @@ class MasterManager(object):
                 cmds.warning("[IC] Skipping referenced: {}".format(full_mesh))
                 continue
 
-            # --- Create instance ---
             try:
-                _unlock_layer_for(master_path)
+                _unlock_transform_for_edit(master_path)
+                _unlock_transform_for_edit(full_mesh)
                 inst = cmds.instance(master_path)[0]
                 inst = cmds.rename(inst, "{}_INST_{:03d}".format(display_name, idx))
-                inst = cmds.parent(inst, inst_grp, absolute=True)[0]
+                inst = _parent_absolute_if_possible(inst, inst_grp)
             except Exception as e:
                 cmds.warning("[IC] Instance creation failed for {}: {}".format(full_mesh, e))
                 if progress_state is not None:
@@ -2173,7 +2203,6 @@ class MasterManager(object):
             pca_icp_ok = False
             pca_icp_err = None
 
-            # --- Align ---
             try:
                 if use_pca_icp_alignment:
                     pca_icp_ok, pca_icp_err = _pca_icp_align_instance_to_backup(inst, full_mesh)
@@ -2236,22 +2265,11 @@ class MasterManager(object):
                 except Exception:
                     pass
 
-            if not locals().get("ok", False):
-                try:
-                    if _exists(inst):
-                        _add_ic_attr(inst, ATTR_IC_STATUS, "failed_alignment", "string")
-                        cmds.delete(inst)
-                except Exception:
-                    pass
-                _add_ic_attr(full_mesh, ATTR_IC_STATUS, "skipped_failed_alignment", "string")
+            if not ok:
+                cmds.warning("[IC] Keeping best-effort instance for {} even though verification failed.".format(_short(full_mesh)))
+                _add_ic_attr(inst, ATTR_IC_STATUS, "best_effort_alignment", "string")
                 if progress_state is not None:
-                    progress_state["current"] = progress_state.get("current", 0) + 1
                     progress_state["alignment_skipped"] = progress_state.get("alignment_skipped", 0) + 1
-                    if progress_cb:
-                        progress_cb(current=progress_state["current"], total=progress_state.get("total", 1),
-                                    message="Skipped alignment {}".format(_short(full_mesh)),
-                                    step="Process", group=display_name, mesh=full_mesh)
-                continue
 
             try:
                 inst = cmds.ls(inst, long=True)[0]
@@ -2264,12 +2282,9 @@ class MasterManager(object):
             if batch_id is not None:
                 _add_ic_attr(inst, ATTR_IC_BATCH, batch_id, "int")
 
-            # FIX : on ajoute l'instance au layer ici (une seule fois), pas une
-            # deuxième fois après la boucle.
             _add_to_layer(li, [inst])
             instances_created.append(inst)
 
-            # --- Handle original ---
             try:
                 if not _exists(full_mesh):
                     pass
@@ -2281,8 +2296,11 @@ class MasterManager(object):
                     orig_vis    = bool(cmds.getAttr(full_mesh + ".visibility"))
                     orig_layers = ";".join(_display_layers_for(full_mesh))
                     orig_matrix = ",".join(str(v) for v in _get_world_matrix(full_mesh))
-                    bkp = cmds.parent(full_mesh, backup_grp, absolute=True)[0]
-                    bkp = cmds.rename(bkp, "{}_BACKUP_{:03d}".format(display_name, idx))
+                    bkp = _parent_absolute_if_possible(full_mesh, backup_grp)
+                    try:
+                        bkp = cmds.rename(bkp, "{}_BACKUP_{:03d}".format(display_name, idx))
+                    except Exception as e:
+                        cmds.warning("[IC] Backup rename failed for {}: {}".format(_short(bkp), e))
                     bkp = cmds.ls(bkp, long=True)[0]
                     try:
                         cmds.setAttr(bkp+".visibility", 0)
@@ -2314,6 +2332,17 @@ class MasterManager(object):
                 raise
             except Exception as e:
                 cmds.warning("[IC] Cleanup failed for {}: {}".format(full_mesh, e))
+                try:
+                    if _exists(full_mesh):
+                        _unlock_transform_for_edit(full_mesh)
+                        cmds.setAttr(full_mesh + ".visibility", 0)
+                        _tag_node(full_mesh, "backup", group_id, internal_id, display_name, match_type, score)
+                        _add_ic_attr(full_mesh, ATTR_IC_PROCESSED, True, "bool")
+                        if batch_id is not None:
+                            _add_ic_attr(full_mesh, ATTR_IC_BATCH, batch_id, "int")
+                        backups_created.append(full_mesh)
+                except Exception as hide_error:
+                    cmds.warning("[IC] Could not hide original {}: {}".format(_short(full_mesh), hide_error))
 
             if progress_state is not None:
                 progress_state["current"] = progress_state.get("current", 0) + 1
@@ -2323,8 +2352,6 @@ class MasterManager(object):
                                 step="Process", group=display_name, mesh=full_mesh,
                                 log="Instanced {}".format(_short(full_mesh)))
 
-        # Layers masters / backups mis à jour une fois après la boucle
-        # (pas les instances : déjà fait individuellement dans la boucle)
         _add_to_layer(lb, backups_created)
         _add_to_layer(lm, [master_path])
 

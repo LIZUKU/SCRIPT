@@ -1602,6 +1602,28 @@ def _score_alignment_np(source, target):
     return float(np.mean(distances))
 
 
+def _pca_icp_score_is_usable(score, target_mesh, tolerance=ALIGN_VERIFY_TOL_DEFAULT):
+    """Return True when the sampled PCA+ICP score is close enough to trust.
+
+    The final PCA+ICP score is an average world-space nearest-neighbor
+    distance on sampled points.  It is intentionally used as a fallback trust
+    signal because exact ordered-vertex verification can reject valid matches
+    when duplicated meshes have different vertex order, symmetric topology, or
+    sparse sampling differences.
+    """
+    if score is None:
+        return False
+    try:
+        score = float(score)
+        if not np.isfinite(score):
+            return False
+        _, size = _world_bbox(target_mesh)
+        ref_size = max(float(size[0]), float(size[1]), float(size[2]), 1e-8)
+        return (score / ref_size) <= max(float(tolerance) * 2.0, 0.001)
+    except Exception:
+        return False
+
+
 def _row_vector_delta_matrix_np(rotation_col, translation_col):
     """
     FIX : construit la matrice delta 4x4 en convention row-vector Maya.
@@ -2148,10 +2170,11 @@ class MasterManager(object):
 
             ok = False
             verify_err = None
+            pca_icp_ok = False
+            pca_icp_err = None
 
             # --- Align ---
             try:
-                pca_icp_ok = False
                 if use_pca_icp_alignment:
                     pca_icp_ok, pca_icp_err = _pca_icp_align_instance_to_backup(inst, full_mesh)
                     if not pca_icp_ok:
@@ -2178,17 +2201,20 @@ class MasterManager(object):
                 if not ok:
                     _fallback_align(inst, full_mesh)
                     if use_pca_icp_alignment:
-                        _pca_icp_align_instance_to_backup(inst, full_mesh)
+                        pca_icp_ok, pca_icp_err = _pca_icp_align_instance_to_backup(inst, full_mesh)
                     else:
                         _refine_instance_orientation_to_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
                     ok, verify_err = _verify_instance_matches_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
                     if not ok and match_type != MATCH_SAFE:
                         _bbox_fit_align(inst, full_mesh)
                         if use_pca_icp_alignment:
-                            _pca_icp_align_instance_to_backup(inst, full_mesh)
+                            pca_icp_ok, pca_icp_err = _pca_icp_align_instance_to_backup(inst, full_mesh)
                         else:
                             _refine_instance_orientation_to_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
                         ok, verify_err = _verify_instance_matches_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
+                    if not ok and pca_icp_ok and _pca_icp_score_is_usable(pca_icp_err, full_mesh):
+                        ok = True
+                        _add_ic_attr(inst, ATTR_IC_STATUS, "trusted_pca_icp_alignment", "string")
                     if not ok:
                         cmds.warning("[IC] Alignment verify failed for {} (err: {}).".format(
                             _short(full_mesh), "n/a" if verify_err is None else "{:.5f}".format(verify_err)))
@@ -2197,10 +2223,13 @@ class MasterManager(object):
                 try:
                     _fallback_align(inst, full_mesh)
                     if use_pca_icp_alignment:
-                        _pca_icp_align_instance_to_backup(inst, full_mesh)
+                        pca_icp_ok, pca_icp_err = _pca_icp_align_instance_to_backup(inst, full_mesh)
                     else:
                         _refine_instance_orientation_to_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
                     ok, verify_err = _verify_instance_matches_original(inst, full_mesh, ALIGN_VERIFY_TOL_DEFAULT)
+                    if not ok and pca_icp_ok and _pca_icp_score_is_usable(pca_icp_err, full_mesh):
+                        ok = True
+                        _add_ic_attr(inst, ATTR_IC_STATUS, "trusted_pca_icp_alignment", "string")
                     if not ok:
                         cmds.warning("[IC] Fallback verify failed for {} (err: {}).".format(
                             _short(full_mesh), "n/a" if verify_err is None else "{:.5f}".format(verify_err)))
@@ -3724,19 +3753,19 @@ class InstanceCleanerUI(QDialog):
         left.addWidget(self.pca_icp_align_cb)
 
         proc_row = QHBoxLayout()
-        self.process_btn      = ColorBtn("PROCESS ACCEPTED",  "Process accepted groups; respects a find-selected filter", "#1e3a1a","#80e060", h=34)
-        self.process_current_btn = ColorBtn("PROCESS CURRENT", "Process only the highlighted/filtered group", "#1a2f1a","#70d070", h=34)
-        self.cancel_btn       = ColorBtn("CANCEL PROCESS",    "Restore before latest batch", "#3a2a1a","#e0a060", h=34)
-        self.stop_process_btn = ColorBtn("STOP",              "Stop current operation safely", "#4a1515","#ff7070", h=34)
+        self.process_btn = ColorBtn(
+            "PROCESS",
+            "One process action: processes the find-selected/current context when active, otherwise accepted groups",
+            "#1e3a1a", "#80e060", h=34)
+        self.cancel_btn       = ColorBtn("CANCEL PROCESS", "Restore before latest batch", "#3a2a1a", "#e0a060", h=34)
+        self.stop_process_btn = ColorBtn("STOP",           "Stop current operation safely", "#4a1515", "#ff7070", h=34)
         self.stop_process_btn.setEnabled(False)
-        self._connect_button(self.process_btn, "Process accepted", self.do_process)
-        self._connect_button(self.process_current_btn, "Process current", self.do_process_current)
+        self._connect_button(self.process_btn, "Process", self.do_process)
         self._connect_button(self.cancel_btn, "Cancel process", self.do_cancel_process)
         self._connect_button(self.stop_process_btn, "Stop process", self.do_stop_process)
-        proc_row.addWidget(self.process_btn)
-        proc_row.addWidget(self.process_current_btn)
-        proc_row.addWidget(self.cancel_btn)
-        proc_row.addWidget(self.stop_process_btn)
+        proc_row.addWidget(self.process_btn, 2)
+        proc_row.addWidget(self.cancel_btn, 1)
+        proc_row.addWidget(self.stop_process_btn, 1)
         left.addLayout(proc_row)
 
         conv_btn = ColorBtn("CONVERT INSTANCES TO GEO", "", "#3a1e3a","#e080e0", h=34)
@@ -4190,14 +4219,20 @@ class InstanceCleanerUI(QDialog):
 
     def _update_window_compactness(self, total_count, force=False):
         compact = total_count == 0
+        if not force and self._compact_state == compact:
+            return
         self._compact_state = compact
 
-        self.right_col.setVisible(True)
-        self.right_col.setMinimumWidth(520)
-        self.setMinimumSize(980, 560)
-
-        if force:
-            self.resize(1120, 620)
+        self.right_col.setVisible(not compact)
+        if compact:
+            self.right_col.setMinimumWidth(0)
+            self.setMinimumSize(430, 560)
+            self.resize(460, 620)
+        else:
+            self.right_col.setMinimumWidth(520)
+            self.setMinimumSize(980, 560)
+            if force or self.width() < 980:
+                self.resize(1120, 620)
 
     def on_accept_group(self, label):
         self.cleaner.accept_group(label)
@@ -4387,7 +4422,6 @@ class InstanceCleanerUI(QDialog):
     def _set_processing_ui(self, state):
         self._is_processing = bool(state)
         self.process_btn.setEnabled(not state)
-        self.process_current_btn.setEnabled(not state)
         self.cancel_btn.setEnabled(not state)
         self.stop_process_btn.setEnabled(state)
 

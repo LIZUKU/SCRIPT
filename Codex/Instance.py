@@ -3510,12 +3510,22 @@ class SectionLabel(QLabel):
         self._apply_scaled_metrics()
 
     def _apply_scaled_metrics(self):
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setMinimumHeight(self._s(24))
+        self.setMaximumHeight(self._s(24))
+
         self.setStyleSheet(
             "color:#d9dde3; font-family:Segoe UI, Arial, sans-serif; font-size:{font}px; "
             "font-weight:800; letter-spacing:.9px; padding:{pt}px {px}px {pb}px {px}px; "
             "border-left:{bar}px solid #515863; background:#1b1d21; border-radius:{radius}px;"
-            .format(font=self._s(9), pt=self._s(4), pb=self._s(3), px=self._s(6),
-                    bar=self._s(3), radius=self._s(4))
+            .format(
+                font=self._s(9),
+                pt=self._s(4),
+                pb=self._s(3),
+                px=self._s(6),
+                bar=self._s(3),
+                radius=self._s(4)
+            )
         )
         self.updateGeometry()
 
@@ -3807,7 +3817,7 @@ class InstanceCleanerUI(QDialog):
 
         self.setWindowTitle("Instance Cleaner")
         self.setMinimumSize(self._s(360), self._s(390))
-        self.resize(self._s(480), self._s(560))
+        self.resize(self._s(480), self._s(770))
         self.setWindowFlags(Qt.Window | Qt.WindowCloseButtonHint)
 
         self._build_ui()
@@ -3815,7 +3825,7 @@ class InstanceCleanerUI(QDialog):
         self._start_selection_watcher()
         self._update_window_compactness(0, force=True)
         self._update_stat_chips()
-
+        self.setFixedWidth(self._s(300))
     def _s(self, value):
         return max(1, int(round(float(value) * float(getattr(self, "ui_scale", 1.0)))))
 
@@ -3897,44 +3907,58 @@ class InstanceCleanerUI(QDialog):
 
     def _apply_stylesheet(self):
         self.setStyleSheet("""
-            QDialog {{ background-color:#151617; font-family:Segoe UI, Arial, sans-serif; }}
+            QDialog {{ background-color:#1a1a1a; font-family:Segoe UI, Arial, sans-serif; }}
+
             QWidget#HeaderPanel {{
-                background:#1b1c1f; border:1px solid #2d3035; border-radius:{panel_radius}px;
+                background:#202020; border:1px solid #2f2f2f; border-radius:{panel_radius}px;
             }}
-            QLabel#TitleLabel {{ color:#eef1f5; font-size:{title_font}px; font-weight:800; letter-spacing:.2px; }}
-            QLabel#SubtitleLabel {{ color:#8f969f; font-size:{small_font}px; }}
-            QLabel#StatChip {{ background:#202329; color:#d8dde5; border:1px solid #353a42;
+
+            QLabel#TitleLabel {{ color:#eeeeee; font-size:{title_font}px; font-weight:800; letter-spacing:.2px; }}
+            QLabel#SubtitleLabel {{ color:#9a9a9a; font-size:{small_font}px; }}
+
+            QLabel#StatChip {{ background:#252525; color:#d8d8d8; border:1px solid #3a3a3a;
                                border-radius:{chip_radius}px; font-size:{small_font}px; font-weight:800; padding:{chip_vpad}px {chip_hpad}px; }}
-            QLabel#StatChip[role=accent] {{ background:#1d2a23; color:#c9f6da; border-color:#3d7a52; }}
-            QLabel#StatChip[role=warn] {{ background:#2b251c; color:#ffd59a; border-color:#7b5a33; }}
-            QLabel {{ color:#aeb4bd; font-size:{label_font}px; }}
-            QLineEdit {{ background:#1f2125; color:#e8ebf0; border:1px solid #30343a;
-                        border-radius:{radius}px; padding:{field_vpad}px {field_hpad}px; font-size:{field_font}px; selection-background-color:#4e667f; }}
-            QLineEdit:focus {{ border-color:#5d6a7a; background:#23262b; }}
-            QCheckBox {{ color:#b8bec7; font-size:{field_font}px; spacing:{spacing}px; }}
+            QLabel#StatChip[role=accent] {{ background:#1f2a23; color:#c9f6da; border-color:#3d7a52; }}
+            QLabel#StatChip[role=warn] {{ background:#2d241c; color:#ffd59a; border-color:#7b5a33; }}
+
+            QLabel {{ color:#b5b5b5; font-size:{label_font}px; }}
+
+            QLineEdit {{ background:#232323; color:#eeeeee; border:1px solid #353535;
+                        border-radius:{radius}px; padding:{field_vpad}px {field_hpad}px; font-size:{field_font}px; selection-background-color:#555555; }}
+            QLineEdit:focus {{ border-color:#5e5e5e; background:#292929; }}
+
+            QCheckBox {{ color:#b8b8b8; font-size:{field_font}px; spacing:{spacing}px; }}
             QCheckBox::indicator {{ width:{indicator}px; height:{indicator}px; }}
-            QWidget#LeftPanel, QWidget#RightPanel {{ background:#191b1f; border:1px solid #2a2d33; border-radius:{panel_radius}px; }}
+
+            QWidget#LeftPanel, QWidget#RightPanel {{ background:#1d1d1d; border:1px solid #2d2d2d; border-radius:{panel_radius}px; }}
+
             QFrame#SectionPanel {{
-                background:#181a1e; border:1px solid #30343b; border-radius:{panel_radius}px;
+                background:#1b1b1b; border:1px solid #303030; border-radius:{panel_radius}px;
             }}
+
             QScrollArea {{ border:none; background:transparent; }}
-            QScrollBar:vertical {{ background:#151617; width:{scroll_w}px; border-radius:{scroll_r}px; margin:0; }}
-            QScrollBar::handle:vertical {{ background:#353a42; border-radius:{scroll_r}px; min-height:{scroll_min}px; }}
-            QScrollBar::handle:vertical:hover {{ background:#4a515c; }}
+            QScrollBar:vertical {{ background:#181818; width:{scroll_w}px; border-radius:{scroll_r}px; margin:0; }}
+            QScrollBar::handle:vertical {{ background:#404040; border-radius:{scroll_r}px; min-height:{scroll_min}px; }}
+            QScrollBar::handle:vertical:hover {{ background:#555555; }}
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height:0; }}
-            QSlider::groove:horizontal {{ height:{slider_h}px; background:#2a2d33; border-radius:{slider_r}px; }}
-            QSlider::handle:horizontal {{ background:#9aa3ad; border:1px solid #5f6873; width:{handle_w}px; margin:-{handle_m}px 0; border-radius:{handle_r}px; }}
-            QSlider::sub-page:horizontal {{ background:#6b7480; border-radius:{slider_r}px; }}
-            QSpinBox, QDoubleSpinBox {{ background:#1f2125; color:#e8ebf0; border:1px solid #30343a;
+
+            QSlider::groove:horizontal {{ height:{slider_h}px; background:#303030; border-radius:{slider_r}px; }}
+            QSlider::handle:horizontal {{ background:#c62828; border:1px solid #ff6b6b; width:{handle_w}px; margin:-{handle_m}px 0; border-radius:{handle_r}px; }}
+            QSlider::handle:horizontal:hover {{ background:#e53935; border-color:#ff8a8a; }}
+            QSlider::sub-page:horizontal {{ background:#8b1020; border-radius:{slider_r}px; }}
+
+            QSpinBox, QDoubleSpinBox {{ background:#232323; color:#eeeeee; border:1px solid #353535;
                                        border-radius:{radius}px; padding:{spin_pad}px; font-size:{field_font}px; }}
-            QSpinBox:focus, QDoubleSpinBox:focus {{ border-color:#5d6a7a; background:#23262b; }}
-            QComboBox {{ background:#1f2125; color:#e8ebf0; border:1px solid #30343a;
+            QSpinBox:focus, QDoubleSpinBox:focus {{ border-color:#5e5e5e; background:#292929; }}
+
+            QComboBox {{ background:#232323; color:#eeeeee; border:1px solid #353535;
                         border-radius:{radius}px; padding:{field_vpad}px {field_hpad}px; font-size:{field_font}px; }}
-            QComboBox:hover {{ border-color:#4b515c; }}
-            QComboBox QAbstractItemView {{ background:#1f2125; color:#e8ebf0; border:1px solid #30343a; selection-background-color:#4e667f; }}
-            QProgressBar {{ background:#141517; border:1px solid #30343a; border-radius:{radius}px;
-                           text-align:center; color:#bfc5cd; font-size:{small_font}px; font-weight:700; }}
-            QProgressBar::chunk {{ background:#4e667f; border-radius:{chunk_r}px; }}
+            QComboBox:hover {{ border-color:#4a4a4a; }}
+            QComboBox QAbstractItemView {{ background:#232323; color:#eeeeee; border:1px solid #353535; selection-background-color:#555555; }}
+
+            QProgressBar {{ background:#181818; border:1px solid #303030; border-radius:{radius}px;
+                           text-align:center; color:#d0d0d0; font-size:{small_font}px; font-weight:700; }}
+            QProgressBar::chunk {{ background:#4a4a4a; border-radius:{chunk_r}px; }}
         """.format(
             title_font=self._s(14), label_font=self._s(9), field_font=self._s(9), small_font=self._s(8),
             radius=self._s(4), panel_radius=self._s(6), field_vpad=self._s(3), field_hpad=self._s(7),
@@ -3943,7 +3967,6 @@ class InstanceCleanerUI(QDialog):
             slider_r=self._s(2), handle_w=self._s(11), handle_m=self._s(4),
             handle_r=self._s(6), chunk_r=self._s(3),
             chip_radius=self._s(8), chip_vpad=self._s(3), chip_hpad=self._s(7)))
-
 
 
     def _build_ui(self):
@@ -3955,25 +3978,6 @@ class InstanceCleanerUI(QDialog):
 
         root = self._track_layout(QVBoxLayout(self), spacing=5, margins=(6,6,6,6))
 
-        header_panel = QWidget()
-        header_panel.setObjectName("HeaderPanel")
-        header_panel.setAttribute(Qt.WA_StyledBackground, True)
-        header_layout = self._track_layout(QHBoxLayout(header_panel), spacing=8, margins=(10,7,10,7))
-        self.header_status_label = QLabel("READY")
-        self.header_status_label.setAlignment(Qt.AlignCenter)
-        self.header_status_label.setMinimumWidth(self._s(104))
-        self.header_status_label.setStyleSheet(
-            "background:#202329; color:#d8dde5; border:1px solid #353a42; "
-            "border-radius:{}px; font-size:{}px; font-weight:900; padding:{}px {}px;"
-            .format(self._s(10), self._s(9), self._s(4), self._s(8)))
-        self.stat_groups_label = self._make_stat_chip("Groups 0")
-        self.stat_safe_label = self._make_stat_chip("Safe 0", "accent")
-        self.stat_fuzzy_label = self._make_stat_chip("Fuzzy 0", "warn")
-        header_layout.addWidget(self.header_status_label, 1)
-        header_layout.addWidget(self.stat_groups_label, 1)
-        header_layout.addWidget(self.stat_safe_label, 1)
-        header_layout.addWidget(self.stat_fuzzy_label, 1)
-        root.addWidget(header_panel)
 
         body = self._track_layout(QHBoxLayout(), spacing=8, margins=(0,0,0,0))
         root.addLayout(body, 1)
@@ -3995,7 +3999,8 @@ class InstanceCleanerUI(QDialog):
         right_col = QWidget()
         right_col.setObjectName("RightPanel")
         right_col.setAttribute(Qt.WA_StyledBackground, True)
-        right_col.setMinimumWidth(self._s(340))
+        right_col.setFixedWidth(self._s(50))  # LOCK largeur
+
         right_col.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         right = self._track_layout(QVBoxLayout(right_col), spacing=4, margins=(6,6,6,6))
 
@@ -4107,7 +4112,7 @@ class InstanceCleanerUI(QDialog):
         groups.addWidget(SectionLabel("GROUPS"))
 
         bulk = self._track_layout(QHBoxLayout(), spacing=4, margins=(0,0,0,0))
-        acc_safe_btn = ColorBtn("ACCEPT SAFE", "Accept only safe groups", "#24583a","#d9ffe7", h=24)
+        acc_safe_btn = ColorBtn("OK SAFE", "Accept only safe groups", "#33363d", "#d7dce4", h=24)
         acc_all_btn  = ColorBtn("ACCEPT ALL",  "Accept safe + fuzzy",     "#24583a","#d9ffe7", h=24)
         rej_all_btn  = ColorBtn("REJECT ALL",  "",                         "#4b0e19","#ffd7df", h=24)
         self._connect_button(acc_safe_btn, "Accept safe", self.do_accept_safe)
@@ -4173,6 +4178,8 @@ class InstanceCleanerUI(QDialog):
             "Visible 0 / 0 | Safe 0 | Fuzzy 0 | Accepted 0 | Done 0 | Unique 0")
         self._small_labels.append((self.groups_count_label, "#a9a0a3", 9))
         self.groups_count_label.setStyleSheet("color:#a9a0a3; font-size:{}px;".format(self._s(9)))
+        self.groups_count_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.groups_count_label.setFixedHeight(self._s(18))
         right.addWidget(self.groups_count_label)
 
         rev_row = self._track_layout(QHBoxLayout(), spacing=4, margins=(0,0,0,0))
@@ -4231,13 +4238,13 @@ class InstanceCleanerUI(QDialog):
         self.groups_scroll.setFrameShape(QFrame.NoFrame)
         self.groups_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         self.groups_scroll.setStyleSheet("""
-            QScrollArea { background-color:#14171c; border:1px solid #242a33; border-radius:8px; }
-            QScrollArea > QWidget > QWidget { background-color:#14171c; }
+            QScrollArea { background-color:#151515; border:1px solid #2f2f2f; border-radius:8px; }
+            QScrollArea > QWidget > QWidget { background-color:#151515; }
         """)
-        self.groups_scroll.viewport().setStyleSheet("background-color:#14171c;")
+        self.groups_scroll.viewport().setStyleSheet("background-color:#151515;")
 
         self.groups_container = QWidget()
-        self.groups_container.setStyleSheet("background-color:#14171c;")
+        self.groups_container.setStyleSheet("background-color:#151515;")
         self.groups_layout = QVBoxLayout(self.groups_container)
         self.groups_layout.setContentsMargins(self._s(6), self._s(6), self._s(6), self._s(6))
         self.groups_layout.setSpacing(self._s(6))
@@ -4652,21 +4659,20 @@ class InstanceCleanerUI(QDialog):
             self.groups_empty.setText("No groups found for the current selection.\nTry another mesh or use SHOW ALL GROUPS.")
         else:
             self.groups_empty.setText("No global groups found.\nTry REFRESH SCENE, Signature + Fuzzy, or lower Min copies.")
+
         self.groups_empty.setVisible(not has_items)
-        if has_items and len(filtered) <= 1:
-            # One card should not make the group list look like a giant empty CTA.
-            self.groups_scroll.setMaximumHeight(self._s(220))
-        else:
-            self.groups_scroll.setMaximumHeight(16777215)
+
+        self.groups_scroll.setMaximumHeight(16777215)
+        self.groups_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         report = self.cleaner.get_report()
         self._update_stat_chips()
         self.groups_count_label.setText(
             "Visible {} / {} | Safe {} | Fuzzy {} | Accepted {} | Done {} | Unique {}".format(
                 len(filtered), len(all_items),
-                report.get("safe_groups",0),   report.get("fuzzy_groups",0),
-                report.get("accepted_groups",0), report.get("processed_groups",0),
-                report.get("unique_meshes",0),
+                report.get("safe_groups", 0), report.get("fuzzy_groups", 0),
+                report.get("accepted_groups", 0), report.get("processed_groups", 0),
+                report.get("unique_meshes", 0),
             )
         )
         self._update_window_compactness(len(all_items))

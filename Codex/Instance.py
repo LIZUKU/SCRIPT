@@ -4,11 +4,11 @@ Instance Cleaner
 ----------------
 Finds identical or similar meshes, then can replace duplicates with Maya instances.
 
-Scan modes:
+Scan modes/actions:
   - Scene: compare every mesh in the scene.
   - Selected Mesh(es): compare only the selected mesh roots and their children.
-  - Find Selected: use the current selection as seed(s), scan the whole scene,
-    then show only the groups matching those seed meshes.
+  - Find Selected is a separate action: it keeps/scans the scene cache, then
+    filters the group list to the groups matching the current selection.
 
 Requires: Maya 2020+, numpy (bundled with Maya), PySide2 or PySide6.
 """
@@ -890,9 +890,13 @@ def _mesh_compare_hash(mesh_transform, ignore_scale=False):
         area       = float(cmds.polyEvaluate(mesh_transform, worldArea=True) or 0.0)
         bbox       = cmds.exactWorldBoundingBox(mesh_transform)
         volume     = float((bbox[3]-bbox[0]) * (bbox[4]-bbox[1]) * (bbox[5]-bbox[2]))
-        if ignore_scale and vtx_count > 0:
-            area   = area / (float(vtx_count) ** 0.5) if abs(area) > 1e-12 else 0.0
-            volume = volume / (float(vtx_count) ** (2.0/3.0)) if abs(volume) > 1e-12 else 0.0
+        if ignore_scale:
+            width  = abs(float(bbox[3] - bbox[0]))
+            height = abs(float(bbox[4] - bbox[1]))
+            depth  = abs(float(bbox[5] - bbox[2]))
+            bbox_size = max(width, height, depth, 1e-8)
+            area   = area / (bbox_size * bbox_size) if abs(area) > 1e-12 else 0.0
+            volume = volume / (bbox_size * bbox_size * bbox_size) if abs(volume) > 1e-12 else 0.0
         return (vtx_count, edge_count, face_count, area, volume)
     except Exception:
         return None
@@ -2492,7 +2496,15 @@ class InstanceCleaner(object):
             rep = meshes[0]
             if not _exists(rep):
                 continue
-            rep_sig = self.signature_by_transform.get(_long(rep))
+            rep_long = _long(rep)
+            rep_sig = self.signature_by_transform.get(rep_long)
+            if rep_sig is None:
+                try:
+                    rep_sig = _compute_signature(rep_long, strict_tol=0.001)
+                except Exception:
+                    rep_sig = None
+                if rep_sig is not None:
+                    self.signature_by_transform[rep_long] = rep_sig
             if rep_sig is None:
                 continue
 
@@ -3052,6 +3064,7 @@ class InstanceCleanerUI(QDialog):
         self._is_processing       = False
         self._cancel_requested    = False
         self._compact_state       = None
+        self._find_selected_filter = None
 
         self.setWindowTitle("Instance Cleaner")
         self.setMinimumSize(430, 560)
@@ -3112,11 +3125,11 @@ class InstanceCleanerUI(QDialog):
         left.addWidget(SectionLabel("SCAN"))
 
         self.scan_mode_combo = QComboBox()
-        self.scan_mode_combo.addItems(["Scene", "Selected Mesh(es)", "Find Selected"])
+        self.scan_mode_combo.addItems(["Scene", "Selected Mesh(es)"])
         self.scan_mode_combo.setCurrentIndex(0)
         self.scan_mode_combo.setToolTip(
             "Scene scans everything. Selected Mesh(es) scans only the selection. "
-            "Find Selected scans the scene and keeps only matches to the selection.")
+            "Use FIND SELECTED IN GROUPS to locate the current selection in the scanned groups.")
         left.addLayout(self._row("Source", self.scan_mode_combo))
 
         self.strict_tol_slider = ParamSlider("Strict tol", 0.0001, 0.02, 0.001, 4, 90)
@@ -3129,10 +3142,10 @@ class InstanceCleanerUI(QDialog):
             "Topology (UVOptimizer)",
             "Signature + Fuzzy (current)",
         ])
-        self.detect_method_combo.setCurrentIndex(1)
+        self.detect_method_combo.setCurrentIndex(3)
         self.detect_method_combo.setToolTip(
             "Same comparison choices as UVOptimizer.py. "
-            "Geometry is the default because Exact is much slower on full scenes.")
+            "Signature + Fuzzy is the default for robust instance review; UVOptimizer modes are available when needed.")
         left.addLayout(self._row("Method", self.detect_method_combo))
 
         self.ignore_scale_cb = QCheckBox("Ignore scale")
@@ -3177,9 +3190,13 @@ class InstanceCleanerUI(QDialog):
         self.status_label.setStyleSheet("color:#505050; font-size:9px;")
         left.addWidget(self.status_label)
 
-        scan_btn = ColorBtn("SCAN", "", "#1a2a3a","#60a0d0", h=32)
-        self._connect_button(scan_btn, "Refresh scan", self.do_scan)
+        scan_btn = ColorBtn("REFRESH SCENE", "Run a full scene scan", "#1a2a3a","#60a0d0", h=32)
+        self._connect_button(scan_btn, "Refresh scene", self.do_refresh_scene)
         left.addWidget(scan_btn)
+
+        find_btn = ColorBtn("FIND SELECTED IN GROUPS", "Find the selected mesh/root in the current scan", "#2a243a","#c0a0ff", h=28)
+        self._connect_button(find_btn, "Find selected", self.do_find_selected)
+        left.addWidget(find_btn)
 
         # --- GROUPS ---
         left.addWidget(SectionLabel("GROUPS"))
@@ -3331,7 +3348,7 @@ class InstanceCleanerUI(QDialog):
         self.groups_layout.setContentsMargins(0,0,0,0)
         self.groups_layout.setSpacing(4)
 
-        self.groups_empty = QLabel("No groups yet.\nSelect meshes or a parent group, then REFRESH SCAN.")
+        self.groups_empty = QLabel("No groups found.\nTry REFRESH SCENE, Signature + Fuzzy, or lower Min copies.")
         self.groups_empty.setAlignment(Qt.AlignCenter)
         self.groups_empty.setStyleSheet("color:#606060; font-size:10px;")
         self.groups_layout.addWidget(self.groups_empty)
@@ -3404,11 +3421,8 @@ class InstanceCleanerUI(QDialog):
         selected = _get_selected_transforms()
         if not selected:
             return None
-        for node in selected:
-            label = self.cleaner.find_group_for_mesh(node)
-            if label:
-                return label
-        return None
+        labels = self.cleaner.find_labels_for_nodes(selected)
+        return labels[0] if labels else None
 
     def _on_group_checked_changed(self, label, checked):
         if checked:
@@ -3469,7 +3483,17 @@ class InstanceCleanerUI(QDialog):
         if txt.startswith("exact"):     return "exact"
         return "signature"
 
+    def do_refresh_scene(self):
+        old_mode = self.scan_mode_combo.currentText()
+        self.scan_mode_combo.setCurrentText("Scene")
+        try:
+            return self.do_scan()
+        finally:
+            if self.scan_mode_combo.findText(old_mode) >= 0:
+                self.scan_mode_combo.setCurrentText(old_mode)
+
     def do_scan(self):
+        self._find_selected_filter = None
         roots          = None
         selection_only = False
         find_selected  = False
@@ -3526,8 +3550,9 @@ class InstanceCleanerUI(QDialog):
         )
 
         if find_selected:
-            labels = self.cleaner.keep_only_groups_for_nodes(selected_roots)
-            count  = len(self.cleaner.validated_groups)
+            labels = self.cleaner.find_labels_for_nodes(selected_roots)
+            self._find_selected_filter = set(labels)
+            count  = len(labels)
             self.current_group_label = labels[0] if labels else None
 
         self.progress_bar.setValue(100)
@@ -3543,6 +3568,34 @@ class InstanceCleanerUI(QDialog):
         self.refresh_group_list()
         if find_selected and self.current_group_label in self.group_items:
             self._highlight_group_item(self.current_group_label, frame=True, select=False)
+
+    def do_find_selected(self):
+        selected_roots = _get_selected_transforms()
+        if not selected_roots:
+            self.status_label.setText("Select at least one mesh first.")
+            return
+
+        if not self.cleaner.validated_groups:
+            old_mode = self.scan_mode_combo.currentText()
+            self.scan_mode_combo.setCurrentText("Scene")
+            try:
+                self.do_scan()
+            finally:
+                if self.scan_mode_combo.findText(old_mode) >= 0:
+                    self.scan_mode_combo.setCurrentText(old_mode)
+
+        labels = self.cleaner.find_labels_for_nodes(selected_roots)
+        self._find_selected_filter = set(labels)
+        self.current_group_label = labels[0] if labels else None
+        self.refresh_group_list()
+
+        if self.current_group_label in self.group_items:
+            self._highlight_group_item(self.current_group_label, frame=True, select=False)
+
+        report = self.cleaner.get_report()
+        self.status_label.setText(
+            "Found {} group(s) for selection | {} safe | {} fuzzy".format(
+                len(labels), report["safe_groups"], report["fuzzy_groups"]))
 
     def _passes_filter(self, info, filter_text):
         if filter_text == "Safe"      and info["type"] != MATCH_SAFE:   return False
@@ -3584,6 +3637,8 @@ class InstanceCleanerUI(QDialog):
 
         filtered = []
         for label, info in all_items:
+            if self._find_selected_filter is not None and label not in self._find_selected_filter:
+                continue
             if not self._passes_filter(info, filter_text):
                 continue
             dname = info.get("display_name", label).lower()
@@ -3611,6 +3666,10 @@ class InstanceCleanerUI(QDialog):
             if label == self._highlighted_label:
                 w.set_highlighted(True)
 
+        if self._find_selected_filter is not None:
+            self.groups_empty.setText("No groups found for the current selection.\nTry REFRESH SCENE, Signature + Fuzzy, or lower Min copies.")
+        else:
+            self.groups_empty.setText("No groups found.\nTry REFRESH SCENE, Signature + Fuzzy, or lower Min copies.")
         self.groups_empty.setVisible(not has_items)
 
         report = self.cleaner.get_report()
@@ -3630,16 +3689,12 @@ class InstanceCleanerUI(QDialog):
             return
         self._compact_state = compact
 
-        target_width = 460 if compact else 1120
+        target_width = 1120
         target_height = 620
 
-        if compact:
-            self.right_col.setVisible(False)
-            self.setMinimumSize(430, 560)
-        else:
-            self.right_col.setVisible(True)
-            self.right_col.setMinimumWidth(520)
-            self.setMinimumSize(980, 560)
+        self.right_col.setVisible(True)
+        self.right_col.setMinimumWidth(520)
+        self.setMinimumSize(980, 560)
 
         current = self.size()
         if force or current.width() < target_width or current.height() < target_height:
@@ -3883,7 +3938,7 @@ class InstanceCleanerUI(QDialog):
                     stats["backups_created"], stats["groups_skipped"]))
 
         self.progress_bar.setValue(100)
-        self.do_scan()
+        self.do_refresh_scene()
 
     def do_cancel_process(self):
         stats = self.cleaner.cancel_last_process()

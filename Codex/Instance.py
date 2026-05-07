@@ -3438,17 +3438,30 @@ class InstanceCleaner(object):
 class ColorBtn(QPushButton):
     def __init__(self, text="", tip="", bg="#2d2d2d", fg="#a0a0a0", w=None, h=28, parent=None):
         super(ColorBtn, self).__init__(text, parent)
-        compact_h = min(int(h or 24), 30)
-        if w:
-            self.setFixedSize(w, compact_h)
-        else:
-            self.setFixedHeight(compact_h)
+        self._base_w = w
+        self._base_h = int(h or 24)
+        self._ui_scale = 1.0
         self.setToolTip(tip)
+        self.setSizePolicy(QSizePolicy.MinimumExpanding if w else QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self._apply_scaled_metrics()
 
-        # Neutral by default: old per-button colors were visually noisy and made
-        # the tool feel much larger. Keep color only for destructive/confirming
-        # actions where it improves scanning speed.
-        label = (text or "").upper()
+    def _s(self, value):
+        return max(1, int(round(float(value) * float(self._ui_scale))))
+
+    def set_ui_scale(self, scale):
+        self._ui_scale = float(scale or 1.0)
+        self._apply_scaled_metrics()
+
+    def _apply_scaled_metrics(self):
+        h = self._s(self._base_h)
+        self.setMinimumHeight(h)
+        self.setMaximumHeight(max(h + self._s(8), h))
+        if self._base_w:
+            self.setMinimumWidth(self._s(self._base_w))
+        else:
+            self.setMinimumWidth(self._s(42))
+
+        label = (self.text() or "").upper()
         base_bg = "#2f2f2f"
         base_fg = "#b8b8b8"
         border = "#3a3a3a"
@@ -3460,21 +3473,36 @@ class ColorBtn(QPushButton):
         hover = QColor(base_bg).lighter(122).name()
         self.setStyleSheet(
             "QPushButton {{ background:{bg}; color:{fg}; border:1px solid {border};"
-            " border-radius:3px; font-weight:600; font-size:8px; padding:1px 4px; }}"
+            " border-radius:{radius}px; font-weight:600; font-size:{font}px; padding:{pv}px {ph}px; }}"
             "QPushButton:hover {{ background:{hover}; border-color:#5a5a5a; }}"
             "QPushButton:pressed {{ background:#202020; }}"
             "QPushButton:disabled {{ background:#242424; color:#555; border-color:#2a2a2a; }}"
-            .format(bg=base_bg, fg=base_fg, border=border, hover=hover)
+            .format(bg=base_bg, fg=base_fg, border=border, hover=hover,
+                    radius=self._s(3), font=self._s(8), pv=self._s(1), ph=self._s(4))
         )
+        self.updateGeometry()
 
 
 class SectionLabel(QLabel):
     def __init__(self, text, parent=None):
         super(SectionLabel, self).__init__(text, parent)
+        self._ui_scale = 1.0
+        self._apply_scaled_metrics()
+
+    def _s(self, value):
+        return max(1, int(round(float(value) * float(self._ui_scale))))
+
+    def set_ui_scale(self, scale):
+        self._ui_scale = float(scale or 1.0)
+        self._apply_scaled_metrics()
+
+    def _apply_scaled_metrics(self):
         self.setStyleSheet(
-            "color:#555; font-size:9px; font-weight:bold;"
-            " padding:4px 0 2px 0; border-bottom:1px solid #2a2a2a;"
+            "color:#555; font-size:{font}px; font-weight:bold; "
+            "padding:{pt}px 0 {pb}px 0; border-bottom:1px solid #2a2a2a;"
+            .format(font=self._s(9), pt=self._s(4), pb=self._s(2))
         )
+        self.updateGeometry()
 
 
 class ParamSlider(QWidget):
@@ -3486,32 +3514,49 @@ class ParamSlider(QWidget):
     def __init__(self, label, min_val, max_val, default, decimals=3, label_width=90, parent=None):
         super(ParamSlider, self).__init__(parent)
         self._mult = 10 ** decimals
+        self._base_label_width = label_width
+        self._ui_scale = 1.0
 
-        row = QHBoxLayout(self)
-        row.setContentsMargins(0,0,0,0)
-        row.setSpacing(4)
+        self._layout = QHBoxLayout(self)
+        self._layout.setContentsMargins(0,0,0,0)
+        self._layout.setSpacing(4)
 
-        lbl = QLabel(label)
-        lbl.setFixedWidth(label_width)
-        lbl.setStyleSheet("color:#707070; font-size:10px;")
+        self._label = QLabel(label)
+        self._label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
 
         self._slider = QSlider(Qt.Horizontal)
         self._slider.setRange(int(min_val*self._mult), int(max_val*self._mult))
         self._slider.setValue(int(default*self._mult))
+        self._slider.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
         self._spin = QDoubleSpinBox()
         self._spin.setRange(min_val, max_val)
         self._spin.setDecimals(decimals)
         self._spin.setValue(default)
-        self._spin.setFixedWidth(64)
+        self._spin.setMinimumWidth(64)
+        self._spin.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
         self._spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
 
-        row.addWidget(lbl)
-        row.addWidget(self._slider)
-        row.addWidget(self._spin)
+        self._layout.addWidget(self._label)
+        self._layout.addWidget(self._slider, 1)
+        self._layout.addWidget(self._spin)
 
         self._slider.valueChanged.connect(self._on_slider)
         self._spin.valueChanged.connect(self._on_spin)
+        self.set_ui_scale(1.0)
+
+    def _s(self, value):
+        return max(1, int(round(float(value) * float(self._ui_scale))))
+
+    def set_ui_scale(self, scale):
+        self._ui_scale = float(scale or 1.0)
+        self._layout.setSpacing(self._s(4))
+        self._label.setMinimumWidth(self._s(self._base_label_width))
+        self._label.setStyleSheet("color:#707070; font-size:{}px;".format(self._s(10)))
+        self._spin.setMinimumWidth(self._s(64))
+        self._spin.setMinimumHeight(self._s(22))
+        self._slider.setMinimumHeight(self._s(18))
+        self.updateGeometry()
 
     def _on_slider(self, v):
         rv = v / float(self._mult)
@@ -3548,36 +3593,41 @@ class GroupItem(QWidget):
         backups_clicked   = QtCore.Signal(str)
         checked_changed   = QtCore.Signal(str, bool)
 
-    def __init__(self, label, info, parent=None):
+    def __init__(self, label, info, parent=None, ui_scale=1.0):
         super(GroupItem, self).__init__(parent)
         self.setObjectName("GroupItemCard")
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.label = label
         self.info  = info
         self._highlighted = False
+        self._ui_scale = float(ui_scale or 1.0)
         self._build()
+        self.set_ui_scale(self._ui_scale)
         self.refresh()
 
     def _build(self):
         layout = QVBoxLayout(self)
+        self._card_layout = layout
         layout.setContentsMargins(6,5,6,5)
         layout.setSpacing(4)
 
         header = QHBoxLayout()
+        self._header_layout = header
         self.group_check = QCheckBox("")
         self.group_check.setToolTip("Check multiple group cards, then use MERGE SEL GROUPS.")
         self.group_check.stateChanged.connect(
             lambda _v: self.checked_changed.emit(self.label, self.group_check.isChecked()))
         self.badge       = QLabel("")
-        self.badge.setFixedSize(60, 18)
+        self.badge.setMinimumSize(60, 18)
         self.badge.setAlignment(Qt.AlignCenter)
         self.name_label  = QLabel(self.info.get("display_name", self.label))
         self.name_label.setStyleSheet("color:#e0e0e0; font-size:10px; font-weight:bold;")
+        self.name_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.count_label = QLabel("{} copies".format(len(self.info["meshes"])))
         self.count_label.setStyleSheet("color:#d0d0d0; font-size:9px;")
         self.score_label = QLabel("")
         self.score_label.setStyleSheet("color:#aaaaaa; font-size:9px;")
-        self.score_label.setFixedWidth(48)
+        self.score_label.setMinimumWidth(48)
         header.addWidget(self.group_check)
         header.addWidget(self.badge)
         header.addWidget(self.name_label)
@@ -3586,14 +3636,13 @@ class GroupItem(QWidget):
         header.addWidget(self.count_label)
 
         actions = QHBoxLayout()
+        self._actions_layout = actions
         actions.setSpacing(3)
         self.src_btn       = ColorBtn("SRC", "Select source meshes", "#252525","#909090", 46,21)
         self.master_btn    = ColorBtn("MST", "Select master",        "#253525","#90d090", 46,21)
         self.instances_btn = ColorBtn("INS", "Select instances",     "#252535","#9090d0", 46,21)
         self.backups_btn   = ColorBtn("BKP", "Select backups",       "#352525","#d09090", 46,21)
 
-        # FIX : acc_btn et rej_btn créés inconditionnellement (toujours
-        # accessibles via self), puis cachés si le groupe est déjà processed.
         self.acc_btn = ColorBtn("OK",  "Accept group", "#1a3a1a","#60d060", 30,21)
         self.rej_btn = ColorBtn("NO",  "Reject group", "#3a1a1a","#d06060", 30,21)
 
@@ -3617,6 +3666,28 @@ class GroupItem(QWidget):
         layout.addLayout(actions)
         layout.addWidget(self.status_lbl)
 
+
+    def _s(self, value):
+        return max(1, int(round(float(value) * float(self._ui_scale))))
+
+    def set_ui_scale(self, scale):
+        self._ui_scale = float(scale or 1.0)
+        if hasattr(self, "_card_layout"):
+            self._card_layout.setContentsMargins(self._s(6), self._s(5), self._s(6), self._s(5))
+            self._card_layout.setSpacing(self._s(4))
+        if hasattr(self, "_header_layout"):
+            self._header_layout.setSpacing(self._s(4))
+        if hasattr(self, "_actions_layout"):
+            self._actions_layout.setSpacing(self._s(3))
+        self.badge.setMinimumSize(self._s(60), self._s(18))
+        self.score_label.setMinimumWidth(self._s(48))
+        self.name_label.setStyleSheet("color:#e0e0e0; font-size:{}px; font-weight:bold;".format(self._s(10)))
+        self.count_label.setStyleSheet("color:#d0d0d0; font-size:{}px;".format(self._s(9)))
+        self.score_label.setStyleSheet("color:#aaaaaa; font-size:{}px;".format(self._s(9)))
+        for btn in (self.src_btn, self.master_btn, self.instances_btn, self.backups_btn, self.acc_btn, self.rej_btn):
+            btn.set_ui_scale(self._ui_scale)
+        self.updateGeometry()
+
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.select_clicked.emit(self.label)
@@ -3625,7 +3696,7 @@ class GroupItem(QWidget):
     def _set_badge(self, text, bg, fg="#ffffff"):
         self.badge.setText(text)
         self.badge.setStyleSheet(
-            "background:{}; color:{}; font-size:8px; font-weight:bold; border-radius:2px;".format(bg, fg)
+            "background:{}; color:{}; font-size:{}px; font-weight:bold; border-radius:{}px;".format(bg, fg, self._s(8), self._s(2))
         )
 
     def set_highlighted(self, state):
@@ -3654,7 +3725,6 @@ class GroupItem(QWidget):
         self.instances_btn.setEnabled(bool(processed))
         self.backups_btn.setEnabled(bool(processed))
 
-        # FIX : masquer les boutons accept/reject sur les groupes déjà traités
         self.acc_btn.setVisible(not bool(processed))
         self.rej_btn.setVisible(not bool(processed))
 
@@ -3689,9 +3759,9 @@ class GroupItem(QWidget):
 
         bw     = 2 if self._highlighted else 1
         border = "#d8c85a" if self._highlighted else border
-        self.status_lbl.setStyleSheet("color:{}; font-size:8px;".format(color))
+        self.status_lbl.setStyleSheet("color:{}; font-size:{}px;".format(color, self._s(8)))
         self.setStyleSheet(
-            "#GroupItemCard {{ background:{}; border:{}px solid {}; border-radius:4px; }}".format(bg, bw, border)
+            "#GroupItemCard {{ background:{}; border:{}px solid {}; border-radius:{}px; }}".format(bg, bw, border, self._s(4))
         )
 
 
@@ -3713,10 +3783,12 @@ class InstanceCleanerUI(QDialog):
         self._cancel_requested    = False
         self._compact_state       = None
         self._find_selected_filter = None
+        self.ui_scale = 1.0
+        self._user_resized = False
 
         self.setWindowTitle("Instance Cleaner")
-        self.setMinimumSize(340, 440)
-        self.resize(380, 500)
+        self.setMinimumSize(self._s(300), self._s(320))
+        self.resize(self._s(720), self._s(560))
         self.setWindowFlags(Qt.Window | Qt.WindowCloseButtonHint)
 
         self._build_ui()
@@ -3724,50 +3796,140 @@ class InstanceCleanerUI(QDialog):
         self._start_selection_watcher()
         self._update_window_compactness(0, force=True)
 
+    def _s(self, value):
+        return max(1, int(round(float(value) * float(getattr(self, "ui_scale", 1.0)))))
+
+    def set_ui_scale(self, scale):
+        self.ui_scale = float(scale or 1.0)
+        self._apply_stylesheet()
+        self._apply_scaled_layout_metrics()
+        total = len(self.cleaner.validated_groups) if hasattr(self, "cleaner") else 0
+        self._update_window_compactness(total, force=True, allow_resize=True)
+
+    def _apply_scaled_layout_metrics(self):
+        for layout in getattr(self, "_scaled_layouts", []):
+            spacing = int(layout.property("baseSpacing") or 4)
+            margins = layout.property("baseMargins")
+            layout.setSpacing(self._s(spacing))
+            if margins:
+                layout.setContentsMargins(self._s(margins[0]), self._s(margins[1]), self._s(margins[2]), self._s(margins[3]))
+
+        for widget in self.findChildren(QWidget):
+            if hasattr(widget, "set_ui_scale") and widget is not self:
+                widget.set_ui_scale(self.ui_scale)
+
+        label_width = self._s(82)
+        for label in getattr(self, "_row_labels", []):
+            label.setMinimumWidth(label_width)
+            label.setMaximumWidth(self._s(118))
+        for label in getattr(self, "_right_row_labels", []):
+            label.setMinimumWidth(self._s(46))
+            label.setMaximumWidth(self._s(70))
+
+        for widget in getattr(self, "_field_widgets", []):
+            widget.setMinimumHeight(self._s(23))
+            widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        for label, color, size in getattr(self, "_small_labels", []):
+            label.setStyleSheet("color:{}; font-size:{}px;".format(color, self._s(size)))
+        if hasattr(self, "progress_bar"):
+            self.progress_bar.setMinimumHeight(self._s(16))
+            self.progress_bar.setMaximumHeight(self._s(22))
+        if hasattr(self, "left_scroll"):
+            self.left_scroll.setMinimumWidth(self._s(280))
+            self.left_scroll.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        if hasattr(self, "right_col"):
+            self.right_col.setMinimumWidth(self._s(290) if self.right_col.isVisible() else 0)
+            self.right_col.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        if hasattr(self, "groups_scroll"):
+            self.groups_scroll.setMinimumHeight(self._s(120))
+            self.groups_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.updateGeometry()
+
+    def _track_layout(self, layout, spacing=4, margins=(0,0,0,0)):
+        layout.setProperty("baseSpacing", spacing)
+        layout.setProperty("baseMargins", margins)
+        if not hasattr(self, "_scaled_layouts"):
+            self._scaled_layouts = []
+        self._scaled_layouts.append(layout)
+        layout.setSpacing(self._s(spacing))
+        layout.setContentsMargins(self._s(margins[0]), self._s(margins[1]), self._s(margins[2]), self._s(margins[3]))
+        return layout
+
     def _apply_stylesheet(self):
         self.setStyleSheet("""
-            QDialog { background-color:#1e1e1e; }
-            QLabel { color:#707070; font-size:10px; }
-            QLineEdit { background:#252525; color:#a0a0a0; border:1px solid #303030;
-                        border-radius:3px; padding:4px 8px; font-size:10px; }
-            QCheckBox { color:#888888; font-size:10px; }
-            QScrollArea { border:none; background:transparent;  }
-            QScrollBar:vertical { background:#141414; width:10px; border-radius:5px; }
-            QScrollBar::handle:vertical { background:#555; border-radius:6px; min-height:34px; }
-            QScrollBar::handle:vertical:hover { background:#777; }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }
-            QSlider::groove:horizontal { height:4px; background:#2a2a2a; border-radius:2px;  }
-            QSlider::handle:horizontal { background:#8a8a8a; width:10px; margin:-3px 0; border-radius:5px; }
-            QSlider::sub-page:horizontal { background:#707070; border-radius:2px; }
-            QSpinBox, QDoubleSpinBox { background:#252525; color:#a0a0a0; border:1px solid #303030;
-                                       border-radius:3px; padding:2px; font-size:10px; }
-            QComboBox { background:#252525; color:#a0a0a0; border:1px solid #303030;
-                        border-radius:3px; padding:4px 8px; font-size:10px; }
-            QProgressBar { background:#1a1a1a; border:1px solid #303030; border-radius:3px;
-                           text-align:center; color:#707070; font-size:9px; }
-            QProgressBar::chunk { background:#707070; border-radius:2px; }
-        """)
+            QDialog {{ background-color:#1e1e1e; }}
+            QLabel {{ color:#707070; font-size:{label_font}px; }}
+            QLineEdit {{ background:#252525; color:#a0a0a0; border:1px solid #303030;
+                        border-radius:{radius}px; padding:{field_vpad}px {field_hpad}px; font-size:{field_font}px; }}
+            QCheckBox {{ color:#888888; font-size:{field_font}px; spacing:{spacing}px; }}
+            QScrollArea {{ border:none; background:transparent;  }}
+            QScrollBar:vertical {{ background:#141414; width:{scroll_w}px; border-radius:{scroll_r}px; }}
+            QScrollBar::handle:vertical {{ background:#555; border-radius:{scroll_r}px; min-height:{scroll_min}px; }}
+            QScrollBar::handle:vertical:hover {{ background:#777; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height:0; }}
+            QSlider::groove:horizontal {{ height:{slider_h}px; background:#2a2a2a; border-radius:{slider_r}px;  }}
+            QSlider::handle:horizontal {{ background:#8a8a8a; width:{handle_w}px; margin:-{handle_m}px 0; border-radius:{handle_r}px; }}
+            QSlider::sub-page:horizontal {{ background:#707070; border-radius:{slider_r}px; }}
+            QSpinBox, QDoubleSpinBox {{ background:#252525; color:#a0a0a0; border:1px solid #303030;
+                                       border-radius:{radius}px; padding:{spin_pad}px; font-size:{field_font}px; }}
+            QComboBox {{ background:#252525; color:#a0a0a0; border:1px solid #303030;
+                        border-radius:{radius}px; padding:{field_vpad}px {field_hpad}px; font-size:{field_font}px; }}
+            QProgressBar {{ background:#1a1a1a; border:1px solid #303030; border-radius:{radius}px;
+                           text-align:center; color:#707070; font-size:{small_font}px; }}
+            QProgressBar::chunk {{ background:#707070; border-radius:{chunk_r}px; }}
+        """.format(
+            label_font=self._s(10), field_font=self._s(10), small_font=self._s(9),
+            radius=self._s(3), field_vpad=self._s(4), field_hpad=self._s(8),
+            spin_pad=self._s(2), spacing=self._s(4), scroll_w=self._s(10),
+            scroll_r=self._s(5), scroll_min=self._s(34), slider_h=self._s(4),
+            slider_r=self._s(2), handle_w=self._s(10), handle_m=self._s(3),
+            handle_r=self._s(5), chunk_r=self._s(2)))
+
 
     def _build_ui(self):
-        root = QHBoxLayout(self)
-        root.setContentsMargins(6,6,6,6)
-        root.setSpacing(6)
+        self._scaled_layouts = []
+        self._row_labels = []
+        self._right_row_labels = []
+        self._field_widgets = []
+        self._small_labels = []
 
-        left_col = QWidget()
-        left     = QVBoxLayout(left_col)
-        left.setContentsMargins(0,0,0,0)
-        left.setSpacing(4)
+        root = self._track_layout(QHBoxLayout(self), spacing=6, margins=(6,6,6,6))
+
+        left_content = QWidget()
+        left = self._track_layout(QVBoxLayout(left_content), spacing=4, margins=(0,0,0,0))
+        left_content.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.MinimumExpanding)
+
+        self.left_scroll = QScrollArea()
+        self.left_scroll.setWidgetResizable(True)
+        self.left_scroll.setFrameShape(QFrame.NoFrame)
+        self.left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.left_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.left_scroll.setWidget(left_content)
+        self.left_scroll.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
 
         right_col = QWidget()
-        right_col.setMinimumWidth(320)
-        right = QVBoxLayout(right_col)
-        right.setContentsMargins(0,0,0,0)
-        right.setSpacing(4)
+        right_col.setMinimumWidth(self._s(290))
+        right_col.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        right = self._track_layout(QVBoxLayout(right_col), spacing=4, margins=(0,0,0,0))
 
-        root.addWidget(left_col, 2)
+        root.addWidget(self.left_scroll, 1)
         root.addWidget(right_col, 2)
-        self.left_col  = left_col
+        self.left_col = left_content
         self.right_col = right_col
+
+        ui_row = self._track_layout(QHBoxLayout(), spacing=4, margins=(0,0,0,0))
+        ui_lbl = QLabel("UI Scale")
+        ui_lbl.setMinimumWidth(self._s(82))
+        self._row_labels.append(ui_lbl)
+        self.ui_scale_combo = QComboBox()
+        self.ui_scale_combo.addItems(["100%", "90%", "80%", "70%"] )
+        self.ui_scale_combo.setCurrentText("100%")
+        self.ui_scale_combo.currentIndexChanged.connect(
+            lambda _idx: self.set_ui_scale(float(self.ui_scale_combo.currentText().rstrip('%')) / 100.0))
+        self._field_widgets.append(self.ui_scale_combo)
+        ui_row.addWidget(ui_lbl)
+        ui_row.addWidget(self.ui_scale_combo, 1)
+        left.addLayout(ui_row)
 
         # --- SCAN ---
         left.addWidget(SectionLabel("SCAN"))
@@ -3790,7 +3952,7 @@ class InstanceCleanerUI(QDialog):
             "Topology (UVOptimizer)",
             "Signature + Fuzzy (current)",
         ])
-        self.detect_method_combo.setCurrentIndex(3)
+        self.detect_method_combo.setCurrentIndex(1)
         self.detect_method_combo.setToolTip(
             "Exact requires identical topology and vertex order, then normalizes translation/rotation "
             "and optionally uniform scale via Ignore scale. Geometry uses strict descriptors, not just counts/area/volume. "
@@ -3805,7 +3967,7 @@ class InstanceCleanerUI(QDialog):
         self.compare_tolerance_spin.setRange(0.0001, 1.0)
         self.compare_tolerance_spin.setDecimals(4)
         self.compare_tolerance_spin.setSingleStep(0.001)
-        self.compare_tolerance_spin.setValue(0.3000)
+        self.compare_tolerance_spin.setValue(0.4000)
         self.compare_tolerance_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
         left.addLayout(self._row("Tolerance", self.compare_tolerance_spin))
 
@@ -3819,7 +3981,7 @@ class InstanceCleanerUI(QDialog):
         self.fuzzy_vertex_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
         left.addLayout(self._row("Vert +/-", self.fuzzy_vertex_spin))
 
-        self.fuzzy_size_slider  = ParamSlider("Shape tol",  0.01, 0.30, 0.04, 3, 90)
+        self.fuzzy_size_slider  = ParamSlider("Shape tol",  0.01, 0.30, 0.17, 3, 90)
         self.fuzzy_score_slider = ParamSlider("Min score",  0.50, 0.99, 0.94, 2, 90)
         left.addWidget(self.fuzzy_size_slider)
         left.addWidget(self.fuzzy_score_slider)
@@ -3832,11 +3994,13 @@ class InstanceCleanerUI(QDialog):
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setValue(0)
-        self.progress_bar.setFixedHeight(16)
+        self.progress_bar.setMinimumHeight(self._s(16))
+        self.progress_bar.setMaximumHeight(self._s(22))
         left.addWidget(self.progress_bar)
 
         self.status_label = QLabel("Ready")
-        self.status_label.setStyleSheet("color:#505050; font-size:9px;")
+        self._small_labels.append((self.status_label, "#505050", 9))
+        self.status_label.setStyleSheet("color:#505050; font-size:{}px;".format(self._s(9)))
         left.addWidget(self.status_label)
 
         scan_btn = ColorBtn("REFRESH SCENE", "Force Source to Scene and run a full scan", "#1a2a3a","#60a0d0", h=32)
@@ -3858,7 +4022,7 @@ class InstanceCleanerUI(QDialog):
         # --- GROUPS ---
         left.addWidget(SectionLabel("GROUPS"))
 
-        bulk = QHBoxLayout()
+        bulk = self._track_layout(QHBoxLayout(), spacing=4, margins=(0,0,0,0))
         acc_safe_btn = ColorBtn("ACCEPT SAFE", "Accept only safe groups", "#1a3a1a","#60d060", h=24)
         acc_all_btn  = ColorBtn("ACCEPT ALL",  "Accept safe + fuzzy",     "#3a3510","#e0d060", h=24)
         rej_all_btn  = ColorBtn("REJECT ALL",  "",                         "#3a1a1a","#d06060", h=24)
@@ -3870,7 +4034,7 @@ class InstanceCleanerUI(QDialog):
         bulk.addWidget(rej_all_btn)
         left.addLayout(bulk)
 
-        manual_row = QHBoxLayout()
+        manual_row = self._track_layout(QHBoxLayout(), spacing=4, margins=(0,0,0,0))
         merge_btn = ColorBtn("MERGE SEL GROUPS", "Merge groups from selection", "#2f2b12","#e0d070", h=24)
         split_btn = ColorBtn("SPLIT SEL OUT",    "Split selected out of group",  "#2a223a","#c0a0ff", h=24)
         self._connect_button(merge_btn, "Merge selected groups", self.do_merge_selected_groups)
@@ -3879,7 +4043,7 @@ class InstanceCleanerUI(QDialog):
         manual_row.addWidget(split_btn)
         left.addLayout(manual_row)
 
-        edit_row = QHBoxLayout()
+        edit_row = self._track_layout(QHBoxLayout(), spacing=4, margins=(0,0,0,0))
         add_sel_btn = ColorBtn("ADD SEL", "Add selected viewport mesh(es) to the highlighted group", "#303030", "#c0c0c0", h=24)
         rem_sel_btn = ColorBtn("REMOVE SEL", "Remove selected viewport mesh(es) from the highlighted group", "#303030", "#c0c0c0", h=24)
         self._connect_button(add_sel_btn, "Add selected to group", self.do_add_selected_to_group)
@@ -3888,7 +4052,7 @@ class InstanceCleanerUI(QDialog):
         edit_row.addWidget(rem_sel_btn)
         left.addLayout(edit_row)
 
-        master_row = QHBoxLayout()
+        master_row = self._track_layout(QHBoxLayout(), spacing=4, margins=(0,0,0,0))
         sel_mst_btn = ColorBtn("SELECT ALL MASTERS", "", "#253525","#90d090", h=24)
         org_mst_btn = ColorBtn("ORGANIZE MASTERS",   "", "#2a2a3a","#a0c0ff", h=24)
         self._connect_button(sel_mst_btn, "Select all masters", self.do_select_all_masters)
@@ -3920,7 +4084,7 @@ class InstanceCleanerUI(QDialog):
             "brute-force ICP algorithm; no alternate alignment fallback is used.")
         left.addWidget(self.pca_icp_align_lbl)
 
-        proc_row = QHBoxLayout()
+        proc_row = self._track_layout(QHBoxLayout(), spacing=4, margins=(0,0,0,0))
         self.process_btn = ColorBtn(
             "PROCESS",
             "One process action: processes the find-selected/current context when active, otherwise accepted groups",
@@ -3939,17 +4103,16 @@ class InstanceCleanerUI(QDialog):
         conv_btn = ColorBtn("CONVERT INSTANCES TO GEO", "", "#3a1e3a","#e080e0", h=34)
         self._connect_button(conv_btn, "Convert instances to geo", self.do_convert_instances)
         left.addWidget(conv_btn)
-        left.addStretch()
-
         # --- RIGHT: group list ---
         right.addWidget(SectionLabel("GROUP LIST / FAST REVIEW"))
 
         self.groups_count_label = QLabel(
             "Visible 0 / 0 | Safe 0 | Fuzzy 0 | Accepted 0 | Done 0 | Unique 0")
-        self.groups_count_label.setStyleSheet("color:#707070; font-size:9px;")
+        self._small_labels.append((self.groups_count_label, "#707070", 9))
+        self.groups_count_label.setStyleSheet("color:#707070; font-size:{}px;".format(self._s(9)))
         right.addWidget(self.groups_count_label)
 
-        rev_row = QHBoxLayout()
+        rev_row = self._track_layout(QHBoxLayout(), spacing=4, margins=(0,0,0,0))
         self.prev_btn       = ColorBtn("◀", "Previous group",               "#222a35","#a0c0ff", 36, 26)
         self.review_src_btn = ColorBtn("SRC ISOLATE + FRAME", "Isolate + frame current group", "#1f2c3a","#80c0ff", h=26)
         self.next_btn       = ColorBtn("▶", "Next group",                   "#222a35","#a0c0ff", 36, 26)
@@ -3961,7 +4124,7 @@ class InstanceCleanerUI(QDialog):
         rev_row.addWidget(self.next_btn)
         right.addLayout(rev_row)
 
-        rev_row2 = QHBoxLayout()
+        rev_row2 = self._track_layout(QHBoxLayout(), spacing=4, margins=(0,0,0,0))
         self.accept_next_btn = ColorBtn("OK + NEXT", "Accept then next",          "#1a3a1a","#70e070", h=26)
         self.reject_next_btn = ColorBtn("NO + NEXT", "Reject then next",          "#3a1a1a","#e07070", h=26)
         self.exit_iso_btn    = ColorBtn("EXIT ISO",  "Exit isolate all panels",   "#303030","#b0b0b0", h=26)
@@ -3973,16 +4136,16 @@ class InstanceCleanerUI(QDialog):
         rev_row2.addWidget(self.exit_iso_btn)
         right.addLayout(rev_row2)
 
-        filter_row = QHBoxLayout()
-        fl = QLabel("Filter"); fl.setFixedWidth(50)
+        filter_row = self._track_layout(QHBoxLayout(), spacing=4, margins=(0,0,0,0))
+        fl = QLabel("Filter"); self._right_row_labels.append(fl); fl.setMinimumWidth(self._s(46))
         self.filter_combo = QComboBox()
         self.filter_combo.addItems(["All","Safe","Fuzzy","Accepted","Rejected","Processed"])
         self.filter_combo.currentIndexChanged.connect(lambda _idx: self._run_ui_action("Filter groups", self.refresh_group_list))
         filter_row.addWidget(fl); filter_row.addWidget(self.filter_combo)
         right.addLayout(filter_row)
 
-        sort_row = QHBoxLayout()
-        sl = QLabel("Sort"); sl.setFixedWidth(50)
+        sort_row = self._track_layout(QHBoxLayout(), spacing=4, margins=(0,0,0,0))
+        sl = QLabel("Sort"); self._right_row_labels.append(sl); sl.setMinimumWidth(self._s(46))
         self.sort_combo = QComboBox()
         self.sort_combo.addItems([
             "Copies high","Copies low","Score high","Score low",
@@ -3992,8 +4155,8 @@ class InstanceCleanerUI(QDialog):
         sort_row.addWidget(sl); sort_row.addWidget(self.sort_combo)
         right.addLayout(sort_row)
 
-        search_row = QHBoxLayout()
-        sel = QLabel("Search"); sel.setFixedWidth(50)
+        search_row = self._track_layout(QHBoxLayout(), spacing=4, margins=(0,0,0,0))
+        sel = QLabel("Search"); self._right_row_labels.append(sel); sel.setMinimumWidth(self._s(46))
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("name...")
         self.search_edit.textChanged.connect(lambda _text: self._run_ui_action("Search groups", self.refresh_group_list))
@@ -4018,12 +4181,13 @@ class InstanceCleanerUI(QDialog):
 
         self.groups_empty = QLabel("No groups found.\nTry REFRESH SCENE, Signature + Fuzzy, or lower Min copies.")
         self.groups_empty.setAlignment(Qt.AlignCenter)
-        self.groups_empty.setStyleSheet("color:#606060; font-size:10px;")
+        self._small_labels.append((self.groups_empty, "#606060", 10))
+        self.groups_empty.setStyleSheet("color:#606060; font-size:{}px;".format(self._s(10)))
         self.groups_layout.addWidget(self.groups_empty)
         self.groups_layout.addStretch()
 
         self.groups_scroll.setWidget(self.groups_container)
-        right.addWidget(self.groups_scroll)
+        right.addWidget(self.groups_scroll, 1)
 
     def _connect_button(self, button, action_name, callback):
         button.clicked.connect(lambda _checked=False: self._run_ui_action(action_name, callback))
@@ -4046,13 +4210,17 @@ class InstanceCleanerUI(QDialog):
                 print("[IC] {}\n{}".format(message, traceback.format_exc()))
             return None
 
-    def _row(self, label_text, widget, label_width=90):
-        row = QHBoxLayout()
-        row.setSpacing(4)
+    def _row(self, label_text, widget, label_width=82):
+        row = self._track_layout(QHBoxLayout(), spacing=4, margins=(0,0,0,0))
         lbl = QLabel(label_text)
-        lbl.setFixedWidth(label_width)
+        lbl.setMinimumWidth(self._s(label_width))
+        lbl.setMaximumWidth(self._s(118))
+        lbl.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
+        widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self._row_labels.append(lbl)
+        self._field_widgets.append(widget)
         row.addWidget(lbl)
-        row.addWidget(widget)
+        row.addWidget(widget, 1)
         return row
 
     # -- Selection watcher --
@@ -4353,7 +4521,7 @@ class InstanceCleanerUI(QDialog):
 
         for i, (label, info) in enumerate(filtered):
             has_items = True
-            w = GroupItem(label, info)
+            w = GroupItem(label, info, ui_scale=self.ui_scale)
             w.accept_clicked.connect(lambda lbl, self=self: self._run_ui_action("Accept group", self.on_accept_group, lbl))
             w.reject_clicked.connect(lambda lbl, self=self: self._run_ui_action("Reject group", self.on_reject_group, lbl))
             w.select_clicked.connect(lambda lbl, self=self: self._run_ui_action("Select group", self.on_select_group, lbl))
@@ -4385,23 +4553,31 @@ class InstanceCleanerUI(QDialog):
         )
         self._update_window_compactness(len(all_items))
 
-    def _update_window_compactness(self, total_count, force=False):
+    def _update_window_compactness(self, total_count, force=False, allow_resize=False):
         compact = total_count == 0
-        if not force and self._compact_state == compact:
+        state_changed = self._compact_state != compact
+        if not force and not state_changed:
             return
         self._compact_state = compact
 
         self.right_col.setVisible(not compact)
         if compact:
             self.right_col.setMinimumWidth(0)
-            self.setMinimumSize(340, 440)
-            if force or self.width() > 430:
-                self.resize(380, 500)
+            self.setMinimumSize(self._s(300), self._s(320))
+            target_w, target_h = self._s(360), self._s(500)
         else:
-            self.right_col.setMinimumWidth(320)
-            self.setMinimumSize(660, 440)
-            if force or self.width() < 660:
-                self.resize(700, 500)
+            self.right_col.setMinimumWidth(self._s(290))
+            self.setMinimumSize(self._s(560), self._s(340))
+            target_w, target_h = self._s(720), self._s(560)
+
+        if allow_resize or (force and not self._user_resized):
+            self.resize(max(self.width(), target_w), max(self.height(), target_h))
+        self.updateGeometry()
+
+    def resizeEvent(self, event):
+        if getattr(self, "_compact_state", None) is not None:
+            self._user_resized = True
+        super(InstanceCleanerUI, self).resizeEvent(event)
 
     def on_accept_group(self, label):
         self.cleaner.accept_group(label)
@@ -4495,16 +4671,20 @@ class InstanceCleanerUI(QDialog):
             stats.get("merged",0), stats.get("meshes",0)))
 
     def do_split_selected_from_group(self):
-        label = self.current_group_label or self._find_group_from_selection()
+        selected = _get_selected_transforms()
+        selected_label = self._find_group_from_selection() if selected else None
+        label = selected_label or self.current_group_label
         if not label:
-            self.status_label.setText("Split: highlight a group first.")
+            self.status_label.setText("Split: select source meshes from a group or highlight a group first.")
             return
-        stats = self.cleaner.split_selected_from_group(label, _get_selected_transforms())
+        stats = self.cleaner.split_selected_from_group(label, selected)
         if not stats.get("split"):
-            self.status_label.setText("Split: select part of the group source meshes.")
+            self.status_label.setText("Split: select only part of one unprocessed group.")
             return
-        self.refresh_group_list()
         nl = stats.get("new_label")
+        if self._find_selected_filter is not None and nl:
+            self._find_selected_filter.update([label, nl])
+        self.refresh_group_list()
         if nl:
             self._highlight_group_item(nl, frame=True, select=True)
         self.status_label.setText("Split {} meshes into new group".format(stats.get("split",0)))

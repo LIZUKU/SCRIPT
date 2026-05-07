@@ -3885,6 +3885,14 @@ class InstanceCleanerUI(QDialog):
         layout.setContentsMargins(self._s(margins[0]), self._s(margins[1]), self._s(margins[2]), self._s(margins[3]))
         return layout
 
+    def _section_panel(self):
+        panel = QFrame()
+        panel.setObjectName("SectionPanel")
+        panel.setAttribute(Qt.WA_StyledBackground, True)
+        panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        layout = self._track_layout(QVBoxLayout(panel), spacing=5, margins=(7,7,7,7))
+        return panel, layout
+
     def _apply_stylesheet(self):
         self.setStyleSheet("""
             QDialog {{ background-color:#151617; font-family:Segoe UI, Arial, sans-serif; }}
@@ -3904,6 +3912,9 @@ class InstanceCleanerUI(QDialog):
             QCheckBox {{ color:#b8bec7; font-size:{field_font}px; spacing:{spacing}px; }}
             QCheckBox::indicator {{ width:{indicator}px; height:{indicator}px; }}
             QWidget#LeftPanel, QWidget#RightPanel {{ background:#191b1f; border:1px solid #2a2d33; border-radius:{panel_radius}px; }}
+            QFrame#SectionPanel {{
+                background:#181a1e; border:1px solid #30343b; border-radius:{panel_radius}px;
+            }}
             QScrollArea {{ border:none; background:transparent; }}
             QScrollBar:vertical {{ background:#151617; width:{scroll_w}px; border-radius:{scroll_r}px; margin:0; }}
             QScrollBar::handle:vertical {{ background:#353a42; border-radius:{scroll_r}px; min-height:{scroll_min}px; }}
@@ -3963,14 +3974,6 @@ class InstanceCleanerUI(QDialog):
             "border-radius:{}px; font-size:{}px; font-weight:800; padding:{}px {}px;"
             .format(self._s(10), self._s(9), self._s(4), self._s(8)))
         header_layout.addWidget(self.header_status_label)
-        stats_row = self._track_layout(QHBoxLayout(), spacing=4, margins=(0,0,0,0))
-        self.stat_groups_label = self._make_stat_chip("Groups 0", "")
-        self.stat_safe_label = self._make_stat_chip("Safe 0", "accent")
-        self.stat_fuzzy_label = self._make_stat_chip("Fuzzy 0", "warn")
-        stats_row.addWidget(self.stat_groups_label)
-        stats_row.addWidget(self.stat_safe_label)
-        stats_row.addWidget(self.stat_fuzzy_label)
-        header_layout.addLayout(stats_row)
         root.addWidget(header_panel)
 
         body = self._track_layout(QHBoxLayout(), spacing=8, margins=(0,0,0,0))
@@ -4017,7 +4020,8 @@ class InstanceCleanerUI(QDialog):
         left.addLayout(ui_row)
 
         # --- SCAN ---
-        left.addWidget(SectionLabel("SCAN"))
+        scan_panel, scan = self._section_panel()
+        scan.addWidget(SectionLabel("SCAN"))
 
         self.scan_mode_combo = QComboBox()
         self.scan_mode_combo.addItems(["Scene", "Selected Mesh(es)"])
@@ -4025,10 +4029,10 @@ class InstanceCleanerUI(QDialog):
         self.scan_mode_combo.setToolTip(
             "Scene scans everything. Selected Mesh(es) scans only the selection. "
             "Use FIND SELECTED IN GROUPS to locate the current selection in the scanned groups.")
-        left.addLayout(self._row("Source", self.scan_mode_combo))
+        scan.addLayout(self._row("Source", self.scan_mode_combo))
 
         self.strict_tol_slider = ParamSlider("Strict tol", 0.0001, 0.02, 0.001, 4, 90)
-        left.addWidget(self.strict_tol_slider)
+        scan.addWidget(self.strict_tol_slider)
 
         self.detect_method_combo = QComboBox()
         self.detect_method_combo.addItems([
@@ -4042,11 +4046,11 @@ class InstanceCleanerUI(QDialog):
             "Exact requires identical topology and vertex order, then normalizes translation/rotation "
             "and optionally uniform scale via Ignore scale. Geometry uses strict descriptors, not just counts/area/volume. "
             "Signature + Fuzzy is the default for robust instance review.")
-        left.addLayout(self._row("Method", self.detect_method_combo))
+        scan.addLayout(self._row("Method", self.detect_method_combo))
 
         self.ignore_scale_cb = QCheckBox("Ignore scale")
         self.ignore_scale_cb.setChecked(True)
-        left.addWidget(self.ignore_scale_cb)
+        scan.addWidget(self.ignore_scale_cb)
 
         self.compare_tolerance_spin = QDoubleSpinBox()
         self.compare_tolerance_spin.setRange(0.0001, 1.0)
@@ -4054,39 +4058,39 @@ class InstanceCleanerUI(QDialog):
         self.compare_tolerance_spin.setSingleStep(0.001)
         self.compare_tolerance_spin.setValue(0.4000)
         self.compare_tolerance_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
-        left.addLayout(self._row("Tolerance", self.compare_tolerance_spin))
+        scan.addLayout(self._row("Tolerance", self.compare_tolerance_spin))
 
         self.fuzzy_enabled_cb = QCheckBox("Enable fuzzy detection")
         self.fuzzy_enabled_cb.setChecked(True)
-        left.addWidget(self.fuzzy_enabled_cb)
+        scan.addWidget(self.fuzzy_enabled_cb)
 
         self.fuzzy_vertex_spin = QSpinBox()
         self.fuzzy_vertex_spin.setRange(0, 50)
         self.fuzzy_vertex_spin.setValue(0)
         self.fuzzy_vertex_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
-        left.addLayout(self._row("Vert +/-", self.fuzzy_vertex_spin))
+        scan.addLayout(self._row("Vert +/-", self.fuzzy_vertex_spin))
 
         self.fuzzy_size_slider  = ParamSlider("Shape tol",  0.01, 0.30, 0.17, 3, 90)
         self.fuzzy_score_slider = ParamSlider("Min score",  0.50, 0.99, 0.94, 2, 90)
-        left.addWidget(self.fuzzy_size_slider)
-        left.addWidget(self.fuzzy_score_slider)
+        scan.addWidget(self.fuzzy_size_slider)
+        scan.addWidget(self.fuzzy_score_slider)
 
         self.min_copies_spin = QSpinBox()
         self.min_copies_spin.setRange(2, 999)
         self.min_copies_spin.setValue(2)
         self.min_copies_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
-        left.addLayout(self._row("Min copies", self.min_copies_spin))
+        scan.addLayout(self._row("Min copies", self.min_copies_spin))
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setValue(0)
         self.progress_bar.setMinimumHeight(self._s(16))
         self.progress_bar.setMaximumHeight(self._s(22))
-        left.addWidget(self.progress_bar)
+        scan.addWidget(self.progress_bar)
 
         self.status_label = QLabel("Ready")
         self._small_labels.append((self.status_label, "#8b8285", 9))
         self.status_label.setStyleSheet("color:#8b8285; font-size:{}px;".format(self._s(9)))
-        left.addWidget(self.status_label)
+        scan.addWidget(self.status_label)
 
         scan_btn = ColorBtn("REFRESH SCENE", "Force Source to Scene and run a full scan", "#1f3a56","#9fd0ff", h=24)
         scan_current_btn = ColorBtn("REFRESH MODE", "Scan using the current Source combo (Scene or Selected Mesh(es))", "#25313a","#cbd6e2", h=24)
@@ -4096,10 +4100,12 @@ class InstanceCleanerUI(QDialog):
         self._connect_button(scan_current_btn, "Refresh current mode", self.do_refresh_current)
         self._connect_button(find_btn, "Find selected", self.do_find_selected)
         self._connect_button(show_all_btn, "Show all groups", self.do_show_all_groups)
-        left.addLayout(self._button_grid([scan_btn, scan_current_btn, find_btn, show_all_btn], columns=3))
+        scan.addLayout(self._button_grid([scan_btn, scan_current_btn, find_btn, show_all_btn], columns=3))
+        left.addWidget(scan_panel)
 
         # --- GROUPS ---
-        left.addWidget(SectionLabel("GROUPS"))
+        groups_panel, groups = self._section_panel()
+        groups.addWidget(SectionLabel("GROUPS"))
 
         bulk = self._track_layout(QHBoxLayout(), spacing=4, margins=(0,0,0,0))
         acc_safe_btn = ColorBtn("ACCEPT SAFE", "Accept only safe groups", "#173a24","#90e5a8", h=24)
@@ -4111,7 +4117,7 @@ class InstanceCleanerUI(QDialog):
         bulk.addWidget(acc_safe_btn)
         bulk.addWidget(acc_all_btn)
         bulk.addWidget(rej_all_btn)
-        left.addLayout(bulk)
+        groups.addLayout(bulk)
 
         merge_btn = ColorBtn("MERGE GROUPS", "Merge groups from selection", "#3a3321","#e7c97b", h=24)
         split_btn = ColorBtn("SPLIT OUT",    "Split selected out of group",  "#2b2e34","#d2d8e0", h=24)
@@ -4127,23 +4133,25 @@ class InstanceCleanerUI(QDialog):
         self._connect_button(sel_mst_btn, "Select all masters", self.do_select_all_masters)
         self._connect_button(org_mst_btn, "Organize masters", self.do_organize_masters)
         self._connect_button(set_mst_btn, "Set selected as master", self.do_set_selected_as_master)
-        left.addLayout(self._button_grid([merge_btn, split_btn, add_sel_btn, rem_sel_btn, sel_mst_btn, org_mst_btn, set_mst_btn], columns=3))
+        groups.addLayout(self._button_grid([merge_btn, split_btn, add_sel_btn, rem_sel_btn, sel_mst_btn, org_mst_btn, set_mst_btn], columns=3))
+        left.addWidget(groups_panel)
 
         # --- PROCESS ---
-        left.addWidget(SectionLabel("PROCESS"))
+        process_panel, process = self._section_panel()
+        process.addWidget(SectionLabel("PROCESS"))
 
         self.master_spacing_spin = QDoubleSpinBox()
         self.master_spacing_spin.setRange(0, 5000)
         self.master_spacing_spin.setValue(20)
         self.master_spacing_spin.setDecimals(0)
         self.master_spacing_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
-        left.addLayout(self._row("Spacing", self.master_spacing_spin))
+        process.addLayout(self._row("Spacing", self.master_spacing_spin))
 
         self.pca_icp_align_lbl = QLabel("Alignment: PCA candidates + ICP only")
         self.pca_icp_align_lbl.setToolTip(
             "Replacement always uses the standalone PCA orientation candidate + "
             "brute-force ICP algorithm; no alternate alignment fallback is used.")
-        left.addWidget(self.pca_icp_align_lbl)
+        process.addWidget(self.pca_icp_align_lbl)
 
         proc_row = self._track_layout(QHBoxLayout(), spacing=4, margins=(0,0,0,0))
         self.process_btn = ColorBtn(
@@ -4159,11 +4167,12 @@ class InstanceCleanerUI(QDialog):
         proc_row.addWidget(self.process_btn, 2)
         proc_row.addWidget(self.cancel_btn, 1)
         proc_row.addWidget(self.stop_process_btn, 1)
-        left.addLayout(proc_row)
+        process.addLayout(proc_row)
 
         conv_btn = ColorBtn("CONVERT INSTANCES TO GEO", "", "#2b2e34","#d2d8e0", h=24)
         self._connect_button(conv_btn, "Convert instances to geo", self.do_convert_instances)
-        left.addWidget(conv_btn)
+        process.addWidget(conv_btn)
+        left.addWidget(process_panel)
         # --- RIGHT: group list ---
         right.addWidget(SectionLabel("GROUP LIST / FAST REVIEW"))
 

@@ -3469,14 +3469,14 @@ class ColorBtn(QPushButton):
         base_fg = self._base_fg
         border = QColor(base_bg).lighter(150).name()
         if label in ("OK", "OK + NEXT") or label.startswith("ACCEPT") or label == "PROCESS":
-            base_bg = self._base_bg if self._base_bg != "#2d2d2d" else "#274033"
-            base_fg, border = "#d8ffe1", "#58986b"
+            base_bg = self._base_bg if self._base_bg != "#2d2d2d" else "#7b1625"
+            base_fg, border = "#ffe7eb", "#d3455b"
         elif label in ("NO", "NO + NEXT", "STOP") or label.startswith("REJECT"):
-            base_bg = self._base_bg if self._base_bg != "#2d2d2d" else "#531a26"
-            base_fg, border = "#ffd7df", "#b24a5f"
+            base_bg = self._base_bg if self._base_bg != "#2d2d2d" else "#4b0e19"
+            base_fg, border = "#ffd7df", "#a3293d"
         elif "FUZZ" in label:
-            base_bg = self._base_bg if self._base_bg != "#2d2d2d" else "#4c2b16"
-            base_fg, border = "#ffe1aa", "#a87136"
+            base_bg = self._base_bg if self._base_bg != "#2d2d2d" else "#5a141f"
+            base_fg, border = "#ffd8de", "#b73449"
 
         hover = QColor(base_bg).lighter(136).name()
         pressed = QColor(base_bg).darker(122).name()
@@ -3511,7 +3511,7 @@ class SectionLabel(QLabel):
         self.setStyleSheet(
             "color:#d9dde3; font-family:Segoe UI, Arial, sans-serif; font-size:{font}px; "
             "font-weight:800; letter-spacing:.9px; padding:{pt}px {px}px {pb}px {px}px; "
-            "border-left:{bar}px solid #4d9cff; background:#1b1d21; border-radius:{radius}px;"
+            "border-left:{bar}px solid #cf243d; background:#1b1d21; border-radius:{radius}px;"
             .format(font=self._s(9), pt=self._s(4), pb=self._s(3), px=self._s(6),
                     bar=self._s(3), radius=self._s(4))
         )
@@ -3651,13 +3651,13 @@ class GroupItem(QWidget):
         actions = QHBoxLayout()
         self._actions_layout = actions
         actions.setSpacing(3)
-        self.src_btn       = ColorBtn("SRC", "Select source meshes", "#2b2e34","#c7ced8", 46,21)
-        self.master_btn    = ColorBtn("MST", "Select master",        "#173a24","#90e5a8", 46,21)
-        self.instances_btn = ColorBtn("INS", "Select instances",     "#2b2e34","#c7ced8", 46,21)
-        self.backups_btn   = ColorBtn("BKP", "Select backups",       "#2b2e34","#c7ced8", 46,21)
+        self.src_btn       = ColorBtn("SRC", "Select source meshes", "#33363d","#d7dce4", 46,21)
+        self.master_btn    = ColorBtn("MST", "Select master",        "#8f1e32","#ffe2e7", 46,21)
+        self.instances_btn = ColorBtn("INS", "Select instances",     "#33363d","#d7dce4", 46,21)
+        self.backups_btn   = ColorBtn("BKP", "Select backups",       "#33363d","#d7dce4", 46,21)
 
-        self.acc_btn = ColorBtn("OK",  "Accept group", "#173a24","#90e5a8", 30,21)
-        self.rej_btn = ColorBtn("NO",  "Reject group", "#451d1f","#f0a3a8", 30,21)
+        self.acc_btn = ColorBtn("OK",  "Accept group", "#8f1e32","#ffe2e7", 30,21)
+        self.rej_btn = ColorBtn("NO",  "Reject group", "#4b0e19","#ffd7df", 30,21)
 
         self.src_btn.clicked.connect(lambda: self.select_clicked.emit(self.label))
         self.master_btn.clicked.connect(lambda: self.master_clicked.emit(self.label))
@@ -3865,11 +3865,11 @@ class InstanceCleanerUI(QDialog):
             self.groups_layout.setContentsMargins(self._s(6), self._s(6), self._s(6), self._s(6))
             self.groups_layout.setSpacing(self._s(6))
         if hasattr(self, "header_status_label"):
-            self.header_status_label.setMinimumWidth(self._s(76))
+            self.header_status_label.setMinimumWidth(self._s(104))
             self.header_status_label.setStyleSheet(
-                "background:#17231c; color:#8ce7a4; border:1px solid #284d34; "
-                "border-radius:{}px; font-size:{}px; font-weight:800; padding:{}px {}px;"
-                .format(self._s(8), self._s(8), self._s(3), self._s(7)))
+                "background:#2b1118; color:#ffdfe5; border:1px solid #8f1e32; "
+                "border-radius:{}px; font-size:{}px; font-weight:900; padding:{}px {}px;"
+                .format(self._s(10), self._s(9), self._s(4), self._s(8)))
         for chip in (getattr(self, "stat_groups_label", None), getattr(self, "stat_safe_label", None), getattr(self, "stat_fuzzy_label", None)):
             if chip:
                 chip.setMinimumWidth(self._s(70))
@@ -3901,14 +3901,14 @@ class InstanceCleanerUI(QDialog):
             }}
             QLabel#TitleLabel {{ color:#eef1f5; font-size:{title_font}px; font-weight:800; letter-spacing:.2px; }}
             QLabel#SubtitleLabel {{ color:#8f969f; font-size:{small_font}px; }}
-            QLabel#StatChip {{ background:#202228; color:#cfd4dc; border:1px solid #30343b;
-                               border-radius:{chip_radius}px; font-size:{small_font}px; font-weight:700; padding:{chip_vpad}px {chip_hpad}px; }}
-            QLabel#StatChip[role=accent] {{ background:#17231c; color:#8ce7a4; border-color:#284d34; }}
-            QLabel#StatChip[role=warn] {{ background:#252118; color:#e8c67a; border-color:#4d4127; }}
+            QLabel#StatChip {{ background:#211f23; color:#f0d4d8; border:1px solid #403039;
+                               border-radius:{chip_radius}px; font-size:{small_font}px; font-weight:800; padding:{chip_vpad}px {chip_hpad}px; }}
+            QLabel#StatChip[role=accent] {{ background:#2b1118; color:#ffdfe5; border-color:#8f1e32; }}
+            QLabel#StatChip[role=warn] {{ background:#27161a; color:#f2b6c0; border-color:#64202d; }}
             QLabel {{ color:#aeb4bd; font-size:{label_font}px; }}
             QLineEdit {{ background:#1f2125; color:#e8ebf0; border:1px solid #30343a;
-                        border-radius:{radius}px; padding:{field_vpad}px {field_hpad}px; font-size:{field_font}px; selection-background-color:#2f6fb3; }}
-            QLineEdit:focus {{ border-color:#4d9cff; background:#23262b; }}
+                        border-radius:{radius}px; padding:{field_vpad}px {field_hpad}px; font-size:{field_font}px; selection-background-color:#9f1d31; }}
+            QLineEdit:focus {{ border-color:#cf243d; background:#23262b; }}
             QCheckBox {{ color:#b8bec7; font-size:{field_font}px; spacing:{spacing}px; }}
             QCheckBox::indicator {{ width:{indicator}px; height:{indicator}px; }}
             QWidget#LeftPanel, QWidget#RightPanel {{ background:#191b1f; border:1px solid #2a2d33; border-radius:{panel_radius}px; }}
@@ -3922,17 +3922,17 @@ class InstanceCleanerUI(QDialog):
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height:0; }}
             QSlider::groove:horizontal {{ height:{slider_h}px; background:#2a2d33; border-radius:{slider_r}px; }}
             QSlider::handle:horizontal {{ background:#9aa3ad; border:1px solid #5f6873; width:{handle_w}px; margin:-{handle_m}px 0; border-radius:{handle_r}px; }}
-            QSlider::sub-page:horizontal {{ background:#4d9cff; border-radius:{slider_r}px; }}
+            QSlider::sub-page:horizontal {{ background:#cf243d; border-radius:{slider_r}px; }}
             QSpinBox, QDoubleSpinBox {{ background:#1f2125; color:#e8ebf0; border:1px solid #30343a;
                                        border-radius:{radius}px; padding:{spin_pad}px; font-size:{field_font}px; }}
-            QSpinBox:focus, QDoubleSpinBox:focus {{ border-color:#4d9cff; background:#23262b; }}
+            QSpinBox:focus, QDoubleSpinBox:focus {{ border-color:#cf243d; background:#23262b; }}
             QComboBox {{ background:#1f2125; color:#e8ebf0; border:1px solid #30343a;
                         border-radius:{radius}px; padding:{field_vpad}px {field_hpad}px; font-size:{field_font}px; }}
             QComboBox:hover {{ border-color:#4b515c; }}
-            QComboBox QAbstractItemView {{ background:#1f2125; color:#e8ebf0; border:1px solid #30343a; selection-background-color:#2f6fb3; }}
+            QComboBox QAbstractItemView {{ background:#1f2125; color:#e8ebf0; border:1px solid #30343a; selection-background-color:#9f1d31; }}
             QProgressBar {{ background:#141517; border:1px solid #30343a; border-radius:{radius}px;
                            text-align:center; color:#bfc5cd; font-size:{small_font}px; font-weight:700; }}
-            QProgressBar::chunk {{ background:#4d9cff; border-radius:{chunk_r}px; }}
+            QProgressBar::chunk {{ background:#cf243d; border-radius:{chunk_r}px; }}
         """.format(
             title_font=self._s(14), label_font=self._s(9), field_font=self._s(9), small_font=self._s(8),
             radius=self._s(4), panel_radius=self._s(6), field_vpad=self._s(3), field_hpad=self._s(7),
@@ -3957,23 +3957,20 @@ class InstanceCleanerUI(QDialog):
         header_panel.setObjectName("HeaderPanel")
         header_panel.setAttribute(Qt.WA_StyledBackground, True)
         header_layout = self._track_layout(QHBoxLayout(header_panel), spacing=8, margins=(10,7,10,7))
-        title_block = self._track_layout(QVBoxLayout(), spacing=2, margins=(0,0,0,0))
-        title_label = QLabel("Instance Cleaner")
-        title_label.setObjectName("TitleLabel")
-        subtitle_label = QLabel("Detect duplicates, review groups, and convert them to clean Maya instances")
-        subtitle_label.setObjectName("SubtitleLabel")
-        subtitle_label.setWordWrap(True)
-        title_block.addWidget(title_label)
-        title_block.addWidget(subtitle_label)
-        header_layout.addLayout(title_block, 1)
         self.header_status_label = QLabel("READY")
         self.header_status_label.setAlignment(Qt.AlignCenter)
-        self.header_status_label.setMinimumWidth(self._s(76))
+        self.header_status_label.setMinimumWidth(self._s(104))
         self.header_status_label.setStyleSheet(
-            "background:#16251d; color:#8ff0a4; border:1px solid #2d6b3c; "
-            "border-radius:{}px; font-size:{}px; font-weight:800; padding:{}px {}px;"
+            "background:#2b1118; color:#ffdfe5; border:1px solid #8f1e32; "
+            "border-radius:{}px; font-size:{}px; font-weight:900; padding:{}px {}px;"
             .format(self._s(10), self._s(9), self._s(4), self._s(8)))
-        header_layout.addWidget(self.header_status_label)
+        self.stat_groups_label = self._make_stat_chip("Groups 0")
+        self.stat_safe_label = self._make_stat_chip("Safe 0", "accent")
+        self.stat_fuzzy_label = self._make_stat_chip("Fuzzy 0", "warn")
+        header_layout.addWidget(self.header_status_label, 1)
+        header_layout.addWidget(self.stat_groups_label, 1)
+        header_layout.addWidget(self.stat_safe_label, 1)
+        header_layout.addWidget(self.stat_fuzzy_label, 1)
         root.addWidget(header_panel)
 
         body = self._track_layout(QHBoxLayout(), spacing=8, margins=(0,0,0,0))
@@ -4092,10 +4089,10 @@ class InstanceCleanerUI(QDialog):
         self.status_label.setStyleSheet("color:#8b8285; font-size:{}px;".format(self._s(9)))
         scan.addWidget(self.status_label)
 
-        scan_btn = ColorBtn("REFRESH SCENE", "Force Source to Scene and run a full scan", "#1f3a56","#9fd0ff", h=24)
-        scan_current_btn = ColorBtn("REFRESH MODE", "Scan using the current Source combo (Scene or Selected Mesh(es))", "#25313a","#cbd6e2", h=24)
-        find_btn = ColorBtn("FIND SELECTED", "Fast-find meshes matching the current selection", "#2b2e34","#d2d8e0", h=24)
-        show_all_btn = ColorBtn("SHOW ALL", "Clear selection-find filter and show all scanned groups", "#173a24","#90e5a8", h=24)
+        scan_btn = ColorBtn("REFRESH SCENE", "Force Source to Scene and run a full scan", "#8f1e32","#ffe2e7", h=24)
+        scan_current_btn = ColorBtn("REFRESH MODE", "Scan using the current Source combo (Scene or Selected Mesh(es))", "#33363d","#d7dce4", h=24)
+        find_btn = ColorBtn("FIND SELECTED", "Fast-find meshes matching the current selection", "#33363d","#d7dce4", h=24)
+        show_all_btn = ColorBtn("SHOW ALL", "Clear selection-find filter and show all scanned groups", "#8f1e32","#ffe2e7", h=24)
         self._connect_button(scan_btn, "Refresh scene", self.do_refresh_scene)
         self._connect_button(scan_current_btn, "Refresh current mode", self.do_refresh_current)
         self._connect_button(find_btn, "Find selected", self.do_find_selected)
@@ -4108,9 +4105,9 @@ class InstanceCleanerUI(QDialog):
         groups.addWidget(SectionLabel("GROUPS"))
 
         bulk = self._track_layout(QHBoxLayout(), spacing=4, margins=(0,0,0,0))
-        acc_safe_btn = ColorBtn("ACCEPT SAFE", "Accept only safe groups", "#173a24","#90e5a8", h=24)
-        acc_all_btn  = ColorBtn("ACCEPT ALL",  "Accept safe + fuzzy",     "#3a3321","#e7c97b", h=24)
-        rej_all_btn  = ColorBtn("REJECT ALL",  "",                         "#451d1f","#f0a3a8", h=24)
+        acc_safe_btn = ColorBtn("ACCEPT SAFE", "Accept only safe groups", "#8f1e32","#ffe2e7", h=24)
+        acc_all_btn  = ColorBtn("ACCEPT ALL",  "Accept safe + fuzzy",     "#581522","#ffc7d0", h=24)
+        rej_all_btn  = ColorBtn("REJECT ALL",  "",                         "#4b0e19","#ffd7df", h=24)
         self._connect_button(acc_safe_btn, "Accept safe", self.do_accept_safe)
         self._connect_button(acc_all_btn, "Accept all", self.do_accept_all)
         self._connect_button(rej_all_btn, "Reject all", self.do_reject_all)
@@ -4119,13 +4116,13 @@ class InstanceCleanerUI(QDialog):
         bulk.addWidget(rej_all_btn)
         groups.addLayout(bulk)
 
-        merge_btn = ColorBtn("MERGE GROUPS", "Merge groups from selection", "#3a3321","#e7c97b", h=24)
-        split_btn = ColorBtn("SPLIT OUT",    "Split selected out of group",  "#2b2e34","#d2d8e0", h=24)
-        add_sel_btn = ColorBtn("ADD SEL", "Add selected viewport mesh(es) to the highlighted group", "#2b2e34", "#c7ced8", h=24)
-        rem_sel_btn = ColorBtn("REMOVE SEL", "Remove selected viewport mesh(es) from the highlighted group", "#2b2e34", "#c7ced8", h=24)
-        sel_mst_btn = ColorBtn("SEL MASTERS", "Select all masters", "#173a24","#90e5a8", h=24)
-        org_mst_btn = ColorBtn("ORGANIZE",   "Organize masters", "#2b2e34","#c7ced8", h=24)
-        set_mst_btn = ColorBtn("SET MASTER", "Use selected mesh as the master/reference for its group", "#173a24","#90e5a8", h=24)
+        merge_btn = ColorBtn("MERGE GROUPS", "Merge groups from selection", "#581522","#ffc7d0", h=24)
+        split_btn = ColorBtn("SPLIT OUT",    "Split selected out of group",  "#33363d","#d7dce4", h=24)
+        add_sel_btn = ColorBtn("ADD SEL", "Add selected viewport mesh(es) to the highlighted group", "#33363d", "#d7dce4", h=24)
+        rem_sel_btn = ColorBtn("REMOVE SEL", "Remove selected viewport mesh(es) from the highlighted group", "#33363d", "#d7dce4", h=24)
+        sel_mst_btn = ColorBtn("SEL MASTERS", "Select all masters", "#8f1e32","#ffe2e7", h=24)
+        org_mst_btn = ColorBtn("ORGANIZE",   "Organize masters", "#33363d","#d7dce4", h=24)
+        set_mst_btn = ColorBtn("SET MASTER", "Use selected mesh as the master/reference for its group", "#8f1e32","#ffe2e7", h=24)
         self._connect_button(merge_btn, "Merge selected groups", self.do_merge_selected_groups)
         self._connect_button(split_btn, "Split selected out", self.do_split_selected_from_group)
         self._connect_button(add_sel_btn, "Add selected to group", self.do_add_selected_to_group)
@@ -4147,19 +4144,13 @@ class InstanceCleanerUI(QDialog):
         self.master_spacing_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
         process.addLayout(self._row("Spacing", self.master_spacing_spin))
 
-        self.pca_icp_align_lbl = QLabel("Alignment: PCA candidates + ICP only")
-        self.pca_icp_align_lbl.setToolTip(
-            "Replacement always uses the standalone PCA orientation candidate + "
-            "brute-force ICP algorithm; no alternate alignment fallback is used.")
-        process.addWidget(self.pca_icp_align_lbl)
-
         proc_row = self._track_layout(QHBoxLayout(), spacing=4, margins=(0,0,0,0))
         self.process_btn = ColorBtn(
             "PROCESS",
             "One process action: processes the find-selected/current context when active, otherwise accepted groups",
-            "#173a24", "#90e5a8", h=24)
-        self.cancel_btn       = ColorBtn("CANCEL PROCESS", "Restore before latest batch", "#3a3321", "#e7c97b", h=24)
-        self.stop_process_btn = ColorBtn("STOP",           "Stop current operation safely", "#451d1f", "#f0a3a8", h=24)
+            "#8f1e32", "#ffe2e7", h=24)
+        self.cancel_btn       = ColorBtn("CANCEL PROCESS", "Restore before latest batch", "#581522", "#ffc7d0", h=24)
+        self.stop_process_btn = ColorBtn("STOP",           "Stop current operation safely", "#4b0e19", "#ffd7df", h=24)
         self.stop_process_btn.setEnabled(False)
         self._connect_button(self.process_btn, "Process", self.do_process)
         self._connect_button(self.cancel_btn, "Cancel process", self.do_cancel_process)
@@ -4169,12 +4160,12 @@ class InstanceCleanerUI(QDialog):
         proc_row.addWidget(self.stop_process_btn, 1)
         process.addLayout(proc_row)
 
-        conv_btn = ColorBtn("CONVERT INSTANCES TO GEO", "", "#2b2e34","#d2d8e0", h=24)
+        conv_btn = ColorBtn("CONVERT INSTANCES TO GEO", "", "#33363d","#d7dce4", h=24)
         self._connect_button(conv_btn, "Convert instances to geo", self.do_convert_instances)
         process.addWidget(conv_btn)
         left.addWidget(process_panel)
         # --- RIGHT: group list ---
-        right.addWidget(SectionLabel("GROUP LIST / FAST REVIEW"))
+        right.addWidget(SectionLabel("GROUP LIST"))
 
         self.groups_count_label = QLabel(
             "Visible 0 / 0 | Safe 0 | Fuzzy 0 | Accepted 0 | Done 0 | Unique 0")
@@ -4183,9 +4174,9 @@ class InstanceCleanerUI(QDialog):
         right.addWidget(self.groups_count_label)
 
         rev_row = self._track_layout(QHBoxLayout(), spacing=4, margins=(0,0,0,0))
-        self.prev_btn       = ColorBtn("◀", "Previous group",               "#2b2e34","#c7ced8", 36, 26)
-        self.review_src_btn = ColorBtn("SRC ISOLATE + FRAME", "Isolate + frame current group", "#1f3a56","#9fd0ff", h=24)
-        self.next_btn       = ColorBtn("▶", "Next group",                   "#2b2e34","#c7ced8", 36, 26)
+        self.prev_btn       = ColorBtn("◀", "Previous group",               "#33363d","#d7dce4", 36, 26)
+        self.review_src_btn = ColorBtn("SRC ISOLATE + FRAME", "Isolate + frame current group", "#8f1e32","#ffe2e7", h=24)
+        self.next_btn       = ColorBtn("▶", "Next group",                   "#33363d","#d7dce4", 36, 26)
         self._connect_button(self.prev_btn, "Previous group", lambda: self._navigate_review(-1))
         self._connect_button(self.next_btn, "Next group", lambda: self._navigate_review(1))
         self._connect_button(self.review_src_btn, "Isolate current source", self.do_isolate_current_source)
@@ -4195,9 +4186,9 @@ class InstanceCleanerUI(QDialog):
         right.addLayout(rev_row)
 
         rev_row2 = self._track_layout(QHBoxLayout(), spacing=4, margins=(0,0,0,0))
-        self.accept_next_btn = ColorBtn("OK + NEXT", "Accept then next",          "#173a24","#90e5a8", h=24)
-        self.reject_next_btn = ColorBtn("NO + NEXT", "Reject then next",          "#451d1f","#f0a3a8", h=24)
-        self.exit_iso_btn    = ColorBtn("EXIT ISO",  "Exit isolate all panels",   "#2b2e34","#c7ced8", h=24)
+        self.accept_next_btn = ColorBtn("OK + NEXT", "Accept then next",          "#8f1e32","#ffe2e7", h=24)
+        self.reject_next_btn = ColorBtn("NO + NEXT", "Reject then next",          "#4b0e19","#ffd7df", h=24)
+        self.exit_iso_btn    = ColorBtn("EXIT ISO",  "Exit isolate all panels",   "#33363d","#d7dce4", h=24)
         self._connect_button(self.accept_next_btn, "Accept and next", self.do_accept_current_and_next)
         self._connect_button(self.reject_next_btn, "Reject and next", self.do_reject_current_and_next)
         self._connect_button(self.exit_iso_btn, "Exit isolate", self.do_exit_isolate)
@@ -4285,10 +4276,10 @@ class InstanceCleanerUI(QDialog):
         if not hasattr(self, "header_status_label"):
             return
         palettes = {
-            "ready": ("#16251d", "#8ff0a4", "#2d6b3c"),
-            "busy":  ("#17243a", "#9fc7ff", "#365f9b"),
-            "warn":  ("#352817", "#ffd48a", "#8a6429"),
-            "error": ("#351a1a", "#ff9d9d", "#8a3d3d"),
+            "ready": ("#2b1118", "#ffdfe5", "#8f1e32"),
+            "busy":  ("#34131c", "#ffc7d0", "#a3293d"),
+            "warn":  ("#3a141d", "#ffb4c0", "#8a2234"),
+            "error": ("#4b0e19", "#ffd7df", "#a3293d"),
         }
         bg, fg, border = palettes.get(tone, palettes["ready"])
         self.header_status_label.setText(str(text or "READY").upper())

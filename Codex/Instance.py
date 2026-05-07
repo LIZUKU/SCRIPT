@@ -1154,6 +1154,15 @@ def _mesh_compare_hash(mesh_transform, ignore_scale=False):
     except Exception:
         return None
 
+def _mesh_count_key(mesh_transform):
+    """Cheap topology prefilter key used before expensive canonical comparisons."""
+    fn, _ = _get_mesh_fn(mesh_transform)
+    if fn is None:
+        return None
+    try:
+        return (int(fn.numVertices), int(fn.numEdges), int(fn.numPolygons))
+    except Exception:
+        return None
 
 def _compare_mesh_topology(mesh1, mesh2, ignore_scale=False, tolerance=0.01):
     """Compare canonical topology, not just vertex/edge/face counts."""
@@ -2596,7 +2605,14 @@ class InstanceCleaner(object):
         if method == "signature":
             method = "geometry"
 
+        source_count_key = _mesh_count_key(source)
+
         def _matches(candidate):
+            # Most scene meshes can be rejected with O(1) data.  This avoids
+            # rebuilding expensive canonical topology/geometry hashes every
+            # time FIND SELECTED is run on a different object.
+            if source_count_key and _mesh_count_key(candidate) != source_count_key:
+                return False
             if method == "topology":
                 return _compare_mesh_topology(source, candidate, ignore_scale=ignore_scale, tolerance=tolerance)
             if method == "exact":
@@ -2809,6 +2825,76 @@ class InstanceCleaner(object):
         }
         self._renumber_groups()
         return {"split": len(split_meshes), "new_label": new_label}
+
+    def add_selected_to_group(self, label, selected_nodes):
+        if label not in self.validated_groups:
+            return {"added": 0, "total": 0, "removed_from_other": 0}
+        info = self.validated_groups[label]
+        if info.get("processed"):
+            return {"added": 0, "total": len(info.get("meshes", [])), "removed_from_other": 0}
+
+        selected_meshes = _dedupe_keep_order([m for m in
+                          _collect_mesh_transforms_from_roots(selected_nodes)
+                          if _exists(m) and not str(_long(m)).startswith("|" + ROOT_GROUP)])
+        if not selected_meshes:
+            return {"added": 0, "total": len(info.get("meshes", [])), "removed_from_other": 0}
+
+        current = _dedupe_keep_order([m for m in info.get("meshes", []) if _exists(m)])
+        current_set = set(current)
+        to_add = [m for m in selected_meshes if m not in current_set]
+        removed_from_other = 0
+
+        # Keep one source mesh in one editable group only; otherwise processing can
+        # instance the same original twice.
+        add_set = set(to_add)
+        for other_label, other in list(self.validated_groups.items()):
+            if other_label == label or other.get("processed"):
+                continue
+            before = _dedupe_keep_order([m for m in other.get("meshes", []) if _exists(m)])
+            after = [m for m in before if m not in add_set]
+            if len(after) != len(before):
+                other["meshes"] = after
+                removed_from_other += len(before) - len(after)
+
+        info["meshes"] = _dedupe_keep_order(current + to_add)
+        if to_add:
+            info["type"] = MATCH_FUZZY
+            info["source_match_type"] = MATCH_FUZZY
+            info["accepted"] = None if info.get("accepted") is not False else False
+            info["score"] = min(float(info.get("score", 0.85) or 0.85), 0.85)
+        self._renumber_groups()
+        return {"added": len(to_add), "total": len(info["meshes"]), "removed_from_other": removed_from_other}
+
+    def remove_selected_from_group(self, label, selected_nodes):
+        if label not in self.validated_groups:
+            return {"removed": 0, "total": 0, "kept_minimum": False}
+        info = self.validated_groups[label]
+        if info.get("processed"):
+            return {"removed": 0, "total": len(info.get("meshes", [])), "kept_minimum": False}
+
+        selected_meshes = set(_dedupe_keep_order([m for m in
+                              _collect_mesh_transforms_from_roots(selected_nodes) if _exists(m)]))
+        current = _dedupe_keep_order([m for m in info.get("meshes", []) if _exists(m)])
+        if not selected_meshes or not current:
+            return {"removed": 0, "total": len(current), "kept_minimum": False}
+
+        remaining = [m for m in current if m not in selected_meshes]
+        removed = len(current) - len(remaining)
+        kept_minimum = False
+        if removed and len(remaining) < 2:
+            # A one-mesh group is not useful for instancing. Keep enough meshes so
+            # the group stays processable and visible instead of silently breaking it.
+            needed = 2 - len(remaining)
+            restore = [m for m in current if m in selected_meshes][:needed]
+            remaining = _dedupe_keep_order(remaining + restore)
+            removed = len(current) - len(remaining)
+            kept_minimum = True
+
+        if removed:
+            info["meshes"] = remaining
+            info["accepted"] = None if info.get("accepted") is True else info.get("accepted")
+        self._renumber_groups()
+        return {"removed": removed, "total": len(info.get("meshes", [])), "kept_minimum": kept_minimum}
 
     def keep_only_groups_for_nodes(self, nodes):
         seed_meshes = _dedupe_keep_order([m for m in
@@ -3313,19 +3399,33 @@ class InstanceCleaner(object):
 class ColorBtn(QPushButton):
     def __init__(self, text="", tip="", bg="#2d2d2d", fg="#a0a0a0", w=None, h=28, parent=None):
         super(ColorBtn, self).__init__(text, parent)
+        compact_h = min(int(h or 24), 30)
         if w:
-            self.setFixedSize(w, h)
+            self.setFixedSize(w, compact_h)
         else:
-            self.setFixedHeight(h)
+            self.setFixedHeight(compact_h)
         self.setToolTip(tip)
-        hover = QColor(bg).lighter(130).name()
+
+        # Neutral by default: old per-button colors were visually noisy and made
+        # the tool feel much larger. Keep color only for destructive/confirming
+        # actions where it improves scanning speed.
+        label = (text or "").upper()
+        base_bg = "#2f2f2f"
+        base_fg = "#b8b8b8"
+        border = "#3a3a3a"
+        if label in ("OK", "OK + NEXT") or label.startswith("ACCEPT") or label == "PROCESS":
+            base_bg, base_fg, border = "#263126", "#a8d8a8", "#3e5a3e"
+        elif label in ("NO", "NO + NEXT", "STOP") or label.startswith("REJECT"):
+            base_bg, base_fg, border = "#322828", "#e0aaaa", "#5a3e3e"
+
+        hover = QColor(base_bg).lighter(122).name()
         self.setStyleSheet(
-            "QPushButton {{ background:{bg}; color:{fg}; border:1px solid #222;"
-            " border-radius:3px; font-weight:bold; font-size:9px; padding:1px 4px; }}"
-            "QPushButton:hover {{ background:{hover}; border-color:#444; }}"
-            "QPushButton:pressed {{ background:#1a1a1a; }}"
-            "QPushButton:disabled {{ background:#242424; color:#555; border-color:#222; }}"
-            .format(bg=bg, fg=fg, hover=hover)
+            "QPushButton {{ background:{bg}; color:{fg}; border:1px solid {border};"
+            " border-radius:3px; font-weight:600; font-size:8px; padding:1px 4px; }}"
+            "QPushButton:hover {{ background:{hover}; border-color:#5a5a5a; }}"
+            "QPushButton:pressed {{ background:#202020; }}"
+            "QPushButton:disabled {{ background:#242424; color:#555; border-color:#2a2a2a; }}"
+            .format(bg=base_bg, fg=base_fg, border=border, hover=hover)
         )
 
 
@@ -3576,8 +3676,8 @@ class InstanceCleanerUI(QDialog):
         self._find_selected_filter = None
 
         self.setWindowTitle("Instance Cleaner")
-        self.setMinimumSize(430, 560)
-        self.resize(460, 620)
+        self.setMinimumSize(380, 520)
+        self.resize(420, 560)
         self.setWindowFlags(Qt.Window | Qt.WindowCloseButtonHint)
 
         self._build_ui()
@@ -3590,42 +3690,42 @@ class InstanceCleanerUI(QDialog):
             QDialog { background-color:#1e1e1e; }
             QLabel { color:#707070; font-size:10px; }
             QLineEdit { background:#252525; color:#a0a0a0; border:1px solid #303030;
-                        border-radius:3px; padding:4px 8px; font-size:11px; }
-            QCheckBox { color:#888888; font-size:11px; }
-            QScrollArea { border:none; background:transparent; }
-            QScrollBar:vertical { background:#141414; width:14px; border-radius:6px; }
+                        border-radius:3px; padding:4px 8px; font-size:10px; }
+            QCheckBox { color:#888888; font-size:10px; }
+            QScrollArea { border:none; background:transparent;  }
+            QScrollBar:vertical { background:#141414; width:10px; border-radius:5px; }
             QScrollBar::handle:vertical { background:#555; border-radius:6px; min-height:34px; }
             QScrollBar::handle:vertical:hover { background:#777; }
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }
-            QSlider::groove:horizontal { height:4px; background:#2a2a2a; border-radius:2px; }
-            QSlider::handle:horizontal { background:#d32f2f; width:12px; margin:-4px 0; border-radius:6px; }
-            QSlider::sub-page:horizontal { background:#d32f2f; border-radius:2px; }
+            QSlider::groove:horizontal { height:4px; background:#2a2a2a; border-radius:2px;  }
+            QSlider::handle:horizontal { background:#8a8a8a; width:10px; margin:-3px 0; border-radius:5px; }
+            QSlider::sub-page:horizontal { background:#707070; border-radius:2px; }
             QSpinBox, QDoubleSpinBox { background:#252525; color:#a0a0a0; border:1px solid #303030;
-                                       border-radius:3px; padding:2px; font-size:11px; }
+                                       border-radius:3px; padding:2px; font-size:10px; }
             QComboBox { background:#252525; color:#a0a0a0; border:1px solid #303030;
-                        border-radius:3px; padding:4px 8px; font-size:11px; }
+                        border-radius:3px; padding:4px 8px; font-size:10px; }
             QProgressBar { background:#1a1a1a; border:1px solid #303030; border-radius:3px;
                            text-align:center; color:#707070; font-size:9px; }
-            QProgressBar::chunk { background:#d32f2f; border-radius:2px; }
+            QProgressBar::chunk { background:#707070; border-radius:2px; }
         """)
 
     def _build_ui(self):
         root = QHBoxLayout(self)
-        root.setContentsMargins(8,8,8,8)
-        root.setSpacing(10)
+        root.setContentsMargins(6,6,6,6)
+        root.setSpacing(6)
 
         left_col = QWidget()
         left     = QVBoxLayout(left_col)
         left.setContentsMargins(0,0,0,0)
-        left.setSpacing(6)
+        left.setSpacing(4)
 
         right_col = QWidget()
-        right_col.setMinimumWidth(520)
+        right_col.setMinimumWidth(420)
         right = QVBoxLayout(right_col)
         right.setContentsMargins(0,0,0,0)
-        right.setSpacing(6)
+        right.setSpacing(4)
 
-        root.addWidget(left_col, 3)
+        root.addWidget(left_col, 2)
         root.addWidget(right_col, 2)
         self.left_col  = left_col
         self.right_col = right_col
@@ -3739,6 +3839,15 @@ class InstanceCleanerUI(QDialog):
         manual_row.addWidget(merge_btn)
         manual_row.addWidget(split_btn)
         left.addLayout(manual_row)
+
+        edit_row = QHBoxLayout()
+        add_sel_btn = ColorBtn("ADD SEL", "Add selected viewport mesh(es) to the highlighted group", "#303030", "#c0c0c0", h=24)
+        rem_sel_btn = ColorBtn("REMOVE SEL", "Remove selected viewport mesh(es) from the highlighted group", "#303030", "#c0c0c0", h=24)
+        self._connect_button(add_sel_btn, "Add selected to group", self.do_add_selected_to_group)
+        self._connect_button(rem_sel_btn, "Remove selected from group", self.do_remove_selected_from_group)
+        edit_row.addWidget(add_sel_btn)
+        edit_row.addWidget(rem_sel_btn)
+        left.addLayout(edit_row)
 
         master_row = QHBoxLayout()
         sel_mst_btn = ColorBtn("SELECT ALL MASTERS", "", "#253525","#90d090", h=24)
@@ -4246,13 +4355,13 @@ class InstanceCleanerUI(QDialog):
         self.right_col.setVisible(not compact)
         if compact:
             self.right_col.setMinimumWidth(0)
-            self.setMinimumSize(430, 560)
-            self.resize(460, 620)
+            self.setMinimumSize(380, 520)
+            self.resize(420, 560)
         else:
-            self.right_col.setMinimumWidth(520)
-            self.setMinimumSize(980, 560)
-            if force or self.width() < 980:
-                self.resize(1120, 620)
+            self.right_col.setMinimumWidth(420)
+            self.setMinimumSize(820, 520)
+            if force or self.width() < 820:
+                self.resize(880, 560)
 
     def on_accept_group(self, label):
         self.cleaner.accept_group(label)
@@ -4359,6 +4468,47 @@ class InstanceCleanerUI(QDialog):
         if nl:
             self._highlight_group_item(nl, frame=True, select=True)
         self.status_label.setText("Split {} meshes into new group".format(stats.get("split",0)))
+
+    def _editable_current_label(self, action):
+        label = self.current_group_label or self._find_group_from_selection()
+        if not label or label not in self.cleaner.validated_groups:
+            self.status_label.setText("{}: highlight a group first.".format(action))
+            return None
+        if self.cleaner.validated_groups[label].get("processed"):
+            self.status_label.setText("{}: processed groups cannot be edited.".format(action))
+            return None
+        return label
+
+    def do_add_selected_to_group(self):
+        label = self._editable_current_label("Add selected")
+        if not label:
+            return
+        selected = _get_selected_transforms()
+        if not selected:
+            self.status_label.setText("Add selected: select mesh(es) in the viewport first.")
+            return
+        stats = self.cleaner.add_selected_to_group(label, selected)
+        self.refresh_group_list()
+        self._highlight_group_item(label, frame=True, select=True)
+        self.status_label.setText(
+            "Added {} mesh(es) | group total {} | removed from other groups {}".format(
+                stats.get("added", 0), stats.get("total", 0), stats.get("removed_from_other", 0)))
+
+    def do_remove_selected_from_group(self):
+        label = self._editable_current_label("Remove selected")
+        if not label:
+            return
+        selected = _get_selected_transforms()
+        if not selected:
+            self.status_label.setText("Remove selected: select mesh(es) in the viewport first.")
+            return
+        stats = self.cleaner.remove_selected_from_group(label, selected)
+        self.refresh_group_list()
+        self._highlight_group_item(label, frame=True, select=True)
+        suffix = " | kept minimum 2 meshes" if stats.get("kept_minimum") else ""
+        self.status_label.setText(
+            "Removed {} mesh(es) | group total {}{}".format(
+                stats.get("removed", 0), stats.get("total", 0), suffix))
 
     def do_set_selected_as_master(self):
         selected = _get_selected_transforms()

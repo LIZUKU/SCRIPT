@@ -956,6 +956,125 @@ def find_live_bool_nodes_for_cutter(cutter):
     return nodes
 
 
+def transforms_connected_to_bool_node(node):
+    """Retourne les transforms mesh branchés en entrée du polyBoolean.
+
+    Les booléens modernes Maya gardent les cutters comme meshes d'entrée du node.
+    Cette fonction sert uniquement à retrouver les vrais transforms encore connectés,
+    sans se fier à la sélection Maya qui peut être stale après un restart du script.
+    """
+    node = node if node and mc.objExists(node) else ""
+    if not node:
+        return []
+
+    result = transform_from_node(boolean_result_mesh or result_from_bool_node(node))
+    found = []
+
+    for src in mc.listConnections(node, source=True, destination=False, shapes=True) or []:
+        xform = transform_from_node(src)
+        if not xform or xform == result or xform in found:
+            continue
+
+        if is_mesh_xform(xform):
+            found.append(xform)
+
+    return found
+
+
+def is_boolean_cutter_candidate(node, bool_node=""):
+    node = transform_from_node(node)
+    if not node:
+        return False
+
+    if "_boolCutter" in sn(node):
+        return True
+
+    parent = parent_path(node)
+    if parent and fp(parent) == fp(CUTTER_GROUP):
+        return True
+
+    stored = get_str(node, "plugBoolNode")
+    if stored and (not bool_node or stored == bool_node):
+        return True
+
+    if bool_node and bool_node in bool_nodes_from_cutter(node):
+        return True
+
+    return False
+
+
+def cutters_for_bool_node(node, include_active=True):
+    """Liste tous les cutters live d'un polyBoolean, pas seulement le dernier actif.
+
+    C'est important au bake : avec les duplications MMB, plusieurs cutters peuvent
+    rester branchés au même polyBoolean. Si on supprime uniquement boolean_cutter_mesh,
+    Maya laisse les anciens cutters dans la scène après V.
+    """
+    node = node if node and mc.objExists(node) else ""
+    if not node:
+        return []
+
+    cutters = []
+
+    for candidate in transforms_connected_to_bool_node(node):
+        if is_boolean_cutter_candidate(candidate, node) and candidate not in cutters:
+            cutters.append(candidate)
+
+    active = transform_from_node(boolean_cutter_mesh) if include_active else ""
+    if active and exists(active) and active not in cutters and is_boolean_cutter_candidate(active, node):
+        cutters.append(active)
+
+    return cutters
+
+
+def resolve_live_boolean_context(cutter=None):
+    """Retrouve le polyBoolean live même après relance du script / sélection stale.
+
+    Le hotkey V ne doit pas dépendre uniquement de bool_nodes_from_cutter(cutter).
+    Quand Maya resélectionne un ancien input ou quand les globals viennent d'être
+    réinitialisés par une relance du fichier, les métadonnées / le result peuvent
+    quand même permettre de retrouver le node live à baker.
+    """
+    global last_boolean_node, boolean_result_mesh, last_bool_input_index
+
+    cutter = transform_from_node(cutter or boolean_cutter_mesh)
+    nodes = []
+
+    for n in find_live_bool_nodes_for_cutter(cutter):
+        if n not in nodes:
+            nodes.append(n)
+
+    stored_result = get_str(cutter, "plugBoolResult") if cutter else ""
+    for result in [boolean_result_mesh, stored_result]:
+        result = transform_from_node(result)
+        for n in bool_nodes(result) if result else []:
+            if n not in nodes:
+                nodes.append(n)
+
+    if last_boolean_node and mc.objExists(last_boolean_node) and last_boolean_node not in nodes:
+        nodes.append(last_boolean_node)
+
+    for node in nodes:
+        if not node or not mc.objExists(node) or mc.nodeType(node) != "polyBoolean":
+            continue
+
+        result = transform_from_node(boolean_result_mesh or result_from_bool_node(node))
+        if result:
+            boolean_result_mesh = result
+
+        last_boolean_node = node
+
+        if cutter:
+            indices = cutter_input_indices(node, cutter)
+            if indices:
+                last_bool_input_index = indices[0]
+                store_metadata(cutter)
+
+        return node
+
+    return ""
+
+
 def tune_bool_node(node):
     if not node or not mc.objExists(node):
         return
@@ -1063,6 +1182,10 @@ def update_current_boolean_operation():
 
     nodes = bool_nodes_from_cutter(cutter)
     if not nodes:
+        node = resolve_live_boolean_context(cutter)
+        nodes = [node] if node else []
+
+    if not nodes:
         return False
 
     changed = False
@@ -1088,6 +1211,10 @@ def force_boolean_operation_now(cutter=None):
         return False
 
     nodes = find_live_bool_nodes_for_cutter(cutter)
+    if not nodes:
+        node = resolve_live_boolean_context(cutter)
+        nodes = [node] if node else []
+
     if not nodes:
         store_metadata(cutter)
         return False
@@ -1313,12 +1440,21 @@ def create_boolean(restart=True, select_after=True):
 def bake_boolean_result():
     global drag_session_active
 
-    result = transform_from_node(boolean_result_mesh or result_from_bool_node(last_boolean_node))
+    live_node = resolve_live_boolean_context(boolean_cutter_mesh)
+    result = transform_from_node(boolean_result_mesh or result_from_bool_node(live_node or last_boolean_node))
     if not result:
         mc.warning("Could not find boolean result. Bake cancelled.")
         return False
 
-    cutter = transform_from_node(boolean_cutter_mesh)
+    cutters = cutters_for_bool_node(live_node, include_active=True) if live_node else []
+    active_cutter = transform_from_node(boolean_cutter_mesh)
+    if (
+        active_cutter
+        and exists(active_cutter)
+        and active_cutter not in cutters
+        and is_boolean_cutter_candidate(active_cutter, live_node)
+    ):
+        cutters.append(active_cutter)
 
     try:
         mc.select(result, r=True)
@@ -1329,8 +1465,9 @@ def bake_boolean_result():
         mc.warning("Bake boolean failed: {0}".format(e))
         return False
 
-    if cutter and mc.objExists(cutter):
-        safe(lambda: mc.delete(cutter))
+    # Après le bake, tous les cutters branchés au polyBoolean doivent disparaître.
+    # Sinon une validation V après plusieurs MMB ne supprimait que le dernier cutter actif.
+    safe_delete(sorted(set(cutters), key=lambda n: n.count("|"), reverse=True))
 
     cleanup_empty_groups()
 
@@ -2614,7 +2751,8 @@ def plug_bool_validate_hotkey():
     clear_temp()
 
     cutter = sync_cutter()
-    has_live_boolean = bool(cutter and bool_nodes_from_cutter(cutter))
+    live_node = resolve_live_boolean_context(cutter)
+    has_live_boolean = bool(live_node)
 
     # IMPORTANT :
     # Si aucun booléen live n'existe encore, V ne doit PAS baker directement.
@@ -2638,11 +2776,15 @@ def plug_bool_validate_hotkey():
         return
 
     # Si un booléen live existe déjà, là V valide/bake vraiment.
+    # Si l'opération ne peut pas être réécrite (sélection Maya stale / cutter déjà retiré),
+    # on bake quand même le polyBoolean retrouvé au lieu de relancer un second booléen.
     if not update_current_boolean_operation():
-        mc.warning("Could not update existing boolean operation. Bake cancelled.")
-        drag_session_active = False
-        suppress_next_tool_changed = False
-        return
+        live_node = resolve_live_boolean_context(cutter)
+        if not live_node:
+            mc.warning("Could not update existing boolean operation. Bake cancelled.")
+            drag_session_active = False
+            suppress_next_tool_changed = False
+            return
 
     baked = bake_boolean_result()
 

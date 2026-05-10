@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 
+import importlib
 import math
+import time
 import uuid
 
 import maya.cmds as mc
@@ -9,11 +11,23 @@ import maya.OpenMaya as om1
 import maya.OpenMayaUI as omui
 import maya.api.OpenMaya as om
 
-try:
-    import maya.plugin.polyBoolean.booltoolUtils as btUtils
-except Exception:
-    btUtils = None
+btUtils = None
 
+
+
+def booltool_utils():
+    global btUtils
+
+    if btUtils is not None:
+        return btUtils
+
+    try:
+        btUtils = importlib.import_module("maya.plugin.polyBoolean.booltoolUtils")
+    except Exception as exc:
+        mc.warning("Could not import booltoolUtils: {0}".format(exc))
+        btUtils = None
+
+    return btUtils
 
 # ============================================================
 # CONFIG
@@ -1409,7 +1423,11 @@ def run_modern_boolean_command(op):
     elif op == BOOL_UNION:
         mel.eval("PolygonBooleanUnion;")
     else:
-        btUtils.createBoolTool(op)
+        utils = booltool_utils()
+        if not utils:
+            mc.warning("Could not import booltoolUtils.")
+            return
+        utils.createBoolTool(op)
 
 
 def add_cutter_to_live_boolean(cutter, op=None, select_after=True):
@@ -1587,7 +1605,8 @@ def create_boolean(restart=True, select_after=True):
         mc.warning("Target and cutter are the same object.")
         return None
 
-    if btUtils is None:
+    utils = booltool_utils()
+    if utils is None:
         mc.warning("Could not import booltoolUtils.")
         return None
 
@@ -1622,7 +1641,7 @@ def create_boolean(restart=True, select_after=True):
         elif current_op() == BOOL_UNION:
             mel.eval("PolygonBooleanUnion;")
         else:
-            btUtils.createBoolTool(current_op())
+            utils.createBoolTool(current_op())
 
     except Exception as e:
         mc.warning("Modern Bool Tool failed: {0}".format(e))
@@ -1893,6 +1912,10 @@ class PlugBoolDragTool(object):
         self.pending_restart_cutter = ""
         self.forced_press_cutter = ""
         self.selection_request_token = 0
+        self.last_click_time = 0.0
+        self.last_click_pos = None
+        self.double_click_seconds = 0.35
+        self.double_click_pixels = 6
 
         self.mesh = ""
         self.mesh_name = ""
@@ -1989,6 +2012,39 @@ class PlugBoolDragTool(object):
         self.offset = fp(self.offset)
         self.mesh = transform_from_node(self.mesh)
 
+
+    def is_double_click_release(self):
+        try:
+            button = mc.draggerContext(CTX, q=True, button=True)
+            x, y, _ = mc.draggerContext(CTX, q=True, dragPoint=True)
+        except Exception as exc:
+            mc.warning("Could not query FastBool click state: {0}".format(exc))
+            return False
+
+        # Only validate on a left-button double-click with almost no mouse travel.
+        if button != 1:
+            return False
+
+        now = time.time()
+        previous_time = self.last_click_time
+        previous_pos = self.last_click_pos
+        self.last_click_time = now
+        self.last_click_pos = [x, y]
+
+        if not previous_time or not previous_pos:
+            return False
+
+        if now - previous_time > self.double_click_seconds:
+            return False
+
+        dx = float(x) - float(previous_pos[0])
+        dy = float(y) - float(previous_pos[1])
+        matched = (dx * dx + dy * dy) <= float(self.double_click_pixels * self.double_click_pixels)
+        if matched:
+            self.last_click_time = 0.0
+            self.last_click_pos = None
+        return matched
+
     def start(self):
 
         if self.picker or self.offset:
@@ -2007,7 +2063,6 @@ class PlugBoolDragTool(object):
             pressCommand=press,
             dragCommand=drag,
             releaseCommand=release,
-            doubleClickCommand=plug_bool_validate_hotkey,
             name=CTX,
             cursor="crossHair",
             undoMode="step"
@@ -2098,7 +2153,7 @@ class PlugBoolDragTool(object):
         x, y, _ = mc.draggerContext(CTX, q=True, dragPoint=True)
 
         if self.update_flip():
-            mc.refresh(cv=True, f=True)
+            mc.refresh(cv=True)
             return
 
         mode = self.mode_from_keys()
@@ -2109,7 +2164,7 @@ class PlugBoolDragTool(object):
             self.cache_start_values()
             self.apply_flip()
             self.duplicate_done = False
-            mc.refresh(cv=True, f=True)
+            mc.refresh(cv=True)
             return
 
         if self.mode == "move":
@@ -2119,9 +2174,11 @@ class PlugBoolDragTool(object):
         elif self.mode == "scale":
             self.scale(x)
 
-        mc.refresh(cv=True, f=True)
+        mc.refresh(cv=True)
 
     def release(self):
+
+        validate_double_click = self.is_double_click_release()
 
         # Si on vient de faire un MMB, le cutter à garder actif est le dernier duplicata,
         # pas forcément ce que Maya ou le polyBoolean ont remis en sélection.
@@ -2138,6 +2195,9 @@ class PlugBoolDragTool(object):
             # qui remet l'ancien cutter. On sélectionne donc le cutter final immédiatement,
             # puis à nouveau en evalDeferred.
             select_active_cutter(final_mesh, deferred=True)
+
+        if validate_double_click:
+            safe(lambda: mc.evalDeferred(plug_bool_validate_hotkey, lowestPriority=True))
 
     def finalize_drag(self, select_final=True, preferred_mesh=""):
 
@@ -2716,7 +2776,7 @@ class PlugBoolDragTool(object):
             x, y, _ = mc.draggerContext(CTX, q=True, dragPoint=True)
             self.place(x, y)
             select_active_cutter(self.mesh, deferred=True)
-            mc.refresh(cv=True, f=True)
+            mc.refresh(cv=True)
             return
 
         source = self.rigged_mesh()
@@ -2831,7 +2891,7 @@ class PlugBoolDragTool(object):
         # encore une évaluation différée du booléen. On verrouille donc le nouveau cutter actif.
         self.last_mmb_duplicate_cutter = self.mesh
         select_active_cutter(self.mesh, deferred=True)
-        mc.refresh(cv=True, f=True)
+        mc.refresh(cv=True)
 
 
 TOOL = PlugBoolDragTool()
@@ -3048,8 +3108,9 @@ def restart_drag_on_cutter(cutter):
 def install_validate_hotkey():
     """Installe uniquement Entrée comme raccourci de validation.
 
-    La touche V n'est plus modifiée : le draggerContext fournit aussi une
-    validation native par double-clic via doubleClickCommand.
+    La touche V n'est plus modifiée. Entrée valide le booléen ; le double-clic
+    est détecté dans release() car Maya 2024+ ne supporte pas doubleClickCommand
+    sur draggerContext.
     """
     if TOOL.validate_hotkey_installed:
         return

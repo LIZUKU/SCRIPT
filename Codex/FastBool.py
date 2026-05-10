@@ -737,6 +737,24 @@ def sync_cutter(node=None):
     return c
 
 
+def is_current_active_cutter(cutter):
+    cutter = transform_from_node(cutter)
+    active = transform_from_node(boolean_cutter_mesh)
+    return bool(cutter and active and cutter == active and exists(cutter))
+
+
+def deferred_select_active_cutter(cutter):
+    """Sélection différée protégée contre les anciens callbacks Maya.
+
+    Maya peut encore exécuter une sélection différée créée pour le cutter précédent
+    après qu'un nouveau plug a été ajouté. Dans ce cas, on ignore l'ancien cutter au
+    lieu de voler la sélection du cutter actif courant.
+    """
+    cutter = transform_from_node(cutter)
+    if is_current_active_cutter(cutter):
+        safe(lambda: mc.select(cutter, r=True))
+
+
 def select_active_cutter(node=None, deferred=True):
     """
     Sélectionne explicitement le cutter actif.
@@ -744,6 +762,10 @@ def select_active_cutter(node=None, deferred=True):
     Important pour le MMB : certaines commandes du booléen moderne / callbacks Maya
     resélectionnent l'ancien input après l'ajout au polyBoolean. On force donc la sélection
     du nouveau cutter immédiatement, puis une seconde fois en evalDeferred.
+
+    La sélection différée est volontairement gardée : elle ne sélectionne le cutter capturé
+    que s'il est toujours le cutter actif. Ça évite qu'un ancien callback remette le
+    premier plug en sélection après l'ajout d'un autre plug au même booléen.
     """
     cutter = sync_cutter(node or boolean_cutter_mesh)
     if not cutter or not exists(cutter):
@@ -753,7 +775,7 @@ def select_active_cutter(node=None, deferred=True):
 
     if deferred:
         safe(lambda cutter=cutter: mc.evalDeferred(
-            lambda cutter=cutter: mc.select(cutter, r=True) if exists(cutter) else None,
+            lambda cutter=cutter: deferred_select_active_cutter(cutter),
             lowestPriority=True
         ))
 

@@ -1,5 +1,3 @@
-# -*- coding: utf-8 -*-
-
 import math
 import uuid
 
@@ -15,10 +13,6 @@ except Exception:
     btUtils = None
 
 
-# ============================================================
-# CONFIG
-# ============================================================
-
 CTX = "PlugBoolDragCtx"
 TMP = "plugBoolDragTmp_"
 CUTTER_GROUP = "_boolean_cutters"
@@ -26,16 +20,8 @@ CUTTER_GROUP_PREFIX = "_boolean_cutters_fastbool"
 CUTTER_GROUP_OWNED_ATTR = "plugBoolOwnedCutterGroup"
 CUTTER_GROUP_SESSION_ATTR = "plugBoolCutterGroupSession"
 
-# Petit offset le long de la normale pour éviter que le cutter soit exactement
-# coplanaire avec la surface au moment du booléen.
 SURFACE_OUTWARD_OFFSET = 0.01
 
-# IMPORTANT :
-# Le duplicata du cutter est physiquement pré-flippé en Y au tout début
-# via scaleY = -1 + freeze transform.
-# Donc l'état booléen initial reste NON flippé :
-# 0 = subtract / différence
-# 1 = union
 DEFAULT_BOOLEAN_FLIP = False
 BOOL_UNION = 1
 BOOL_SUBTRACT = 2
@@ -58,10 +44,6 @@ DEBUG = False
 EPS = 0.000001
 
 
-# ============================================================
-# GLOBAL STATE - BOOLEAN
-# ============================================================
-
 boolean_target_mesh = ""
 boolean_cutter_mesh = ""
 boolean_result_mesh = ""
@@ -81,10 +63,6 @@ last_mmb_duplicate_cutter = ""
 active_cutter_group = ""
 active_cutter_group_session = ""
 
-
-# ============================================================
-# BASIC HELPERS
-# ============================================================
 
 def dbg(msg):
     if DEBUG:
@@ -124,10 +102,6 @@ def fp(node):
 
     found = mc.ls(node, l=True) or []
     return found[0] if found else ""
-
-
-def ln(node):
-    return fp(node)
 
 
 def parent_path(node):
@@ -200,11 +174,6 @@ def has_mesh(node):
 def is_mesh_xform(node):
     node = fp(node)
     return bool(node and not is_comp(node) and mc.nodeType(node) != "mesh" and mesh_shapes_under(node))
-
-
-def first_mesh_shape(xform):
-    shapes = mesh_shapes_under(xform)
-    return shapes[0] if shapes else ""
 
 
 def shape_parent(shape):
@@ -324,10 +293,6 @@ def mesh_fn(node):
 def distance(a, b):
     return math.sqrt(sum((a[i] - b[i]) ** 2 for i in range(3)))
 
-
-# ============================================================
-# ATTR HELPERS
-# ============================================================
 
 def add_attr(node, attr, kind="string", default=0):
     node = transform_from_node(node) or fp(node)
@@ -460,19 +425,7 @@ def get_flip(mesh):
     return safe(lambda: bool(mc.getAttr(mesh + "." + FLIP_ATTR)), DEFAULT_BOOLEAN_FLIP)
 
 
-# ============================================================
-# CLEAN MESH BEFORE BOOLEAN
-# ============================================================
-
 def prepare_clean_mesh_transform(node, label="mesh"):
-    """
-    Prépare un mesh transform avant le boolean :
-    - sort des groupes / unparent en world
-    - freeze transforms
-    - delete history
-
-    Utilisé pour le mesh de base sélectionné ET pour le cutter dupliqué.
-    """
     node = transform_from_node(node) or fp(node)
     if not node or not exists(node):
         return ""
@@ -507,14 +460,6 @@ def prepare_fresh_cutter_duplicate(node):
 
 
 def nudge_transform_for_boolean_update(node, amount=0.00001):
-    """
-    Force une micro-évaluation du booléen moderne.
-
-    Maya ne recalcule pas toujours le polyBoolean quand on change seulement
-    l'état logique, le flip du rig ou les normales. On fait donc une micro
-    translation puis retour immédiat, invisible visuellement, pour salir la
-    matrice du cutter et forcer l'update.
-    """
     node = transform_from_node(node) or fp(node)
     if not node or not exists(node):
         return ""
@@ -540,14 +485,6 @@ def nudge_transform_for_boolean_update(node, amount=0.00001):
 
 
 def reverse_mesh_normals(node, delete_history=False):
-    """
-    Reverse les normales du mesh.
-
-    Important :
-    - Pour le pré-flip initial, on peut delete history après.
-    - Pendant un booléen live, on évite de delete history sur le cutter connecté au polyBoolean,
-      pour ne pas risquer de casser les connexions du booléen moderne.
-    """
     node = transform_from_node(node) or fp(node)
     if not node:
         return ""
@@ -569,16 +506,6 @@ def reverse_mesh_normals(node, delete_history=False):
 
 
 def reverse_initial_cutter_normals_once(cutter):
-    """
-    Reverse les normales du cutter une seule fois, juste avant la création
-    du tout premier booléen.
-
-    Important :
-    - Ne se fait pas au début du drag.
-    - Ne se fait pas à chaque update.
-    - Ne se fait pas sur un cutter déjà connecté à un polyBoolean.
-    - Comme le cutter n'est pas encore connecté au booléen, on peut delete history.
-    """
     cutter = transform_from_node(cutter) or fp(cutter)
     if not cutter or not exists(cutter):
         return ""
@@ -591,53 +518,6 @@ def reverse_initial_cutter_normals_once(cutter):
 
     return transform_from_node(cutter) or fp(cutter) or cutter
 
-def preflip_cutter_geometry_y(node):
-    """
-    Retourne physiquement le cutter dupliqué en Y avant le drag.
-
-    But :
-    - Le plug pénètre dans la surface dès le premier placement.
-    - L'état booléen initial reste 0 = subtract.
-    - Le flip interactif Shift+Ctrl reste disponible ensuite pour passer en union.
-
-    Important :
-    On garde le scaleY=-1 + freeze, mais on reverse ensuite les normales.
-    Sans reverse normals, le mirror physique peut laisser le volume avec un winding / des normales
-    inversés, ce qui perturbe le booléen moderne.
-
-    On tag aussi le cutter avec PREFLIP_Y_ATTR, parce qu'après ce pré-flip physique,
-    le bon point de contact pour le snapping n'est plus minY mais maxY.
-    """
-    node = transform_from_node(node) or fp(node)
-    if not node:
-        return ""
-
-    try:
-        mc.setAttr(node + ".scaleY", -1)
-        mc.makeIdentity(node, apply=True, translate=False, rotate=False, scale=True, normal=False)
-        mc.delete(node, ch=True)
-    except Exception:
-        try:
-            mc.select(node, r=True)
-            mc.setAttr(node + ".scaleY", -1)
-            mel.eval("FreezeTransformations;")
-            mel.eval("DeleteHistory;")
-        except Exception as e:
-            mc.warning("Could not pre-flip duplicated cutter on Y: {0}".format(e))
-
-    node = transform_from_node(node) or fp(node) or node
-
-    # IMPORTANT : après un mirror par scale négatif, on reverse les normales.
-    # C'est ce qui évite que le booléen moderne interprète mal le volume du cutter.
-    reverse_mesh_normals(node, delete_history=True)
-
-    set_bool_attr(node, PREFLIP_Y_ATTR, True)
-    return node
-
-
-# ============================================================
-# VISIBILITY / SURFACE FILTERING
-# ============================================================
 
 def mesh_is_valid_surface(shape):
     shape = fp(shape)
@@ -710,11 +590,6 @@ def set_visible(obj):
         if mc.objExists(n + ".template"):
             safe(lambda n=n: mc.setAttr(n + ".template", 0))
 
-        # IMPORTANT :
-        # Ne jamais forcer intermediateObject à 0 ici.
-        # Certains booléens modernes Maya gardent des shapes intermédiaires
-        # qui doivent rester invisibles.
-
 
 def show_live_objects():
     result = boolean_result_mesh or result_from_bool_node(last_boolean_node)
@@ -723,10 +598,6 @@ def show_live_objects():
         if obj:
             set_visible(obj)
 
-
-# ============================================================
-# BOOLEAN HELPERS
-# ============================================================
 
 def cutter_group_session_token():
     return uuid.uuid4().hex[:8]
@@ -774,10 +645,6 @@ def ensure_group():
     if not active_cutter_group_session:
         active_cutter_group_session = cutter_group_session_token()
 
-    # On crée volontairement un groupe neuf et taggé au lieu de réutiliser
-    # _boolean_cutters. Après des undo/redo Maya, un ancien transform vide peut rester
-    # dans l'outliner ; le réutiliser rend le contexte ambigu. Le nom unique protège
-    # aussi les éventuels groupes utilisateur qui auraient le même ancien nom.
     group = mc.group(empty=True, name=CUTTER_GROUP_PREFIX + "#")
     active_cutter_group = tag_owned_cutter_group(group, active_cutter_group_session)
     return active_cutter_group
@@ -801,29 +668,12 @@ def is_current_active_cutter(cutter):
 
 
 def deferred_select_active_cutter(cutter):
-    """Sélection différée protégée contre les anciens callbacks Maya.
-
-    Maya peut encore exécuter une sélection différée créée pour le cutter précédent
-    après qu'un nouveau plug a été ajouté. Dans ce cas, on ignore l'ancien cutter au
-    lieu de voler la sélection du cutter actif courant.
-    """
     cutter = transform_from_node(cutter)
     if is_current_active_cutter(cutter):
         safe(lambda: mc.select(cutter, r=True))
 
 
 def select_active_cutter(node=None, deferred=True):
-    """
-    Sélectionne explicitement le cutter actif.
-
-    Important pour le MMB : certaines commandes du booléen moderne / callbacks Maya
-    resélectionnent l'ancien input après l'ajout au polyBoolean. On force donc la sélection
-    du nouveau cutter immédiatement, puis une seconde fois en evalDeferred.
-
-    La sélection différée est volontairement gardée : elle ne sélectionne le cutter capturé
-    que s'il est toujours le cutter actif. Ça évite qu'un ancien callback remette le
-    premier plug en sélection après l'ajout d'un autre plug au même booléen.
-    """
     cutter = sync_cutter(node or boolean_cutter_mesh)
     if not cutter or not exists(cutter):
         return ""
@@ -897,8 +747,6 @@ def store_metadata(cutter):
     set_str(cutter, "plugBoolTarget", boolean_target_mesh)
     set_int(cutter, "plugBoolInputIndex", last_bool_input_index)
 
-    # 0 = subtract / différence
-    # 1 = union
     set_int(cutter, "plugBoolFlipState", 1 if boolean_flip_state else 0)
     set_flip(cutter, bool(orientation_flip_enabled))
 
@@ -947,15 +795,10 @@ def reset_state(keep_cutter=False, keep_target=False, keep_boolean=False):
 
 
 def current_op():
-    # 0 = subtract
-    # 1 = union
     return BOOL_UNION if bool(boolean_flip_state) else BOOL_SUBTRACT
 
 
 def current_offset_sign():
-    # Le duplicata est déjà physiquement pré-flippé en Y.
-    # Par défaut, on garde un léger offset dans le sens de la normale.
-    # Quand l'utilisateur flippe en union, on inverse l'offset pour rester cohérent.
     return -1.0 if bool(boolean_flip_state) else 1.0
 
 
@@ -1061,12 +904,6 @@ def find_live_bool_nodes_for_cutter(cutter):
 
 
 def transforms_connected_to_bool_node(node):
-    """Retourne les transforms mesh branchés en entrée du polyBoolean.
-
-    Les booléens modernes Maya gardent les cutters comme meshes d'entrée du node.
-    Cette fonction sert uniquement à retrouver les vrais transforms encore connectés,
-    sans se fier à la sélection Maya qui peut être stale après un restart du script.
-    """
     node = node if node and mc.objExists(node) else ""
     if not node:
         return []
@@ -1108,12 +945,6 @@ def is_boolean_cutter_candidate(node, bool_node=""):
 
 
 def cutters_for_bool_node(node, include_active=True):
-    """Liste tous les cutters live d'un polyBoolean, pas seulement le dernier actif.
-
-    C'est important au bake : avec les duplications MMB, plusieurs cutters peuvent
-    rester branchés au même polyBoolean. Si on supprime uniquement boolean_cutter_mesh,
-    Maya laisse les anciens cutters dans la scène après V.
-    """
     node = node if node and mc.objExists(node) else ""
     if not node:
         return []
@@ -1132,13 +963,6 @@ def cutters_for_bool_node(node, include_active=True):
 
 
 def resolve_live_boolean_context(cutter=None):
-    """Retrouve le polyBoolean live même après relance du script / sélection stale.
-
-    Le hotkey V ne doit pas dépendre uniquement de bool_nodes_from_cutter(cutter).
-    Quand Maya resélectionne un ancien input ou quand les globals viennent d'être
-    réinitialisés par une relance du fichier, les métadonnées / le result peuvent
-    quand même permettre de retrouver le node live à baker.
-    """
     global last_boolean_node, boolean_result_mesh, last_bool_input_index
 
     cutter = transform_from_node(cutter or boolean_cutter_mesh)
@@ -1229,8 +1053,6 @@ def repair_bool_operation_array(node):
     if not values:
         values = [BOOL_UNION]
 
-    # input[0] is always the base/result mesh. Every cutter lives on input[1+]
-    # and gets its own operation through set_bool_operation_for_cutter().
     values[0] = BOOL_UNION
     return set_operation_values(node, values)
 
@@ -1345,10 +1167,6 @@ def force_boolean_operation_now(cutter=None):
 
 
 def run_modern_boolean_command(op):
-    """
-    Lance le booléen moderne Maya 2024+ / 2027 avec le même chemin que l'UI.
-    op : BOOL_SUBTRACT ou BOOL_UNION.
-    """
     if op == BOOL_SUBTRACT:
         mel.eval("PolygonBooleanDifference;")
     elif op == BOOL_UNION:
@@ -1358,15 +1176,6 @@ def run_modern_boolean_command(op):
 
 
 def add_cutter_to_live_boolean(cutter, op=None, select_after=True):
-    """
-    Ajoute un cutter au polyBoolean live existant sans créer une chaîne de nouveaux booléens.
-
-    Important :
-    - On garde last_boolean_node / boolean_result_mesh entre les duplications MMB.
-    - On édite directement le node polyBoolean existant avec polyBooleanCmd(edit=True, addMesh=...).
-    - On ne sélectionne pas result + cutter pour relancer PolygonBooleanDifference/Union,
-      sinon Maya crée un nouveau polyBoolean en cascade.
-    """
     global boolean_cutter_mesh, boolean_result_mesh, last_boolean_node, last_bool_input_index
     global boolean_flip_state, orientation_flip_enabled
 
@@ -1393,9 +1202,6 @@ def add_cutter_to_live_boolean(cutter, op=None, select_after=True):
             tune_bool_node(node)
             repair_bool_operation_array(node)
 
-            # IMPORTANT : ne jamais ajouter deux fois le même cutter au même polyBoolean.
-            # L'AE du booléen affiche sinon des doublons, et Maya garde parfois des entrées
-            # courtes/stale qui provoquent : "No object matches name".
             existing_indices = cutter_input_indices(node, cutter)
             if existing_indices:
                 last_bool_input_index = existing_indices[0]
@@ -1407,8 +1213,6 @@ def add_cutter_to_live_boolean(cutter, op=None, select_after=True):
                     select_active_cutter(cutter, deferred=True)
                 return boolean_result_mesh or result_from_bool_node(node)
 
-            # Un cutter ajouté plus tard doit recevoir le même reverse normals initial
-            # que le premier cutter, avec un attribut qui évite le double reverse.
             cutter = reverse_initial_cutter_normals_once(cutter)
             cutter = sync_cutter(cutter)
             if not cutter:
@@ -1417,7 +1221,6 @@ def add_cutter_to_live_boolean(cutter, op=None, select_after=True):
 
             set_boolean_cutter_wire_display(cutter)
 
-            # Ajout direct du cutter comme input du même polyBoolean.
             mc.polyBooleanCmd(node, edit=True, addMesh=cutter, operation=op)
 
             last_boolean_node = node
@@ -1446,9 +1249,6 @@ def add_cutter_to_live_boolean(cutter, op=None, select_after=True):
             mc.warning("Could not add cutter to existing polyBoolean node: {0}".format(e))
             return None
 
-    # Aucun polyBoolean live connu : on crée le premier booléen normalement.
-    # Important pour le premier MMB : si on est en train de finaliser l'ancien cutter,
-    # il ne doit pas reprendre la sélection après la création initiale du booléen.
     return create_boolean(restart=False, select_after=select_after)
 
 
@@ -1541,11 +1341,6 @@ def create_boolean(restart=True, select_after=True):
 
     safe(lambda: mc.loadPlugin("polyBoolean") if not mc.pluginInfo("polyBoolean", q=True, loaded=True) else None)
 
-    # IMPORTANT :
-    # Premier vrai booléen seulement.
-    # Les plugs étant ouverts, on reverse les normales du cutter une seule fois
-    # juste avant de créer le polyBoolean.
-    # On ne fait pas de scale -1 ici.
     cutter = reverse_initial_cutter_normals_once(cutter)
     cutter = sync_cutter(cutter)
 
@@ -1554,17 +1349,8 @@ def create_boolean(restart=True, select_after=True):
         return None
 
     try:
-        # Même ordre que l'utilisation manuelle Maya :
-        # A = target / mesh cible
-        # B = cutter
-        # Difference = A - B
         mc.select(target, cutter, r=True)
 
-        # On utilise les runtime commands Maya pour coller au comportement UI Maya 2024+ / 2027.
-        # Dans le Script Editor, Maya loggue :
-        # PolygonBooleanDifference;
-        # polyPerformBooleanAction 2 o 0;
-        # import maya.plugin.polyBoolean.booltoolUtils as btUtils; btUtils.createBoolTool(2);
         if current_op() == BOOL_SUBTRACT:
             mel.eval("PolygonBooleanDifference;")
         elif current_op() == BOOL_UNION:
@@ -1612,10 +1398,6 @@ def create_boolean(restart=True, select_after=True):
     return boolean_result_mesh
 
 
-
-
-
-
 def bake_boolean_result():
     global drag_session_active
 
@@ -1644,8 +1426,6 @@ def bake_boolean_result():
         mc.warning("Bake boolean failed: {0}".format(e))
         return False
 
-    # Après le bake, tous les cutters branchés au polyBoolean doivent disparaître.
-    # Sinon une validation V après plusieurs MMB ne supprimait que le dernier cutter actif.
     safe_delete(sorted(set(cutters), key=lambda n: n.count("|"), reverse=True))
 
     cleanup_empty_groups()
@@ -1657,15 +1437,7 @@ def bake_boolean_result():
     return True
 
 
-# ============================================================
-# DUPLICATE / SOURCE PREP
-# ============================================================
-
 def cutter_source_base_name(node):
-    """
-    Nettoie un nom de cutter pour éviter les noms imbriqués :
-    pPlane18_boolCutter1_boolCutter2 -> pPlane18
-    """
     name = sn(node)
 
     while "_boolCutter" in name:
@@ -1687,17 +1459,6 @@ def is_existing_boolean_cutter(node):
 
 
 def pick_valid_plug_from_selection(selection, prefer_existing_cutter=True):
-    """
-    Retourne le bon mesh transform utilisable dans une sélection Maya.
-
-    Important : l'Attribute Editor du polyBoolean peut sélectionner automatiquement :
-    - le node polyBoolean lui-même
-    - le mesh résultat
-    - plusieurs cutters, souvent dans l'ordre ancien -> récent
-
-    Pour continuer un drag live, on préfère donc le dernier cutter connecté sélectionné.
-    Ça évite de repartir de pPlane18_boolCutter1 quand le cutter actif est pPlane18_boolCutter3.
-    """
     valid_meshes = []
     existing_cutters = []
 
@@ -1772,9 +1533,6 @@ def duplicate_selected_plug(selection):
         mc.warning("Select the plug transform, not a component.")
         return []
 
-    # IMPORTANT :
-    # Le mesh de base sélectionné est sorti des groupes / unparent world,
-    # freeze transforms, delete history avant duplication.
     src = prepare_clean_mesh_transform(src, "base mesh")
     if not src or not is_mesh_xform(src):
         mc.warning("Could not prepare base mesh before duplication.")
@@ -1784,22 +1542,11 @@ def duplicate_selected_plug(selection):
     if not dup:
         return []
 
-    # IMPORTANT :
-    # Le cutter dupliqué est lui aussi sorti des groupes / unparent world,
-    # freeze transforms, delete history avant le drag.
     clean_dup = prepare_fresh_cutter_duplicate(dup[0])
     if not clean_dup:
         mc.warning("Could not prepare duplicated cutter.")
         return []
 
-    # IMPORTANT :
-    # On ne pré-flip plus physiquement le cutter en Y ici.
-    # Avant, le script faisait :
-    # clean_dup = preflip_cutter_geometry_y(clean_dup)
-    #
-    # Maintenant le cutter garde son orientation d'origine.
-    # On force aussi PREFLIP_Y_ATTR à False pour que bottom_pivot()
-    # utilise le contact normal minY, et non maxY.
     set_bool_attr(clean_dup, PREFLIP_Y_ATTR, False)
 
     boolean_cutter_mesh = sync_cutter(clean_dup)
@@ -1813,11 +1560,6 @@ def duplicate_selected_plug(selection):
     mc.select(boolean_cutter_mesh, r=True)
     return [boolean_cutter_mesh]
 
-
-
-# ============================================================
-# DRAG TOOL - STABLE CLICK2D LOGIC ADAPTED TO BOOLEAN
-# ============================================================
 
 class PlugBoolDragTool(object):
     def __init__(self):
@@ -2018,9 +1760,6 @@ class PlugBoolDragTool(object):
             self.duplicate()
             return
 
-        # IMPORTANT : on réarme le MMB dès que l'utilisateur n'est plus en drag MMB.
-        # Sinon self.duplicate_done reste True après le premier MMB, et le MMB suivant
-        # sert juste à replacer au lieu de dupliquer, ce qui oblige à cliquer deux fois.
         self.duplicate_done = False
 
         x, y, _ = mc.draggerContext(CTX, q=True, dragPoint=True)
@@ -2052,8 +1791,6 @@ class PlugBoolDragTool(object):
     def release(self):
         global last_mmb_duplicate_cutter
 
-        # Si on vient de faire un MMB, le cutter à garder actif est le dernier duplicata,
-        # pas forcément ce que Maya ou le polyBoolean ont remis en sélection.
         preferred = transform_from_node(last_mmb_duplicate_cutter)
 
         final_mesh = self.finalize_drag(select_final=False, preferred_mesh=preferred)
@@ -2063,9 +1800,6 @@ class PlugBoolDragTool(object):
         last_mmb_duplicate_cutter = ""
 
         if final_mesh and exists(final_mesh):
-            # Après un MMB, Maya / polyBoolean peut encore avoir une sélection différée
-            # qui remet l'ancien cutter. On sélectionne donc le cutter final immédiatement,
-            # puis à nouveau en evalDeferred.
             select_active_cutter(final_mesh, deferred=True)
 
     def finalize_drag(self, select_final=True, preferred_mesh=""):
@@ -2209,19 +1943,6 @@ class PlugBoolDragTool(object):
 
 
     def bottom_pivot(self, mesh):
-        """
-        Point de contact utilisé pour le snapping.
-
-        Logique :
-        - On cherche les border edges du mesh.
-        - On récupère leurs vertices en espace local.
-        - On groupe ces points par hauteur Y.
-        - On choisit la hauteur Y qui correspond au border le plus large en X/Z.
-        - On place le pivot du cutter au centre de ce border, à cette hauteur.
-
-        C'est adapté aux plugs avec une grande plaque plate ouverte :
-        la hauteur du border de la plaque devient le point de contact.
-        """
         mesh = transform_from_node(mesh) or fp(mesh)
         if not mesh or not exists(mesh):
             return [0, 0, 0]
@@ -2500,10 +2221,6 @@ class PlugBoolDragTool(object):
             self.cache_start_values()
             self.hit_face = ""
 
-            # IMPORTANT :
-            # Quand on flippe, le signe de SURFACE_OUTWARD_OFFSET change.
-            # On replace donc immédiatement le picker au même point souris,
-            # sans toucher à la logique des normals.
             try:
                 x, y, _ = mc.draggerContext(CTX, q=True, dragPoint=True)
                 self.place(x, y)
@@ -2512,7 +2229,6 @@ class PlugBoolDragTool(object):
 
             cutter = self.rigged_mesh() or self.mesh
             if cutter:
-                # On garde exactement la logique existante des normals.
                 reverse_mesh_normals(cutter, delete_history=False)
                 nudge_transform_for_boolean_update(cutter, amount=0.00001)
 
@@ -2530,10 +2246,6 @@ class PlugBoolDragTool(object):
             mc.setAttr(self.flip + ".rotate", 0, 0, 0)
             mc.setAttr(self.flip + ".scaleX", 1)
 
-            # Logique stable du premier script :
-            # Le flip interactif passe par le groupe flip, pas par le cutter.
-            # Comme le duplicata a été physiquement pré-flippé avant le drag,
-            # l'état initial reste stable : flip_on False / booléen subtract.
             mc.setAttr(self.flip + ".scaleY", -1 if self.flip_on != self.baked_flip_on else 1)
             mc.setAttr(self.flip + ".scaleZ", 1)
 
@@ -2616,18 +2328,12 @@ class PlugBoolDragTool(object):
         if not duplicate:
             return
 
-        # IMPORTANT : on tagge le nouveau duplicata tout de suite.
-        # Pendant le MMB, l'ancien cutter est finalisé puis ajouté au polyBoolean, ce qui peut
-        # changer la sélection et parfois rendre le path court ambigu. Ce token permet de retrouver
-        # précisément le nouveau cutter après les opérations Maya.
         duplicate_token = "{0}_{1}".format(sn(duplicate), safe(lambda: mc.timerX(), 0.0))
         set_str(duplicate, ACTIVE_DUP_ATTR, duplicate_token)
 
         try:
             current_twist = self.current_twist()
 
-            # Finalise l'ancien cutter exactement comme le script stable :
-            # on le sort du rig sans casser sa world matrix.
             old_cutter = parent_keep_world(source, self.old_parent)
 
             if old_cutter:
@@ -2641,17 +2347,10 @@ class PlugBoolDragTool(object):
                 boolean_cutter_mesh = sync_cutter(old_cutter)
                 store_metadata(old_cutter)
 
-                # MMB : l'ancien cutter est immédiatement ajouté au booléen live.
-                # Cette commande peut resélectionner old_cutter, donc on ne se fie plus
-                # à la sélection Maya pour identifier le nouveau cutter ensuite.
                 add_cutter_to_live_boolean(old_cutter, cutter_op, select_after=False)
 
-                # On repart proprement pour le nouveau cutter,
-                # mais on garde le target ET le résultat booléen afin de continuer
-                # à ajouter les cutters suivants au même booléen live.
                 reset_state(keep_cutter=False, keep_target=True, keep_boolean=True)
 
-            # Récupération robuste du nouveau duplicata après les opérations sur l'ancien cutter.
             duplicate = find_transform_by_string_attr(ACTIVE_DUP_ATTR, duplicate_token) or transform_from_node(duplicate)
             if not duplicate:
                 return
@@ -2682,10 +2381,6 @@ class PlugBoolDragTool(object):
         boolean_cutter_mesh = sync_cutter(self.mesh)
         store_metadata(self.mesh)
 
-        # IMPORTANT : le nouveau cutter devient immédiatement un input du booléen live.
-        # Avant, il n'était ajouté qu'au MMB suivant, donc il y avait toujours un cutter de retard.
-        # On l'ajoute maintenant tout de suite, puis on continue à le dragger : ses transforms
-        # restent connectés au polyBoolean et doivent updater le résultat en live.
         if last_boolean_node and mc.objExists(last_boolean_node):
             add_cutter_to_live_boolean(self.mesh, BOOL_UNION if self.flip_on else BOOL_SUBTRACT)
             self.mesh = find_transform_by_string_attr(ACTIVE_DUP_ATTR, duplicate_token) or transform_from_node(self.mesh)
@@ -2710,8 +2405,6 @@ class PlugBoolDragTool(object):
         x, y, _ = mc.draggerContext(CTX, q=True, dragPoint=True)
         self.place(x, y)
 
-        # Dernier rappel après le placement : place() ne sélectionne rien, mais Maya peut avoir
-        # encore une évaluation différée du booléen. On verrouille donc le nouveau cutter actif.
         last_mmb_duplicate_cutter = self.mesh
         select_active_cutter(self.mesh, deferred=True)
         mc.refresh(cv=True, f=True)
@@ -2719,10 +2412,6 @@ class PlugBoolDragTool(object):
 
 TOOL = PlugBoolDragTool()
 
-
-# ============================================================
-# TARGET / RAYCAST INTEGRATION
-# ============================================================
 
 def resolve_boolean_from_hit_shape(shape):
     global last_boolean_node, boolean_result_mesh, boolean_target_mesh
@@ -2775,7 +2464,6 @@ def remember_target(shape):
     if result and shape_under(shape, result):
         return
 
-    # Une fois un booléen existant lancé, on garde le target original.
     if last_boolean_node and boolean_target_mesh:
         return
 
@@ -2783,10 +2471,6 @@ def remember_target(shape):
     if parent:
         boolean_target_mesh = parent
 
-
-# ============================================================
-# TOOL LIFECYCLE
-# ============================================================
 
 def clear_temp():
     TOOL.clear()
@@ -2803,8 +2487,6 @@ def cleanup_empty_groups():
         if g and g not in groups:
             groups.append(g)
 
-    # Nettoyage sûr des groupes FastBool taggés. On ne supprime que les groupes vides :
-    # si un undo Maya a laissé des cutters dedans, ils restent visibles et récupérables.
     for g in mc.ls(CUTTER_GROUP_PREFIX + "*", type="transform", l=True) or []:
         g = fp(g)
         if g and g not in groups and is_cutter_group_node(g):
@@ -2891,10 +2573,6 @@ def on_tool_changed():
         TOOL.finalize_drag(select_final=False)
         clear_temp()
 
-        # IMPORTANT : si l'utilisateur appuie sur W / Move Tool,
-        # Maya passe en moveSuperContext. Dans ce cas c'est une sortie volontaire
-        # du drag pour ajuster le cutter à la main, donc on ne doit PAS relancer
-        # le drag après création/update du booléen.
         if new_ctx == "moveSuperContext":
             create_boolean(restart=False)
             cutter = sync_cutter()
@@ -2932,10 +2610,6 @@ def _deferred_restart_drag():
     start_drag()
     suppress_next_tool_changed = False
 
-
-# ============================================================
-# VALIDATE / BAKE HOTKEY
-# ============================================================
 
 def install_validate_hotkey():
     global validate_hotkey_installed
@@ -2991,10 +2665,6 @@ def plug_bool_validate_hotkey():
     live_node = resolve_live_boolean_context(cutter)
     has_live_boolean = bool(live_node)
 
-    # IMPORTANT :
-    # Si aucun booléen live n'existe encore, V ne doit PAS baker directement.
-    # Ça évite de valider par accident quand tu voulais d'abord faire le premier Q.
-    # Dans ce cas, V se comporte comme Q : il crée le booléen live et relance le drag.
     if not has_live_boolean:
         if not create_boolean(restart=True):
             mc.warning("Could not create first boolean. Validate cancelled.")
@@ -3012,9 +2682,6 @@ def plug_bool_validate_hotkey():
         drag_session_active = False
         return
 
-    # Si un booléen live existe déjà, là V valide/bake vraiment.
-    # Si l'opération ne peut pas être réécrite (sélection Maya stale / cutter déjà retiré),
-    # on bake quand même le polyBoolean retrouvé au lieu de relancer un second booléen.
     if not update_current_boolean_operation():
         live_node = resolve_live_boolean_context(cutter)
         if not live_node:
@@ -3057,13 +2724,6 @@ def plug_bool_stop():
 
 
 def plug_bool_emergency_restore():
-    """
-    Fonction de secours à lancer si Maya reste bloqué avec le context custom,
-    le hotkey V remplacé, ou des groupes temporaires dans la scène.
-
-    Usage manuel possible dans le Script Editor :
-    plug_bool_emergency_restore()
-    """
     global drag_session_active, suppress_next_tool_changed
     global reuse_selected_cutter_once, current_cutter_reused
 
@@ -3101,10 +2761,6 @@ def plug_bool_emergency_restore():
     mc.warning("Plug Bool emergency restore done.")
 
 
-# ============================================================
-# ENTRY POINT
-# ============================================================
-
 def smart_boolean_plug_drag():
     sel = mc.ls(sl=True, fl=True, l=True)
 
@@ -3112,7 +2768,6 @@ def smart_boolean_plug_drag():
         mc.warning("Select one plug mesh first.")
         return
 
-    # Garde le comportement edge-loop si l'utilisateur sélectionne explicitement un edge.
     first = sel[0]
     if ".e[" in first:
         mel.eval("SelectEdgeLoopSp;")

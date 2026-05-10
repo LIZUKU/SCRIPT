@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import math
+import uuid
 
 import maya.cmds as mc
 import maya.mel as mel
@@ -21,6 +22,9 @@ except Exception:
 CTX = "PlugBoolDragCtx"
 TMP = "plugBoolDragTmp_"
 CUTTER_GROUP = "_boolean_cutters"
+CUTTER_GROUP_PREFIX = "_boolean_cutters_fastbool"
+CUTTER_GROUP_OWNED_ATTR = "plugBoolOwnedCutterGroup"
+CUTTER_GROUP_SESSION_ATTR = "plugBoolCutterGroupSession"
 
 # Petit offset le long de la normale pour éviter que le cutter soit exactement
 # coplanaire avec la surface au moment du booléen.
@@ -74,6 +78,8 @@ suppress_next_tool_changed = False
 current_cutter_reused = False
 validate_hotkey_installed = False
 last_mmb_duplicate_cutter = ""
+active_cutter_group = ""
+active_cutter_group_session = ""
 
 
 # ============================================================
@@ -722,8 +728,59 @@ def show_live_objects():
 # BOOLEAN HELPERS
 # ============================================================
 
+def cutter_group_session_token():
+    return uuid.uuid4().hex[:8]
+
+
+def tag_owned_cutter_group(group, session_token):
+    group = fp(group)
+    if not group:
+        return ""
+
+    set_bool_attr(group, CUTTER_GROUP_OWNED_ATTR, True)
+    set_str(group, CUTTER_GROUP_SESSION_ATTR, session_token or "")
+    return group
+
+
+def is_owned_cutter_group(group):
+    group = fp(group)
+    return bool(group and mc.objExists(group + "." + CUTTER_GROUP_OWNED_ATTR) and get_bool_attr(group, CUTTER_GROUP_OWNED_ATTR, False))
+
+
+def is_cutter_group_node(group):
+    group = fp(group)
+    if not group:
+        return False
+
+    short = sn(group)
+    return bool(is_owned_cutter_group(group) or short == CUTTER_GROUP or short.startswith(CUTTER_GROUP_PREFIX))
+
+
+def begin_new_cutter_group_session():
+    global active_cutter_group, active_cutter_group_session
+
+    active_cutter_group = ""
+    active_cutter_group_session = cutter_group_session_token()
+    return active_cutter_group_session
+
+
 def ensure_group():
-    return fp(CUTTER_GROUP) if mc.objExists(CUTTER_GROUP) else fp(mc.group(empty=True, name=CUTTER_GROUP))
+    global active_cutter_group, active_cutter_group_session
+
+    group = fp(active_cutter_group)
+    if group and exists(group) and is_owned_cutter_group(group):
+        return group
+
+    if not active_cutter_group_session:
+        active_cutter_group_session = cutter_group_session_token()
+
+    # On crée volontairement un groupe neuf et taggé au lieu de réutiliser
+    # _boolean_cutters. Après des undo/redo Maya, un ancien transform vide peut rester
+    # dans l'outliner ; le réutiliser rend le contexte ambigu. Le nom unique protège
+    # aussi les éventuels groupes utilisateur qui auraient le même ancien nom.
+    group = mc.group(empty=True, name=CUTTER_GROUP_PREFIX + "#")
+    active_cutter_group = tag_owned_cutter_group(group, active_cutter_group_session)
+    return active_cutter_group
 
 
 def sync_cutter(node=None):
@@ -1037,7 +1094,7 @@ def is_boolean_cutter_candidate(node, bool_node=""):
         return True
 
     parent = parent_path(node)
-    if parent and fp(parent) == fp(CUTTER_GROUP):
+    if parent and is_cutter_group_node(parent):
         return True
 
     stored = get_str(node, "plugBoolNode")
@@ -1897,6 +1954,7 @@ class PlugBoolDragTool(object):
 
         if not drag_session_active:
             reset_state(False)
+            begin_new_cutter_group_session()
             orientation_flip_enabled = DEFAULT_BOOLEAN_FLIP
             boolean_flip_state = 0
 
@@ -2736,11 +2794,31 @@ def clear_temp():
 
 
 def cleanup_empty_groups():
-    for g in [CUTTER_GROUP, "instPicker", "aimLoc", "pickerAim"]:
+    global active_cutter_group, active_cutter_group_session
+
+    groups = []
+
+    for g in [active_cutter_group, CUTTER_GROUP, "instPicker", "aimLoc", "pickerAim"]:
+        g = fp(g)
+        if g and g not in groups:
+            groups.append(g)
+
+    # Nettoyage sûr des groupes FastBool taggés. On ne supprime que les groupes vides :
+    # si un undo Maya a laissé des cutters dedans, ils restent visibles et récupérables.
+    for g in mc.ls(CUTTER_GROUP_PREFIX + "*", type="transform", l=True) or []:
+        g = fp(g)
+        if g and g not in groups and is_cutter_group_node(g):
+            groups.append(g)
+
+    for g in groups:
         if mc.objExists(g):
             try:
+                is_active_group = bool(fp(active_cutter_group) == fp(g))
                 if not (mc.listRelatives(g, children=True, fullPath=True) or []):
                     mc.delete(g)
+                    if is_active_group:
+                        active_cutter_group = ""
+                        active_cutter_group_session = ""
             except Exception:
                 pass
 

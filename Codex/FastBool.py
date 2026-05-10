@@ -41,6 +41,9 @@ TWIST_ATTR = "click2dTwistY"
 PREFLIP_Y_ATTR = "plugBoolPreFlipY"
 INITIAL_NORMAL_REVERSE_ATTR = "plugBoolInitialNormalReverseDone"
 ACTIVE_DUP_ATTR = "plugBoolActiveDuplicateToken"
+LIVE_BOOL_NODE_ATTR = "plugBoolLiveNode"
+LIVE_BOOL_RESULT_ATTR = "plugBoolLiveResult"
+LIVE_BOOL_TARGET_ATTR = "plugBoolLiveTarget"
 BASE_ROT_ATTRS = ("click2dBaseRotX", "click2dBaseRotY", "click2dBaseRotZ")
 
 VALIDATE_NAME_CMD = "PlugBoolValidateNameCommand"
@@ -62,7 +65,7 @@ last_boolean_node = ""
 last_bool_input_index = 1
 
 orientation_flip_enabled = DEFAULT_BOOLEAN_FLIP
-boolean_flip_state = 1
+boolean_flip_state = 0
 
 tool_job = None
 drag_session_active = False
@@ -791,6 +794,20 @@ def group_cutter(cutter):
     return sync_cutter(cutter)
 
 
+def store_live_result_metadata():
+    result = transform_from_node(boolean_result_mesh or result_from_bool_node(last_boolean_node))
+    if not result:
+        return
+
+    if last_boolean_node and mc.objExists(last_boolean_node):
+        set_str(result, LIVE_BOOL_NODE_ATTR, last_boolean_node)
+
+    set_str(result, LIVE_BOOL_RESULT_ATTR, result)
+
+    if boolean_target_mesh:
+        set_str(result, LIVE_BOOL_TARGET_ATTR, boolean_target_mesh)
+
+
 def store_metadata(cutter):
     cutter = transform_from_node(cutter)
     if not cutter:
@@ -805,6 +822,9 @@ def store_metadata(cutter):
     # 1 = union
     set_int(cutter, "plugBoolFlipState", 1 if boolean_flip_state else 0)
     set_flip(cutter, bool(orientation_flip_enabled))
+
+    store_live_result_metadata()
+    set_boolean_cutter_wire_display(cutter)
 
 
 def load_metadata(cutter):
@@ -825,6 +845,7 @@ def load_metadata(cutter):
 
     orientation_flip_enabled = bool(boolean_flip_state)
     set_flip(cutter, orientation_flip_enabled)
+    set_boolean_cutter_wire_display(cutter)
 
 
 def reset_state(keep_cutter=False, keep_target=False, keep_boolean=False):
@@ -909,6 +930,10 @@ def cutter_input_indices(node, cutter):
                     found.append(idx)
 
     return found
+
+
+def cutter_is_really_connected(bool_node, cutter):
+    return bool(cutter_input_indices(bool_node, cutter))
 
 
 def bool_nodes_from_cutter(cutter):
@@ -1123,8 +1148,11 @@ def repair_bool_operation_array(node):
     values = operation_values(node)
 
     if not values:
-        values = [BOOL_SUBTRACT, BOOL_SUBTRACT]
+        values = [BOOL_UNION]
 
+    # input[0] is always the base/result mesh. Every cutter lives on input[1+]
+    # and gets its own operation through set_bool_operation_for_cutter().
+    values[0] = BOOL_UNION
     return set_operation_values(node, values)
 
 
@@ -1146,17 +1174,19 @@ def set_bool_operation_for_cutter(node, cutter, op):
     values = operation_values(node)
 
     if not values:
-        values = [BOOL_SUBTRACT, BOOL_SUBTRACT]
+        values = [BOOL_UNION]
 
-    needed = max(indices)
+    needed = max(indices + [0])
     while len(values) <= needed:
         values.append(BOOL_SUBTRACT)
 
-    for idx in indices:
-        values[0] = int(op)
-        values[idx] = int(op)
+    values[0] = BOOL_UNION
 
-        if idx > 0:
+    for idx in indices:
+        if idx == 0:
+            values[idx] = BOOL_UNION
+        else:
+            values[idx] = int(op)
             last_bool_input_index = idx
 
     ok = set_operation_values(node, values)
@@ -1180,7 +1210,7 @@ def update_current_boolean_operation():
     if not cutter:
         return False
 
-    nodes = bool_nodes_from_cutter(cutter)
+    nodes = [n for n in bool_nodes_from_cutter(cutter) if cutter_is_really_connected(n, cutter)]
     if not nodes:
         node = resolve_live_boolean_context(cutter)
         nodes = [node] if node else []
@@ -1192,6 +1222,7 @@ def update_current_boolean_operation():
 
     for n in nodes:
         tune_bool_node(n)
+        repair_bool_operation_array(n)
 
         if set_bool_operation_for_cutter(n, cutter, current_op()):
             last_boolean_node = n
@@ -1281,6 +1312,7 @@ def add_cutter_to_live_boolean(cutter, op=None, select_after=True):
     if node and mc.objExists(node):
         try:
             tune_bool_node(node)
+            repair_bool_operation_array(node)
 
             # IMPORTANT : ne jamais ajouter deux fois le même cutter au même polyBoolean.
             # L'AE du booléen affiche sinon des doublons, et Maya garde parfois des entrées
@@ -1296,10 +1328,21 @@ def add_cutter_to_live_boolean(cutter, op=None, select_after=True):
                     select_active_cutter(cutter, deferred=True)
                 return boolean_result_mesh or result_from_bool_node(node)
 
+            # Un cutter ajouté plus tard doit recevoir le même reverse normals initial
+            # que le premier cutter, avec un attribut qui évite le double reverse.
+            cutter = reverse_initial_cutter_normals_once(cutter)
+            cutter = sync_cutter(cutter)
+            if not cutter:
+                mc.warning("Could not prepare cutter normals before addMesh.")
+                return None
+
+            set_boolean_cutter_wire_display(cutter)
+
             # Ajout direct du cutter comme input du même polyBoolean.
             mc.polyBooleanCmd(node, edit=True, addMesh=cutter, operation=op)
 
             last_boolean_node = node
+            repair_bool_operation_array(node)
             result = transform_from_node(boolean_result_mesh or result_from_bool_node(node))
             if result:
                 boolean_result_mesh = result
@@ -1313,6 +1356,7 @@ def add_cutter_to_live_boolean(cutter, op=None, select_after=True):
                     safe(lambda: mc.setAttr(node + ".newInputOperation", int(op)))
 
             store_metadata(cutter)
+            store_live_result_metadata()
             show_live_objects()
             nudge_transform_for_boolean_update(cutter, amount=0.00001)
             if select_after:
@@ -1329,6 +1373,28 @@ def add_cutter_to_live_boolean(cutter, op=None, select_after=True):
     return create_boolean(restart=False, select_after=select_after)
 
 
+def _find_live_bool_node_in_scene():
+    candidates = []
+
+    for node in [last_boolean_node]:
+        if node and mc.objExists(node) and node not in candidates:
+            candidates.append(node)
+
+    for result in [boolean_result_mesh, boolean_target_mesh]:
+        result = transform_from_node(result)
+        for node in bool_nodes(result) if result else []:
+            if node not in candidates:
+                candidates.append(node)
+
+    cutter = transform_from_node(boolean_cutter_mesh)
+    if cutter and exists(cutter):
+        for node in bool_nodes_from_cutter(cutter):
+            if node not in candidates:
+                candidates.append(node)
+
+    return candidates
+
+
 def create_boolean(restart=True, select_after=True):
     global boolean_result_mesh, last_boolean_node, last_bool_input_index
     global boolean_cutter_mesh
@@ -1338,7 +1404,7 @@ def create_boolean(restart=True, select_after=True):
         mc.warning("No boolean cutter found.")
         return None
 
-    existing_nodes = bool_nodes_from_cutter(cutter)
+    existing_nodes = [n for n in bool_nodes_from_cutter(cutter) if cutter_is_really_connected(n, cutter)]
     if existing_nodes:
         last_boolean_node = existing_nodes[0]
         update_current_boolean_operation()
@@ -1350,9 +1416,40 @@ def create_boolean(restart=True, select_after=True):
 
         return boolean_result_mesh or cutter
 
+    live_candidates = _find_live_bool_node_in_scene()
+    if live_candidates:
+        live_node = live_candidates[0]
+        last_boolean_node = live_node
+        live_result = transform_from_node(result_from_bool_node(live_node))
+        if live_result and exists(live_result):
+            boolean_result_mesh = live_result
+
+        result = add_cutter_to_live_boolean(cutter, current_op(), select_after=not restart)
+        if result:
+            if restart:
+                restart_drag_on_cutter(group_cutter(cutter))
+            return result
+
+        mc.warning("Live polyBoolean found, but addMesh failed. New boolean creation blocked to avoid cascade.")
+        return None
+
     target = transform_from_node(boolean_target_mesh)
     if not target:
         mc.warning("No boolean target detected.")
+        return None
+
+    target_bool_nodes = bool_nodes(target)
+    if target_bool_nodes:
+        last_boolean_node = target_bool_nodes[0]
+        boolean_result_mesh = target
+
+        result = add_cutter_to_live_boolean(cutter, current_op(), select_after=not restart)
+        if result:
+            if restart:
+                restart_drag_on_cutter(group_cutter(cutter))
+            return result
+
+        mc.warning("Target is already a boolean result, but addMesh failed. New boolean creation blocked to avoid cascade.")
         return None
 
     if target == cutter:
@@ -1417,10 +1514,13 @@ def create_boolean(restart=True, select_after=True):
     if nodes:
         last_boolean_node = nodes[0]
         tune_bool_node(last_boolean_node)
+        repair_bool_operation_array(last_boolean_node)
 
         indices = cutter_input_indices(last_boolean_node, cutter)
         last_bool_input_index = indices[0] if indices else 1
+        set_bool_operation_for_cutter(last_boolean_node, cutter, current_op())
         store_metadata(cutter)
+        store_live_result_metadata()
 
     show_live_objects()
 
@@ -2318,6 +2418,7 @@ class PlugBoolDragTool(object):
 
             self.apply_flip(write_state=True)
             self.cache_start_values()
+            self.hit_face = ""
 
             # IMPORTANT :
             # Quand on flippe, le signe de SURFACE_OUTWARD_OFFSET change.
@@ -2342,7 +2443,7 @@ class PlugBoolDragTool(object):
 
         self.flip_key_down = down
 
-        return can_flip or (down and not self.flip_lock and self.mode == "move")
+        return can_flip
 
     def apply_flip(self, write_state=False):
         if self.flip and exists(self.flip):
@@ -2543,6 +2644,39 @@ TOOL = PlugBoolDragTool()
 # TARGET / RAYCAST INTEGRATION
 # ============================================================
 
+def resolve_boolean_from_hit_shape(shape):
+    global last_boolean_node, boolean_result_mesh, boolean_target_mesh
+
+    shape = fp(shape)
+    if not shape or not exists(shape):
+        return False
+
+    parent = transform_from_node(shape_parent(shape))
+    if not parent or not exists(parent):
+        return False
+
+    nodes = bool_nodes(parent)
+    if not nodes:
+        return False
+
+    last_boolean_node = nodes[0]
+    boolean_result_mesh = parent
+
+    stored_target = get_str(parent, LIVE_BOOL_TARGET_ATTR)
+    if stored_target:
+        boolean_target_mesh = stored_target
+
+    if not boolean_target_mesh:
+        for cutter in cutters_for_bool_node(last_boolean_node, include_active=False):
+            target_from_cutter = get_str(cutter, "plugBoolTarget")
+            if target_from_cutter:
+                boolean_target_mesh = target_from_cutter
+                break
+
+    store_live_result_metadata()
+    return True
+
+
 def remember_target(shape):
     global boolean_target_mesh
 
@@ -2552,6 +2686,9 @@ def remember_target(shape):
 
     cutter = transform_from_node(boolean_cutter_mesh)
     if cutter and shape_under(shape, cutter):
+        return
+
+    if resolve_boolean_from_hit_shape(shape):
         return
 
     result = transform_from_node(boolean_result_mesh or result_from_bool_node(last_boolean_node))

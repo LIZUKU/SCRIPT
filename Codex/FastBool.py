@@ -65,6 +65,8 @@ LIVE_BOOL_TARGET_ATTR = "plugBoolLiveTarget"
 BASE_ROT_ATTRS = ("click2dBaseRotX", "click2dBaseRotY", "click2dBaseRotZ")
 
 VALIDATE_NAME_CMD = "PlugBoolValidateNameCommand"
+OPT_V_PRESS = "PlugBool_saved_v_press"
+OPT_V_RELEASE = "PlugBool_saved_v_release"
 OPT_RETURN_PRESS = "PlugBool_saved_return_press"
 OPT_RETURN_RELEASE = "PlugBool_saved_return_release"
 IS_FASTBOOL_CUTTER_ATTR = "isFastBoolCutter"
@@ -3062,15 +3064,20 @@ def on_tool_changed():
         TOOL.finalize_drag(select_final=False)
         clear_temp()
 
-        # Changement d'outil volontaire (Q/select, W/move ou tout autre contexte) :
-        # on finalise le cutter et on crée/met à jour le booléen sans relancer le
-        # draggerContext. Cela évite les cycles infinis ToolChanged -> restart.
-        create_boolean(restart=False)
-        cutter = sync_cutter()
-        if cutter and exists(cutter):
-            select_active_cutter(cutter, deferred=True)
+        # Q / Select valide le cutter courant puis relance immédiatement le
+        # draggerContext sur ce cutter. C'est le workflow historique "instant
+        # drag" : après la création ou la mise à jour du polyBoolean, le plug
+        # reste sous la souris et on peut continuer à le placer sans relancer le
+        # script. W / Move reste une sortie volontaire pour ajuster le cutter à la
+        # main et ne redémarre donc pas le drag.
         if new_ctx == "moveSuperContext":
+            create_boolean(restart=False)
+            cutter = sync_cutter()
+            if cutter and exists(cutter):
+                select_active_cutter(cutter, deferred=True)
             safe(lambda: mc.setToolTo("moveSuperContext"))
+        else:
+            create_boolean(restart=True)
 
     TOOL.drag_session_active = False
 
@@ -3093,11 +3100,24 @@ def restart_drag_on_cutter(cutter):
     sync_cutter(cutter)
     select_active_cutter(cutter, deferred=False)
 
-    # Redémarrage explicite uniquement quand le workflow le demande (validation du
-    # premier booléen, duplication MMB, etc.). Aucun evalDeferred récursif n'est
-    # utilisé, ce qui empêche les boucles ToolChanged.
+    # Redémarrage différé : Maya doit terminer le ToolChanged de Q/Select avant
+    # qu'on remette le draggerContext, sinon le contexte custom peut être aussitôt
+    # écrasé par le changement d'outil en cours.
+    mc.evalDeferred(_deferred_restart_drag, lowestPriority=True)
+
+
+def _deferred_restart_drag():
+    restart_cutter = (
+        TOOL.pending_restart_cutter
+        or TOOL.forced_press_cutter
+        or TOOL.boolean_cutter_mesh
+    )
+    cutter = transform_from_node(restart_cutter)
     TOOL.pending_restart_cutter = ""
-    start_drag(cutter)
+
+    if cutter and exists(cutter):
+        start_drag(cutter)
+
     TOOL.suppress_next_tool_changed = False
 
 
@@ -3106,20 +3126,23 @@ def restart_drag_on_cutter(cutter):
 # ============================================================
 
 def install_validate_hotkey():
-    """Installe uniquement Entrée comme raccourci de validation.
+    """Installe les raccourcis de validation pendant FastBool.
 
-    La touche V n'est plus modifiée. Entrée valide le booléen ; le double-clic
-    est détecté dans release() car Maya 2024+ ne supporte pas doubleClickCommand
-    sur draggerContext.
+    V restaure le comportement historique du script : créer le premier booléen
+    live puis, si un booléen live existe déjà, baker/valider. Entrée reste un
+    alias pratique ajouté par la passe optimisée, et le double-clic continue
+    d'appeler la même validation depuis release().
     """
     if TOOL.validate_hotkey_installed:
         return
 
     try:
+        mc.optionVar(sv=(OPT_V_PRESS, mc.hotkey(keyShortcut="v", query=True, name=True) or ""))
+        mc.optionVar(sv=(OPT_V_RELEASE, mc.hotkey(keyShortcut="v", query=True, releaseName=True) or ""))
         mc.optionVar(sv=(OPT_RETURN_PRESS, mc.hotkey(keyShortcut="Return", query=True, name=True) or ""))
         mc.optionVar(sv=(OPT_RETURN_RELEASE, mc.hotkey(keyShortcut="Return", query=True, releaseName=True) or ""))
     except Exception as exc:
-        mc.warning("Could not save existing Return shortcut: {0}".format(exc))
+        mc.warning("Could not save existing FastBool validation shortcuts: {0}".format(exc))
 
     try:
         mc.nameCommand(
@@ -3127,23 +3150,28 @@ def install_validate_hotkey():
             ann="Validate Plug Boolean Drag",
             c='python("import __main__; __main__.plug_bool_validate_hotkey()")'
         )
-        mc.hotkey(keyShortcut="Return", name=VALIDATE_NAME_CMD)
-        mc.hotkey(keyShortcut="Return", releaseName="")
+        for key in ("v", "Return"):
+            mc.hotkey(keyShortcut=key, name=VALIDATE_NAME_CMD)
+            mc.hotkey(keyShortcut=key, releaseName="")
         TOOL.validate_hotkey_installed = True
     except Exception as exc:
         TOOL.validate_hotkey_installed = False
-        mc.warning("Could not install FastBool Return shortcut: {0}".format(exc))
+        mc.warning("Could not install FastBool validation shortcuts: {0}".format(exc))
 
 
 def restore_validate_hotkey():
     try:
-        old_press = mc.optionVar(q=OPT_RETURN_PRESS) if mc.optionVar(exists=OPT_RETURN_PRESS) else ""
-        old_release = mc.optionVar(q=OPT_RETURN_RELEASE) if mc.optionVar(exists=OPT_RETURN_RELEASE) else ""
+        old_v_press = mc.optionVar(q=OPT_V_PRESS) if mc.optionVar(exists=OPT_V_PRESS) else ""
+        old_v_release = mc.optionVar(q=OPT_V_RELEASE) if mc.optionVar(exists=OPT_V_RELEASE) else ""
+        old_return_press = mc.optionVar(q=OPT_RETURN_PRESS) if mc.optionVar(exists=OPT_RETURN_PRESS) else ""
+        old_return_release = mc.optionVar(q=OPT_RETURN_RELEASE) if mc.optionVar(exists=OPT_RETURN_RELEASE) else ""
 
-        mc.hotkey(keyShortcut="Return", name=old_press or "")
-        mc.hotkey(keyShortcut="Return", releaseName=old_release or "")
+        mc.hotkey(keyShortcut="v", name=old_v_press or "")
+        mc.hotkey(keyShortcut="v", releaseName=old_v_release or "")
+        mc.hotkey(keyShortcut="Return", name=old_return_press or "")
+        mc.hotkey(keyShortcut="Return", releaseName=old_return_release or "")
     except Exception as exc:
-        mc.warning("Could not restore FastBool Return shortcut: {0}".format(exc))
+        mc.warning("Could not restore FastBool validation shortcuts: {0}".format(exc))
 
     TOOL.validate_hotkey_installed = False
 

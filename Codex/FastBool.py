@@ -81,6 +81,12 @@ last_mmb_duplicate_cutter = ""
 active_cutter_group = ""
 active_cutter_group_session = ""
 pending_restart_cutter = ""
+# Cutter capturé pour le prochain press du draggerContext.
+# Il évite de dépendre de la sélection Maya, qui peut être modifiée en différé
+# par le Bool Tool natif juste après un Q/MMB.
+forced_press_cutter = ""
+# Chaque demande de sélection active invalide les anciens evalDeferred de sélection.
+selection_request_token = 0
 
 
 # ============================================================
@@ -801,7 +807,7 @@ def is_current_active_cutter(cutter):
     return bool(cutter and active and cutter == active and exists(cutter))
 
 
-def deferred_select_active_cutter(cutter, remaining_passes=0):
+def deferred_select_active_cutter(cutter, remaining_passes=0, request_token=None):
     """Sélection différée protégée contre les anciens callbacks Maya.
 
     Maya peut encore exécuter une sélection différée créée pour le cutter précédent
@@ -810,18 +816,24 @@ def deferred_select_active_cutter(cutter, remaining_passes=0):
 
     On peut aussi répéter quelques passes différées : certaines commandes natives du
     Bool Tool remettent leur ancien input en sélection avec un léger retard, surtout
-    juste après addMesh sur un booléen déjà existant. La dernière passe réaffirme le
-    cutter actif courant sans jamais sélectionner un cutter devenu obsolète.
+    juste après addMesh sur un booléen déjà existant. Chaque passe porte un token :
+    dès qu'une nouvelle sélection active est demandée, les anciens evalDeferred ne
+    peuvent plus voler la sélection.
     """
     cutter = transform_from_node(cutter)
+
+    if request_token is not None and request_token != selection_request_token:
+        return
+
     if is_current_active_cutter(cutter):
         safe(lambda: mc.select(cutter, r=True))
 
         if remaining_passes > 0:
-            safe(lambda cutter=cutter, remaining_passes=remaining_passes: mc.evalDeferred(
-                lambda cutter=cutter, remaining_passes=remaining_passes: deferred_select_active_cutter(
+            safe(lambda cutter=cutter, remaining_passes=remaining_passes, request_token=request_token: mc.evalDeferred(
+                lambda cutter=cutter, remaining_passes=remaining_passes, request_token=request_token: deferred_select_active_cutter(
                     cutter,
-                    remaining_passes - 1
+                    remaining_passes - 1,
+                    request_token
                 ),
                 lowestPriority=True
             ))
@@ -839,18 +851,26 @@ def select_active_cutter(node=None, deferred=True, deferred_passes=3):
     que s'il est toujours le cutter actif. Elle est répétée quelques fois parce que le
     Bool Tool natif peut parfois resélectionner son ancien input après notre première
     evalDeferred, notamment après un Q qui ajoute un nouveau plug au même booléen.
+    Le token local invalide aussi les anciens rappels différés quand un nouveau cutter
+    devient actif.
     """
+    global selection_request_token
+
     cutter = sync_cutter(node or boolean_cutter_mesh)
     if not cutter or not exists(cutter):
         return ""
 
+    selection_request_token += 1
+    request_token = selection_request_token
+
     safe(lambda: mc.select(cutter, r=True))
 
     if deferred:
-        safe(lambda cutter=cutter, deferred_passes=deferred_passes: mc.evalDeferred(
-            lambda cutter=cutter, deferred_passes=deferred_passes: deferred_select_active_cutter(
+        safe(lambda cutter=cutter, deferred_passes=deferred_passes, request_token=request_token: mc.evalDeferred(
+            lambda cutter=cutter, deferred_passes=deferred_passes, request_token=request_token: deferred_select_active_cutter(
                 cutter,
-                max(0, int(deferred_passes) - 1)
+                max(0, int(deferred_passes) - 1),
+                request_token
             ),
             lowestPriority=True
         ))
@@ -1965,7 +1985,7 @@ class PlugBoolDragTool(object):
         mc.setToolTo(CTX)
 
     def press(self):
-        global drag_session_active
+        global drag_session_active, forced_press_cutter
         global boolean_cutter_mesh, orientation_flip_enabled, boolean_flip_state
 
         self.clear()
@@ -1980,7 +2000,11 @@ class PlugBoolDragTool(object):
         x, y, _ = mc.draggerContext(CTX, q=True, anchorPoint=True)
         self.mode_start = [x, y]
 
-        selected = duplicate_selected_plug(mc.ls(sl=True, fl=True, l=True) or [])
+        forced = transform_from_node(forced_press_cutter)
+        selection = [forced] if forced and exists(forced) else (mc.ls(sl=True, fl=True, l=True) or [])
+        forced_press_cutter = ""
+
+        selected = duplicate_selected_plug(selection)
         if not selected:
             return
 
@@ -2861,8 +2885,8 @@ def kill_stale_jobs():
     tool_job = None
 
 
-def start_drag():
-    global tool_job, drag_session_active
+def start_drag(forced_cutter=""):
+    global tool_job, drag_session_active, forced_press_cutter
 
     if TOOL.picker or TOOL.offset:
         TOOL.finalize_drag(select_final=False)
@@ -2871,6 +2895,10 @@ def start_drag():
 
     if mc.draggerContext(CTX, exists=True):
         mc.deleteUI(CTX)
+
+    forced_press_cutter = transform_from_node(forced_cutter)
+    if forced_press_cutter:
+        select_active_cutter(forced_press_cutter, deferred=False)
 
     TOOL.start()
 
@@ -2927,7 +2955,7 @@ def on_tool_changed():
 
 
 def restart_drag_on_cutter(cutter):
-    global reuse_selected_cutter_once, suppress_next_tool_changed, pending_restart_cutter
+    global reuse_selected_cutter_once, suppress_next_tool_changed, pending_restart_cutter, forced_press_cutter
 
     cutter = sync_cutter(cutter)
     if not cutter:
@@ -2939,6 +2967,7 @@ def restart_drag_on_cutter(cutter):
     reuse_selected_cutter_once = True
     suppress_next_tool_changed = True
     pending_restart_cutter = cutter
+    forced_press_cutter = cutter
 
     set_visible(cutter)
     select_active_cutter(cutter, deferred=True)
@@ -2947,19 +2976,25 @@ def restart_drag_on_cutter(cutter):
 
 
 def _deferred_restart_drag():
-    global suppress_next_tool_changed, pending_restart_cutter
+    global suppress_next_tool_changed, pending_restart_cutter, forced_press_cutter
 
-    cutter = transform_from_node(pending_restart_cutter)
-    if cutter and exists(cutter):
-        # Juste avant de réarmer le drag, on réimpose la sélection capturée.
-        # Cela évite qu'une sélection native différée du Bool Tool fasse redémarrer
-        # le script sur l'ancien cutter quand l'utilisateur vient d'ajouter un nouveau
-        # plug au même polyBoolean avec Q.
-        sync_cutter(cutter)
-        select_active_cutter(cutter, deferred=True)
+    cutter = transform_from_node(pending_restart_cutter or forced_press_cutter)
+    if not cutter or not exists(cutter):
+        pending_restart_cutter = ""
+        forced_press_cutter = ""
+        suppress_next_tool_changed = False
+        return
+
+    # Juste avant de réarmer le drag, on réimpose la sélection capturée.
+    # Cela évite qu'une sélection native différée du Bool Tool fasse redémarrer
+    # le script sur l'ancien cutter quand l'utilisateur vient d'ajouter un nouveau
+    # plug au même polyBoolean avec Q. start_drag(cutter) transmet aussi ce cutter
+    # directement au prochain press, donc la sélection n'est plus la source de vérité.
+    sync_cutter(cutter)
+    select_active_cutter(cutter, deferred=False)
 
     pending_restart_cutter = ""
-    start_drag()
+    start_drag(cutter)
     suppress_next_tool_changed = False
 
 
@@ -3070,7 +3105,7 @@ def plug_bool_validate_hotkey():
 
 
 def plug_bool_stop():
-    global drag_session_active, suppress_next_tool_changed
+    global drag_session_active, suppress_next_tool_changed, forced_press_cutter
 
     suppress_next_tool_changed = True
 
@@ -3081,6 +3116,7 @@ def plug_bool_stop():
     cleanup_empty_groups()
 
     drag_session_active = False
+    forced_press_cutter = ""
     suppress_next_tool_changed = False
 
     safe(lambda: mel.eval("setToolTo $gSelect;"))
@@ -3095,7 +3131,7 @@ def plug_bool_emergency_restore():
     plug_bool_emergency_restore()
     """
     global drag_session_active, suppress_next_tool_changed
-    global reuse_selected_cutter_once, current_cutter_reused, pending_restart_cutter
+    global reuse_selected_cutter_once, current_cutter_reused, pending_restart_cutter, forced_press_cutter
 
     suppress_next_tool_changed = True
 
@@ -3116,6 +3152,7 @@ def plug_bool_emergency_restore():
     reuse_selected_cutter_once = False
     current_cutter_reused = False
     pending_restart_cutter = ""
+    forced_press_cutter = ""
     drag_session_active = False
 
     try:

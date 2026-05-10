@@ -42,6 +42,8 @@ OPT_V_RELEASE = "PlugBool_saved_v_release"
 
 DEBUG = False
 EPS = 0.000001
+RAY_LENGTH = 999999999.0
+USE_VIEWPORT_CACHE = True
 
 
 boolean_target_mesh = ""
@@ -242,6 +244,48 @@ def normalized_vector(vector, fallback):
     vector.normalize()
     return vector
 
+
+
+def identity_matrix():
+    return om.MMatrix([
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0
+    ])
+
+
+def scale_matrix(x, y, z):
+    return om.MMatrix([
+        x, 0.0, 0.0, 0.0,
+        0.0, y, 0.0, 0.0,
+        0.0, 0.0, z, 0.0,
+        0.0, 0.0, 0.0, 1.0
+    ])
+
+
+def rotation_y_matrix(degrees):
+    return om.MEulerRotation(0.0, math.radians(degrees), 0.0).asMatrix()
+
+
+def rotation_translation_matrix(rotation_degrees, position):
+    tm = om.MTransformationMatrix()
+    tm.setRotation(om.MEulerRotation(
+        math.radians(rotation_degrees[0]),
+        math.radians(rotation_degrees[1]),
+        math.radians(rotation_degrees[2])
+    ))
+    tm.setTranslation(
+        om.MVector(position[0], position[1], position[2]),
+        om.MSpace.kTransform
+    )
+    return tm.asMatrix()
+
+
+def dag_from_path(path):
+    sel = om.MSelectionList()
+    sel.add(path)
+    return sel.getDagPath(0)
 
 def matrix_to_euler_deg(matrix):
     euler = om.MTransformationMatrix(matrix).rotation()
@@ -525,57 +569,74 @@ def mesh_is_valid_surface(shape):
         return False
 
     try:
-        if mc.getAttr(shape + ".intermediateObject") or not mc.getAttr(shape + ".visibility"):
+        if mc.getAttr(shape + ".intermediateObject"):
             return False
     except Exception:
         return False
 
-    for node in mc.listRelatives(shape, p=True, f=True) or []:
+    path_parts = shape.strip("|").split("|")
+    current = ""
+
+    for part in path_parts:
+        current += "|" + part
+
         try:
-            if not mc.getAttr(node + ".visibility"):
-                return False
-            if mc.getAttr(node + ".overrideEnabled") and mc.getAttr(node + ".overrideDisplayType") != 0:
+            if mc.objExists(current + ".visibility") and not mc.getAttr(current + ".visibility"):
                 return False
         except Exception:
             pass
 
-    try:
-        if mc.getAttr(shape + ".overrideEnabled") and mc.getAttr(shape + ".overrideDisplayType") != 0:
-            return False
-    except Exception:
-        pass
+        try:
+            if mc.objExists(current + ".overrideEnabled"):
+                if mc.getAttr(current + ".overrideEnabled") and mc.getAttr(current + ".overrideDisplayType") != 0:
+                    return False
+        except Exception:
+            pass
 
     return True
 
 
 def visible_meshes():
-    view = omui.M3dView.active3dView()
-    saved = om1.MSelectionList()
-    om1.MGlobal.getActiveSelectionList(saved)
+    saved_selection = mc.ls(sl=True, fl=True, l=True) or []
+    picked = []
 
     try:
-        om1.MGlobal.selectFromScreen(0, 0, view.portWidth(), view.portHeight(), om1.MGlobal.kReplaceList)
-        picked = om1.MSelectionList()
-        om1.MGlobal.getActiveSelectionList(picked)
-    except Exception:
-        picked = om1.MSelectionList()
+        view = omui.M3dView.active3dView()
+        om1.MGlobal.selectFromScreen(
+            0,
+            0,
+            int(view.portWidth()),
+            int(view.portHeight()),
+            om1.MGlobal.kReplaceList
+        )
+        picked = mc.ls(sl=True, fl=True, l=True) or []
+    except Exception as exc:
+        dbg(exc)
+        picked = []
     finally:
         try:
-            om1.MGlobal.setActiveSelectionList(saved, om1.MGlobal.kReplaceList)
+            if saved_selection:
+                mc.select(saved_selection, r=True)
+            else:
+                mc.select(cl=True)
         except Exception:
             pass
 
-    names = []
-    picked.getSelectionStrings(names)
+    shapes = []
 
-    if not names:
-        return []
+    for item in picked:
+        item = fp(item)
+        if not item:
+            continue
 
-    shapes = mc.listRelatives(names, s=True, ni=True, f=True, type="mesh") or []
-    shapes += mc.listRelatives(names, s=True, ad=True, ni=True, f=True, type="mesh") or []
+        item_shapes = [item] if mc.nodeType(item) == "mesh" else mesh_shapes(item)
 
-    visible = set(fp(s) for s in shapes if mesh_is_valid_surface(s))
-    return [s for s in mc.ls(type="mesh", l=True) or [] if s in visible]
+        for shape in item_shapes:
+            shape = fp(shape)
+            if shape and shape not in shapes and mesh_is_valid_surface(shape):
+                shapes.append(shape)
+
+    return shapes
 
 
 def set_visible(obj):
@@ -1571,28 +1632,35 @@ class PlugBoolDragTool(object):
         self.old_parent = ""
         self.hit_face = ""
 
-        self.mode = "move"
-        self.mode_start = [0, 0]
+        self.transform_dag = None
+        self.trans_fn = None
+        self.parent_inverse = identity_matrix()
+        self.mesh_offset_matrix = identity_matrix()
+        self.current_picker_matrix = None
 
-        self.start_scale = [1, 1, 1]
+        self.mode = "move"
+        self.mode_start = [0.0, 0.0]
+        self.start_scale_factor = 1.0
+        self.scale_factor = 1.0
         self.start_rot_y = 0.0
 
         self.saved_twist_y = 0.0
         self.saved_base_rot = [0.0, 0.0, 0.0]
 
         self.duplicate_done = False
+        self.middle_down = False
+        self.transform_only_drag = False
 
         self.flip_on = DEFAULT_BOOLEAN_FLIP
         self.baked_flip_on = DEFAULT_BOOLEAN_FLIP
         self.flip_key_down = False
-        self.flip_lock = False
-
-        self.cam_pos = [0, 0, 0]
-        self.cam_far = 10000
 
         self.cache = []
         self.tmp = []
 
+        # Kept for compatibility with cleanup and external state checks.  The new
+        # drag solver applies matrices directly on the cutter instead of creating
+        # picker/flip/rot/offset transform rigs.
         self.picker = ""
         self.flip = ""
         self.rot = ""
@@ -1604,18 +1672,25 @@ class PlugBoolDragTool(object):
         self.old_parent = ""
         self.hit_face = ""
 
-        self.mode = "move"
-        self.mode_start = [0, 0]
+        self.transform_dag = None
+        self.trans_fn = None
+        self.parent_inverse = identity_matrix()
+        self.mesh_offset_matrix = identity_matrix()
+        self.current_picker_matrix = None
 
-        self.start_scale = [1, 1, 1]
+        self.mode = "move"
+        self.mode_start = [0.0, 0.0]
+        self.start_scale_factor = 1.0
+        self.scale_factor = 1.0
         self.start_rot_y = 0.0
 
         self.saved_twist_y = 0.0
         self.saved_base_rot = [0.0, 0.0, 0.0]
 
         self.duplicate_done = False
+        self.middle_down = False
+        self.transform_only_drag = False
         self.flip_key_down = False
-        self.flip_lock = False
         self.cache = []
 
     def tag(self, node):
@@ -1626,14 +1701,12 @@ class PlugBoolDragTool(object):
         try:
             if not mc.objExists(node + ".plugBoolDragTemp"):
                 mc.addAttr(node, ln="plugBoolDragTemp", at="bool", dv=True)
-
             mc.setAttr(node + ".plugBoolDragTemp", True)
         except Exception:
             pass
 
         if node not in self.tmp:
             self.tmp.append(node)
-
         return node
 
     def group(self, name):
@@ -1644,9 +1717,7 @@ class PlugBoolDragTool(object):
             n for n in self.tmp + (mc.ls(TMP + "*", l=True) or [])
             if exists(n + ".plugBoolDragTemp")
         ]
-
         safe_delete(sorted(set(nodes), key=lambda n: n.count("|"), reverse=True))
-
         self.tmp = []
         self.picker = ""
         self.flip = ""
@@ -1655,21 +1726,37 @@ class PlugBoolDragTool(object):
         self.cache = []
 
     def refresh_rig_paths(self):
-        self.picker = fp(self.picker)
-        self.flip = fp(self.flip)
-        self.rot = fp(self.rot)
-        self.offset = fp(self.offset)
         self.mesh = transform_from_node(self.mesh)
+        if self.mesh:
+            self.refresh_transform_handles(self.mesh)
+
+    def refresh_transform_handles(self, node):
+        node = transform_from_node(node)
+        if not node:
+            return False
+
+        try:
+            self.mesh = fp(node)
+            self.mesh_name = sn(self.mesh)
+            self.transform_dag = dag_from_path(self.mesh)
+            self.trans_fn = om.MFnTransform(self.transform_dag)
+            self.parent_inverse = self.transform_dag.exclusiveMatrixInverse()
+            return True
+        except Exception as exc:
+            dbg(exc)
+            self.transform_dag = None
+            self.trans_fn = None
+            self.parent_inverse = identity_matrix()
+            return False
 
     def start(self):
         global drag_session_active
 
-        if self.picker or self.offset:
+        if self.mesh:
             self.finalize_drag(select_final=False)
 
         self.clear()
         self.reset_drag()
-
         drag_session_active = False
 
         if mc.draggerContext(CTX, exists=True):
@@ -1684,8 +1771,31 @@ class PlugBoolDragTool(object):
             cursor="crossHair",
             undoMode="step"
         )
-
         mc.setToolTo(CTX)
+
+    def get_anchor_point(self):
+        try:
+            x, y, _ = mc.draggerContext(CTX, q=True, anchorPoint=True)
+            return x, y
+        except Exception:
+            return 0.0, 0.0
+
+    def get_drag_point(self):
+        try:
+            x, y, _ = mc.draggerContext(CTX, q=True, dragPoint=True)
+            return x, y
+        except Exception:
+            return 0.0, 0.0
+
+    def keys(self):
+        mods = mc.getModifiers()
+        return bool(mods & 1), bool(mods & 4)
+
+    def update_mode_start(self, x, y, new_mode):
+        self.mode = new_mode
+        self.mode_start = [x, y]
+        self.start_rot_y = self.saved_twist_y
+        self.start_scale_factor = self.scale_factor
 
     def press(self):
         global drag_session_active
@@ -1700,7 +1810,7 @@ class PlugBoolDragTool(object):
             orientation_flip_enabled = DEFAULT_BOOLEAN_FLIP
             boolean_flip_state = 0
 
-        x, y, _ = mc.draggerContext(CTX, q=True, anchorPoint=True)
+        x, y = self.get_anchor_point()
         self.mode_start = [x, y]
 
         selected = duplicate_selected_plug(mc.ls(sl=True, fl=True, l=True) or [])
@@ -1708,91 +1818,145 @@ class PlugBoolDragTool(object):
             return
 
         self.mesh = sync_cutter(selected[0])
-        if not self.mesh:
+        if not self.mesh or not self.refresh_transform_handles(self.mesh):
             return
 
         drag_session_active = True
         boolean_cutter_mesh = self.mesh
-
-        self.update_camera()
-
         self.old_parent = parent_path(self.mesh)
-        self.mesh_name = sn(self.mesh)
 
         self.baked_flip_on = get_flip(self.mesh)
         self.flip_on = bool(orientation_flip_enabled)
-
         boolean_flip_state = 1 if self.flip_on else 0
         set_int(self.mesh, "plugBoolFlipState", boolean_flip_state)
         set_flip(self.mesh, self.flip_on)
 
         self.saved_twist_y = get_float_attr(self.mesh, TWIST_ATTR, 0.0)
-        self.saved_base_rot = get_base_rotation(self.mesh, clean_world_rotation(self.mesh))
+        self.saved_base_rot = list(get_base_rotation(self.mesh, clean_world_rotation(self.mesh)))
+        self.scale_factor = 1.0
+        self.start_scale_factor = 1.0
+        self.start_rot_y = self.saved_twist_y
+
+        pivot_world = self.bottom_pivot(self.mesh)
+        initial_picker = rotation_translation_matrix(self.saved_base_rot, pivot_world)
+        self.current_picker_matrix = initial_picker
+
+        try:
+            self.mesh_offset_matrix = self.transform_dag.inclusiveMatrix() * self.compose_chain_matrix(initial_picker).inverse()
+        except Exception as exc:
+            dbg(exc)
+            self.mesh_offset_matrix = identity_matrix()
 
         excluded = set(mesh_shapes(self.mesh))
-
         result = boolean_result_mesh or result_from_bool_node(last_boolean_node)
         if result:
             excluded.update(mesh_shapes(result))
-
         self.cache = self.make_cache(self.filtered_visible(excluded))
 
         if not self.cache:
             self.reset_drag()
             return
 
-        self.create_rig(self.bottom_pivot(self.mesh), self.saved_base_rot)
+        store_metadata(self.mesh)
+        show_live_objects()
 
-        if self.picker:
-            self.cache_start_values()
-            store_metadata(self.mesh)
-            show_live_objects()
-        else:
-            self.reset_drag()
+        shift, ctrl = self.keys()
+        if shift or ctrl:
+            self.transform_only_drag = True
+            if shift and ctrl:
+                self.update_mode_start(x, y, "flip")
+            elif ctrl:
+                self.update_mode_start(x, y, "scale")
+            else:
+                self.update_mode_start(x, y, "rotate")
+            self.apply_current_matrix()
+            return
+
+        self.mode = "move"
+        self.place(x, y)
 
     def drag(self):
-        if not self.mesh or not self.picker or not self.rot or not exists(self.picker) or not exists(self.rot):
+        if not self.mesh or not self.trans_fn:
             return
 
-        button = mc.draggerContext(CTX, q=True, button=True)
+        try:
+            button = mc.draggerContext(CTX, q=True, button=True)
+        except Exception:
+            button = 1
+
+        x, y = self.get_drag_point()
+        shift, ctrl = self.keys()
+
+        if shift or ctrl:
+            self.transform_only_drag = True
+
+        if shift and ctrl:
+            if self.mode != "flip":
+                self.update_mode_start(x, y, "flip")
+
+            if not self.flip_key_down:
+                self.flip_on = not self.flip_on
+                self.flip_key_down = True
+                self.apply_flip(write_state=True)
+                self.commit_live_state(force_update=True)
+
+            mc.refresh(cv=True, f=True)
+            return
+
+        self.flip_key_down = False
+
+        if ctrl:
+            if self.mode != "scale":
+                self.update_mode_start(x, y, "scale")
+                mc.refresh(cv=True, f=True)
+                return
+
+            factor = max(0.01, 1.0 + (x - self.mode_start[0]) * 0.01)
+            self.scale_factor = max(0.01, self.start_scale_factor * factor)
+            self.apply_current_matrix()
+            mc.refresh(cv=True, f=True)
+            return
+
+        if shift:
+            if self.mode != "rotate":
+                self.update_mode_start(x, y, "rotate")
+                mc.refresh(cv=True, f=True)
+                return
+
+            step = int((x - self.mode_start[0]) / 4.0) * 15
+            self.saved_twist_y = self.start_rot_y + step
+            self.apply_current_matrix()
+            self.write_twist_state()
+            mc.refresh(cv=True, f=True)
+            return
+
+        if self.transform_only_drag:
+            mc.refresh(cv=True, f=True)
+            return
 
         if button == 2:
-            self.duplicate()
+            if not self.middle_down:
+                self.duplicate()
+                self.middle_down = True
+            self.place(x, y)
+            select_active_cutter(self.mesh, deferred=True)
+            mc.refresh(cv=True, f=True)
             return
 
+        self.middle_down = False
         self.duplicate_done = False
 
-        x, y, _ = mc.draggerContext(CTX, q=True, dragPoint=True)
-
-        if self.update_flip():
-            mc.refresh(cv=True, f=True)
+        if self.mode != "move":
+            self.update_mode_start(x, y, "move")
             return
 
-        mode = self.mode_from_keys()
-
-        if mode != self.mode:
-            self.mode = mode
-            self.mode_start = [x, y]
-            self.cache_start_values()
-            self.apply_flip()
-            self.duplicate_done = False
-            mc.refresh(cv=True, f=True)
-            return
-
-        if self.mode == "move":
-            self.place(x, y)
-        elif self.mode == "rotate":
-            self.rotate(x)
-        elif self.mode == "scale":
-            self.scale(x)
-
+        self.place(x, y)
         mc.refresh(cv=True, f=True)
 
     def release(self):
         global last_mmb_duplicate_cutter
 
         preferred = transform_from_node(last_mmb_duplicate_cutter)
-
         final_mesh = self.finalize_drag(select_final=False, preferred_mesh=preferred)
         self.reset_drag()
 
@@ -1810,27 +1974,23 @@ class PlugBoolDragTool(object):
         try:
             self.refresh_rig_paths()
             preferred_mesh = transform_from_node(preferred_mesh)
-            rigged = preferred_mesh if preferred_mesh and exists(preferred_mesh) else self.rigged_mesh()
+            final_mesh = preferred_mesh if preferred_mesh and exists(preferred_mesh) else transform_from_node(self.mesh)
 
-            if exists(rigged):
-                current_twist = self.current_twist()
-                final_mesh = parent_keep_world(rigged, self.old_parent)
+            if exists(final_mesh):
+                self.mesh = final_mesh
+                self.refresh_transform_handles(self.mesh)
+                self.apply_current_matrix()
 
-                if final_mesh:
-                    self.mesh = final_mesh
-                    self.mesh_name = sn(final_mesh)
+                orientation_flip_enabled = bool(self.flip_on)
+                boolean_flip_state = 1 if self.flip_on else 0
 
-                    orientation_flip_enabled = bool(self.flip_on)
-                    boolean_flip_state = 1 if self.flip_on else 0
+                set_flip(final_mesh, self.flip_on)
+                set_int(final_mesh, "plugBoolFlipState", boolean_flip_state)
+                set_float_attr(final_mesh, TWIST_ATTR, self.saved_twist_y)
+                set_base_rotation(final_mesh, self.saved_base_rot)
 
-                    set_flip(final_mesh, self.flip_on)
-                    set_int(final_mesh, "plugBoolFlipState", boolean_flip_state)
-                    set_float_attr(final_mesh, TWIST_ATTR, current_twist)
-                    set_base_rotation(final_mesh, self.saved_base_rot)
-
-                    boolean_cutter_mesh = sync_cutter(final_mesh)
-                    store_metadata(final_mesh)
-
+                boolean_cutter_mesh = sync_cutter(final_mesh)
+                store_metadata(final_mesh)
         finally:
             self.clear()
 
@@ -1839,85 +1999,88 @@ class PlugBoolDragTool(object):
 
         return final_mesh or sync_cutter()
 
-    def update_camera(self):
-        view = omui.M3dView.active3dView()
-        camera = om1.MDagPath()
-        view.getCamera(camera)
-
-        transform = mc.listRelatives(camera.fullPathName(), p=True, type="transform") or []
-
-        if transform:
-            self.cam_far = mc.getAttr(transform[0] + ".farClipPlane")
-            self.cam_pos = mc.xform(transform[0], q=True, ws=True, rp=True)
-
     def filtered_visible(self, excluded=None):
         excluded = excluded or set()
-
         target = transform_from_node(boolean_target_mesh)
 
         if target:
             shapes = mesh_shapes(target)
         else:
-            shapes = visible_meshes()
+            shapes = visible_meshes() if USE_VIEWPORT_CACHE else []
+            if not shapes:
+                shapes = mc.ls(type="mesh", l=True) or []
 
-        cutter = transform_from_node(boolean_cutter_mesh)
+        cutter = transform_from_node(self.mesh or boolean_cutter_mesh)
         result = transform_from_node(boolean_result_mesh or result_from_bool_node(last_boolean_node))
 
         if cutter:
             excluded.update(mesh_shapes(cutter))
-
         if result:
             excluded.update(mesh_shapes(result))
 
-        return [
-            shape for shape in (fp(s) for s in shapes)
-            if shape and shape not in excluded and mesh_is_valid_surface(shape)
-        ]
+        out = []
+        for shape in (fp(s) for s in shapes):
+            if shape and shape not in excluded and mesh_is_valid_surface(shape):
+                out.append(shape)
+        return out
 
     def make_cache(self, shapes):
         out = []
-
         for shape in shapes:
             try:
-                out.append((shape, mesh_fn(shape), om.MMeshIsectAccelParams()))
+                dag_path = dag_from_path(shape)
+                fn_mesh = om.MFnMesh(dag_path)
+                if fn_mesh.numPolygons <= 0:
+                    continue
+                out.append({
+                    "shape": shape,
+                    "dag": dag_path,
+                    "fn": fn_mesh,
+                    "accel": om.MMeshIsectAccelParams()
+                })
             except Exception as exc:
                 dbg(exc)
-
         return out
 
     def raycast(self, x, y):
-        wp = om1.MPoint()
-        wd = om1.MVector()
-        omui.M3dView.active3dView().viewToWorld(int(x), int(y), wp, wd)
+        if not self.cache:
+            return None, None, -1
 
-        source = om.MFloatPoint(wp.x, wp.y, wp.z)
-        direction = om.MFloatVector(wd.x, wd.y, wd.z)
+        ray_src = om.MPoint()
+        ray_dir = om.MVector()
+        omui.M3dView.active3dView().viewToWorld(int(x), int(y), ray_src, ray_dir)
 
-        best_shape = ""
-        best_hit = [0, 0, 0]
-        best_face = 0
-        best_dist = self.cam_far
+        source = om.MFloatPoint(ray_src.x, ray_src.y, ray_src.z)
+        direction = om.MFloatVector(ray_dir.x, ray_dir.y, ray_dir.z)
 
-        for shape, fn, accel in self.cache:
+        best_item = None
+        best_hit = None
+        best_face = -1
+        best_dist = RAY_LENGTH
+
+        for item in self.cache:
+            shape = item["shape"]
             if not exists(shape):
+                continue
+            if self.mesh and shape_under(shape, self.mesh):
                 continue
 
             try:
-                hit = fn.closestIntersection(
+                hit = item["fn"].closestIntersection(
                     source,
                     direction,
                     om.MSpace.kWorld,
-                    self.cam_far,
+                    RAY_LENGTH,
                     False,
-                    accelParams=accel
+                    accelParams=item["accel"]
                 )
             except TypeError:
                 try:
-                    hit = fn.closestIntersection(
+                    hit = item["fn"].closestIntersection(
                         source,
                         direction,
                         om.MSpace.kWorld,
-                        self.cam_far,
+                        RAY_LENGTH,
                         False
                     )
                 except Exception as exc:
@@ -1930,182 +2093,158 @@ class PlugBoolDragTool(object):
             if not hit:
                 continue
 
-            point = [hit[0].x, hit[0].y, hit[0].z]
-            dist = distance(self.cam_pos, point)
-
+            dist = float(hit[1])
             if dist < best_dist:
-                best_shape = shape
-                best_hit = point
-                best_face = int(hit[2]) if hit[2] is not None else 0
                 best_dist = dist
+                best_item = item
+                best_hit = hit[0]
+                best_face = int(hit[2]) if hit[2] is not None else -1
 
-        return best_shape, best_hit, best_face
-
+        return best_item, best_hit, best_face
 
     def bottom_pivot(self, mesh):
         mesh = transform_from_node(mesh) or fp(mesh)
         if not mesh or not exists(mesh):
-            return [0, 0, 0]
+            return [0.0, 0.0, 0.0]
 
-        border_points = []
+        if not self.transform_dag or transform_from_node(mesh) != self.mesh:
+            self.refresh_transform_handles(mesh)
 
-        try:
-            mesh_dag = dag(mesh)
-            edge_it = om.MItMeshEdge(mesh_dag)
-
-            while not edge_it.isDone():
-                if edge_it.onBoundary():
-                    p0 = edge_it.point(0, om.MSpace.kObject)
-                    p1 = edge_it.point(1, om.MSpace.kObject)
-                    border_points.append(p0)
-                    border_points.append(p1)
-
-                edge_it.next()
-
-        except Exception as exc:
-            dbg(exc)
-            border_points = []
-
-        if not border_points:
+        shapes = mesh_shapes(mesh)
+        if not shapes:
             try:
                 pivot = mc.xform(mesh, q=True, ws=True, rp=True)
-                return [pivot[0], pivot[1], pivot[2]]
+                return [float(pivot[0]), float(pivot[1]), float(pivot[2])]
             except Exception:
-                return [0, 0, 0]
+                return [0.0, 0.0, 0.0]
 
-        tolerance = 0.001
-        slices = {}
+        selected_inverse = self.transform_dag.inclusiveMatrixInverse() if self.transform_dag else identity_matrix()
+        local_points = []
 
-        for p in border_points:
-            key = round(p.y / tolerance) * tolerance
+        for shape in shapes:
+            try:
+                shape_dag = dag_from_path(shape)
+                fn_mesh = om.MFnMesh(shape_dag)
+                shape_to_selected = shape_dag.inclusiveMatrix() * selected_inverse
+                for point in fn_mesh.getPoints(om.MSpace.kObject):
+                    local_points.append(point * shape_to_selected)
+            except Exception as exc:
+                dbg(exc)
 
-            if key not in slices:
-                slices[key] = []
+        if not local_points:
+            try:
+                pivot = mc.xform(mesh, q=True, ws=True, rp=True)
+                return [float(pivot[0]), float(pivot[1]), float(pivot[2])]
+            except Exception:
+                return [0.0, 0.0, 0.0]
 
-            slices[key].append(p)
+        min_y = min(point.y for point in local_points)
+        bottom = [point for point in local_points if abs(point.y - min_y) < 0.001] or local_points
+        pivot_local = om.MPoint(
+            sum(point.x for point in bottom) / float(len(bottom)),
+            min_y,
+            sum(point.z for point in bottom) / float(len(bottom))
+        )
+        pivot_world = pivot_local * self.transform_dag.inclusiveMatrix()
 
-        best_key = None
-        best_score = -1.0
+        try:
+            mc.move(
+                pivot_world.x,
+                pivot_world.y,
+                pivot_world.z,
+                mesh + ".scalePivot",
+                mesh + ".rotatePivot",
+                ws=True,
+                a=True
+            )
+        except Exception as exc:
+            dbg(exc)
 
-        for key, points in slices.items():
-            if len(points) < 4:
-                continue
+        return [pivot_world.x, pivot_world.y, pivot_world.z]
 
-            min_x = min(p.x for p in points)
-            max_x = max(p.x for p in points)
-            min_z = min(p.z for p in points)
-            max_z = max(p.z for p in points)
+    def build_surface_matrix(self, cache_item, face_idx, pos):
+        try:
+            normal = cache_item["fn"].getPolygonNormal(int(face_idx), om.MSpace.kWorld)
+        except Exception as exc:
+            dbg(exc)
+            normal = om.MVector(0.0, 1.0, 0.0)
 
-            size_x = max_x - min_x
-            size_z = max_z - min_z
-            area = size_x * size_z
-
-            score = area * len(points)
-
-            if score > best_score:
-                best_score = score
-                best_key = key
-
-        if best_key is None:
-            best_key = sum(p.y for p in border_points) / float(len(border_points))
-
-        contact_points = slices.get(best_key, border_points)
-
-        min_x = min(p.x for p in contact_points)
-        max_x = max(p.x for p in contact_points)
-        min_z = min(p.z for p in contact_points)
-        max_z = max(p.z for p in contact_points)
-
-        pivot = om.MPoint(
-            (min_x + max_x) * 0.5,
-            best_key,
-            (min_z + max_z) * 0.5
+        normal = normalized_vector(normal, (0.0, 1.0, 0.0))
+        sign = current_offset_sign()
+        out_pos = om.MPoint(
+            pos.x + normal.x * SURFACE_OUTWARD_OFFSET * sign,
+            pos.y + normal.y * SURFACE_OUTWARD_OFFSET * sign,
+            pos.z + normal.z * SURFACE_OUTWARD_OFFSET * sign
         )
 
-        pivot *= om.MMatrix(mc.xform(mesh, q=True, ws=True, matrix=True))
+        world_up = om.MVector(0.0, 0.0, 1.0)
+        if abs(normal * world_up) > 0.99:
+            world_up = om.MVector(1.0, 0.0, 0.0)
 
-        mc.move(
-            pivot.x,
-            pivot.y,
-            pivot.z,
-            mesh + ".scalePivot",
-            mesh + ".rotatePivot",
-            ws=True,
-            a=True
-        )
+        x_axis = normalized_vector(world_up ^ normal, (1.0, 0.0, 0.0))
+        z_axis = normalized_vector(x_axis ^ normal, (0.0, 0.0, 1.0))
 
-        return [pivot.x, pivot.y, pivot.z]
+        return om.MMatrix([
+            x_axis.x, x_axis.y, x_axis.z, 0.0,
+            normal.x, normal.y, normal.z, 0.0,
+            z_axis.x, z_axis.y, z_axis.z, 0.0,
+            out_pos.x, out_pos.y, out_pos.z, 1.0
+        ])
 
-    def create_rig(self, pivot, saved_rot):
-        mesh_wm = world_matrix(self.mesh)
+    def compose_chain_matrix(self, picker_matrix):
+        flip_value = -1.0 if self.flip_on != self.baked_flip_on else 1.0
+        scale_mat = scale_matrix(self.scale_factor, self.scale_factor, self.scale_factor)
+        twist_mat = rotation_y_matrix(self.saved_twist_y)
+        flip_mat = scale_matrix(1.0, flip_value, 1.0)
+        return scale_mat * twist_mat * flip_mat * picker_matrix
 
-        self.picker = self.group("picker")
-        self.flip = self.group("flip")
-        self.rot = self.group("rot")
-        self.offset = self.group("offset")
-
-        if not all([self.picker, self.flip, self.rot, self.offset, exists(self.mesh)]):
-            self.clear()
-            self.mesh = ""
+    def apply_current_matrix(self):
+        if not self.trans_fn or self.current_picker_matrix is None:
             return
 
-        self.flip = fp((mc.parent(self.flip, self.picker) or [self.flip])[0])
-        self.rot = fp((mc.parent(self.rot, self.flip) or [self.rot])[0])
-        self.offset = fp((mc.parent(self.offset, self.rot) or [self.offset])[0])
-        self.picker = fp(self.picker)
+        try:
+            chain_matrix = self.compose_chain_matrix(self.current_picker_matrix)
+            world = self.mesh_offset_matrix * chain_matrix
+            local = world * self.parent_inverse
+            self.trans_fn.setTransformation(om.MTransformationMatrix(local))
+        except Exception as exc:
+            dbg(exc)
 
-        if not all([self.picker, self.flip, self.rot, self.offset]):
-            self.clear()
-            self.mesh = ""
+    def place(self, x, y):
+        if self.transform_only_drag:
             return
 
-        mc.xform(self.picker, ws=True, t=pivot)
-
-        for node in (self.picker, self.flip, self.rot, self.offset):
-            mc.xform(node, os=True, piv=(0, 0, 0))
-
-        for node in (self.flip, self.rot, self.offset):
-            mc.setAttr(node + ".translate", 0, 0, 0)
-            mc.setAttr(node + ".rotate", 0, 0, 0)
-            mc.setAttr(node + ".scale", 1, 1, 1)
-
-        mc.setAttr(self.picker + ".rotate", saved_rot[0], saved_rot[1], saved_rot[2])
-        mc.setAttr(self.rot + ".rotateY", self.saved_twist_y)
-
-        self.mesh = parent_keep_world(self.mesh, self.offset)
-
-        if mesh_wm:
-            self.mesh = set_world_matrix(self.mesh, mesh_wm)
-
-        self.mesh_name = sn(self.mesh) if self.mesh else ""
-
-        if not all([self.mesh, self.picker, self.flip, self.rot, self.offset]):
-            self.clear()
-            self.mesh = ""
+        cache_item, hit, polygon = self.raycast(x, y)
+        if not cache_item or hit is None or polygon < 0:
             return
 
-        self.apply_flip()
+        remember_target(cache_item["shape"])
+
+        try:
+            picker_matrix = self.build_surface_matrix(cache_item, polygon, hit)
+            self.current_picker_matrix = picker_matrix
+            self.hit_face = "{0}.f[{1}]".format(cache_item["shape"], polygon)
+            self.saved_base_rot = list(matrix_to_euler_deg(picker_matrix))
+            self.apply_current_matrix()
+            self.write_base_state()
+        except Exception as exc:
+            dbg(exc)
+
+    def rotate(self, x):
+        step = int((x - self.mode_start[0]) / 4.0) * 15
+        self.saved_twist_y = self.start_rot_y + step
+        self.apply_current_matrix()
+        self.write_twist_state()
+
+    def scale(self, x):
+        factor = max(0.01, 1.0 + (x - self.mode_start[0]) * 0.01)
+        self.scale_factor = max(0.01, self.start_scale_factor * factor)
+        self.apply_current_matrix()
 
     def rigged_mesh(self):
-        if not self.offset:
-            return ""
-
-        direct = self.offset + "|" + self.mesh_name if self.mesh_name else ""
-        if exists(direct):
-            return direct
-
-        children = mc.listRelatives(self.offset, children=True, type="transform", f=True) or []
-        meshes = [child for child in children if has_mesh(child)]
-
-        return meshes[0] if len(meshes) == 1 else ""
+        return transform_from_node(self.mesh)
 
     def current_twist(self):
-        if self.rot and exists(self.rot):
-            try:
-                self.saved_twist_y = float(mc.getAttr(self.rot + ".rotateY"))
-            except Exception:
-                pass
-
         return self.saved_twist_y
 
     def write_twist_state(self):
@@ -2117,213 +2256,60 @@ class PlugBoolDragTool(object):
             set_base_rotation(self.mesh, self.saved_base_rot)
 
     def cache_start_values(self):
-        if not self.rot or not exists(self.rot):
-            return
-
-        self.start_scale = [mc.getAttr(self.rot + ".scale" + axis) for axis in "XYZ"]
-
-        try:
-            self.start_rot_y = float(mc.getAttr(self.rot + ".rotateY"))
-        except Exception:
-            self.start_rot_y = self.saved_twist_y
-
-    def face_normal(self, shape, polygon):
-        try:
-            normal = mesh_fn(shape).getPolygonNormal(int(polygon), om.MSpace.kWorld)
-        except Exception:
-            normal = om.MVector(0, 1, 0)
-
-        if normal.length() < EPS:
-            normal = om.MVector(0, 1, 0)
-
-        normal.normalize()
-        return normal
-
-    def align_matrix(self, face):
-        shape = fp(face.split(".f[", 1)[0]) if ".f[" in face else ""
-        if not shape:
-            return om.MMatrix()
-
-        try:
-            polygon = int(face.rsplit("[", 1)[-1].rstrip("]"))
-            normal = mesh_fn(shape).getPolygonNormal(polygon, om.MSpace.kWorld)
-        except Exception as exc:
-            dbg(exc)
-            return om.MMatrix()
-
-        if normal.length() < EPS:
-            normal = om.MVector(0, 1, 0)
-
-        normal.normalize()
-
-        world_up = om.MVector(0, 0, 1)
-        if abs(normal * world_up) > 0.99:
-            world_up = om.MVector(1, 0, 0)
-
-        x_axis = world_up ^ normal
-        if x_axis.length() < EPS:
-            x_axis = om.MVector(1, 0, 0)
-        x_axis.normalize()
-
-        z_axis = x_axis ^ normal
-        if z_axis.length() < EPS:
-            z_axis = om.MVector(0, 0, 1)
-        z_axis.normalize()
-
-        return om.MMatrix([
-            x_axis.x, x_axis.y, x_axis.z, 0,
-            normal.x, normal.y, normal.z, 0,
-            z_axis.x, z_axis.y, z_axis.z, 0,
-            0, 0, 0, 1
-        ])
-
-    def face_rotation(self, face):
-        return matrix_to_euler_deg(self.align_matrix(face))
-
-    def keys(self):
-        mods = mc.getModifiers()
-        return bool(mods & 1), bool(mods & 4)
-
-    def mode_from_keys(self):
-        shift, ctrl = self.keys()
-
-        if ctrl and shift:
-            return self.mode
-
-        if ctrl:
-            return "scale"
-
-        if shift:
-            return "rotate"
-
-        return "move"
-
-    def update_flip(self):
-        global orientation_flip_enabled, boolean_flip_state
-
-        shift, ctrl = self.keys()
-        down = shift and ctrl
-
-        if not shift and not ctrl:
-            self.flip_lock = False
-        elif shift != ctrl:
-            self.flip_lock = True
-
-        can_flip = down and not self.flip_key_down and not self.flip_lock and self.mode == "move"
-
-        if can_flip:
-            self.flip_on = not self.flip_on
-
-            orientation_flip_enabled = bool(self.flip_on)
-            boolean_flip_state = 1 if self.flip_on else 0
-
-            self.apply_flip(write_state=True)
-            self.cache_start_values()
-            self.hit_face = ""
-
-            try:
-                x, y, _ = mc.draggerContext(CTX, q=True, dragPoint=True)
-                self.place(x, y)
-            except Exception as exc:
-                dbg(exc)
-
-            cutter = self.rigged_mesh() or self.mesh
-            if cutter:
-                reverse_mesh_normals(cutter, delete_history=False)
-                nudge_transform_for_boolean_update(cutter, amount=0.00001)
-
-                set_int(cutter, "plugBoolFlipState", boolean_flip_state)
-                set_flip(cutter, self.flip_on)
-                sync_cutter(cutter)
-                force_boolean_operation_now(cutter)
-
-        self.flip_key_down = down
-
-        return can_flip
+        self.start_scale_factor = self.scale_factor
+        self.start_rot_y = self.saved_twist_y
 
     def apply_flip(self, write_state=False):
-        if self.flip and exists(self.flip):
-            mc.setAttr(self.flip + ".rotate", 0, 0, 0)
-            mc.setAttr(self.flip + ".scaleX", 1)
-
-            mc.setAttr(self.flip + ".scaleY", -1 if self.flip_on != self.baked_flip_on else 1)
-            mc.setAttr(self.flip + ".scaleZ", 1)
-
+        self.apply_current_matrix()
         if write_state and self.mesh:
             set_flip(self.mesh, self.flip_on)
             set_int(self.mesh, "plugBoolFlipState", 1 if self.flip_on else 0)
 
-    def place(self, x, y):
-        shape, hit, polygon = self.raycast(x, y)
-        if not shape or not self.picker:
+    def commit_live_state(self, force_update=False):
+        global orientation_flip_enabled, boolean_flip_state, boolean_cutter_mesh
+
+        if not self.mesh:
             return
 
-        remember_target(shape)
+        orientation_flip_enabled = bool(self.flip_on)
+        boolean_flip_state = 1 if self.flip_on else 0
 
-        face = shape + ".f[" + str(polygon) + "]"
-        normal = self.face_normal(shape, polygon)
-        sign = current_offset_sign()
+        set_flip(self.mesh, self.flip_on)
+        set_int(self.mesh, "plugBoolFlipState", boolean_flip_state)
+        set_float_attr(self.mesh, TWIST_ATTR, self.saved_twist_y)
+        set_base_rotation(self.mesh, self.saved_base_rot)
 
-        mc.setAttr(
-            self.picker + ".translate",
-            hit[0] + normal.x * SURFACE_OUTWARD_OFFSET * sign,
-            hit[1] + normal.y * SURFACE_OUTWARD_OFFSET * sign,
-            hit[2] + normal.z * SURFACE_OUTWARD_OFFSET * sign
-        )
+        if force_update:
+            reverse_mesh_normals(self.mesh, delete_history=False)
+            nudge_transform_for_boolean_update(self.mesh, amount=0.00001)
 
-        if face != self.hit_face:
-            self.saved_base_rot = list(self.face_rotation(face))
-            mc.setAttr(self.picker + ".rotate", *self.saved_base_rot)
-            self.write_base_state()
-            self.hit_face = face
-
-        self.apply_flip()
-
-    def rotate(self, x):
-        if not self.rot:
-            return
-
-        step = int((x - self.mode_start[0]) / 4.0) * 15
-        self.saved_twist_y = self.start_rot_y + step
-
-        mc.setAttr(self.rot + ".rotateY", self.saved_twist_y)
-        self.write_twist_state()
-        self.apply_flip()
-
-    def scale(self, x):
-        if not self.rot:
-            return
-
-        factor = max(0.01, 1 + (x - self.mode_start[0]) * 0.01)
-
-        for axis, start in zip("XYZ", self.start_scale):
-            mc.setAttr(self.rot + ".scale" + axis, max(0.01, start * factor))
-
-        self.apply_flip()
+        boolean_cutter_mesh = sync_cutter(self.mesh)
+        store_metadata(self.mesh)
+        if force_update:
+            force_boolean_operation_now(self.mesh)
 
     def duplicate(self):
         global boolean_cutter_mesh, last_mmb_duplicate_cutter
 
-        if not self.rot:
-            return
-
         if self.duplicate_done:
-            x, y, _ = mc.draggerContext(CTX, q=True, dragPoint=True)
+            x, y = self.get_drag_point()
             self.place(x, y)
             select_active_cutter(self.mesh, deferred=True)
             mc.refresh(cv=True, f=True)
             return
 
-        source = self.rigged_mesh()
+        source = transform_from_node(self.mesh)
         if not exists(source):
             return
+
+        self.apply_current_matrix()
+        current_twist = self.current_twist()
 
         duplicate_list = mc.duplicate(
             source,
             rr=True,
             name=cutter_source_base_name(source) + "_boolCutter#"
         ) or []
-
         duplicate = transform_from_node(duplicate_list[0]) if duplicate_list else ""
         if not duplicate:
             return
@@ -2331,36 +2317,20 @@ class PlugBoolDragTool(object):
         duplicate_token = "{0}_{1}".format(sn(duplicate), safe(lambda: mc.timerX(), 0.0))
         set_str(duplicate, ACTIVE_DUP_ATTR, duplicate_token)
 
+        old_cutter = source
         try:
-            current_twist = self.current_twist()
+            cutter_op = BOOL_UNION if self.flip_on else BOOL_SUBTRACT
+            set_flip(old_cutter, self.flip_on)
+            set_int(old_cutter, "plugBoolFlipState", 1 if self.flip_on else 0)
+            set_float_attr(old_cutter, TWIST_ATTR, current_twist)
+            set_base_rotation(old_cutter, self.saved_base_rot)
 
-            old_cutter = parent_keep_world(source, self.old_parent)
-
-            if old_cutter:
-                cutter_op = BOOL_UNION if self.flip_on else BOOL_SUBTRACT
-
-                set_flip(old_cutter, self.flip_on)
-                set_int(old_cutter, "plugBoolFlipState", 1 if self.flip_on else 0)
-                set_float_attr(old_cutter, TWIST_ATTR, current_twist)
-                set_base_rotation(old_cutter, self.saved_base_rot)
-
-                boolean_cutter_mesh = sync_cutter(old_cutter)
-                store_metadata(old_cutter)
-
-                add_cutter_to_live_boolean(old_cutter, cutter_op, select_after=False)
-
-                reset_state(keep_cutter=False, keep_target=True, keep_boolean=True)
-
-            duplicate = find_transform_by_string_attr(ACTIVE_DUP_ATTR, duplicate_token) or transform_from_node(duplicate)
-            if not duplicate:
-                return
-
-            if parent_path(duplicate) != self.offset:
-                duplicate = parent_keep_world(duplicate, self.offset)
-
+            boolean_cutter_mesh = sync_cutter(old_cutter)
+            store_metadata(old_cutter)
+            add_cutter_to_live_boolean(old_cutter, cutter_op, select_after=False)
+            reset_state(keep_cutter=False, keep_target=True, keep_boolean=True)
         except Exception as exc:
             dbg(exc)
-            return
 
         duplicate = find_transform_by_string_attr(ACTIVE_DUP_ATTR, duplicate_token) or transform_from_node(duplicate)
         if not duplicate:
@@ -2369,7 +2339,6 @@ class PlugBoolDragTool(object):
         self.mesh = duplicate
         self.mesh_name = sn(duplicate)
         last_mmb_duplicate_cutter = self.mesh
-
         self.baked_flip_on = self.flip_on
         self.saved_twist_y = current_twist
 
@@ -2380,13 +2349,14 @@ class PlugBoolDragTool(object):
 
         boolean_cutter_mesh = sync_cutter(self.mesh)
         store_metadata(self.mesh)
+        self.refresh_transform_handles(self.mesh)
 
-        if last_boolean_node and mc.objExists(last_boolean_node):
-            add_cutter_to_live_boolean(self.mesh, BOOL_UNION if self.flip_on else BOOL_SUBTRACT)
-            self.mesh = find_transform_by_string_attr(ACTIVE_DUP_ATTR, duplicate_token) or transform_from_node(self.mesh)
-            last_mmb_duplicate_cutter = self.mesh
-            boolean_cutter_mesh = sync_cutter(self.mesh)
-            store_metadata(self.mesh)
+        if self.current_picker_matrix is not None:
+            try:
+                self.mesh_offset_matrix = self.transform_dag.inclusiveMatrix() * self.compose_chain_matrix(self.current_picker_matrix).inverse()
+            except Exception as exc:
+                dbg(exc)
+                self.mesh_offset_matrix = identity_matrix()
 
         self.duplicate_done = True
         self.hit_face = ""
@@ -2395,16 +2365,10 @@ class PlugBoolDragTool(object):
         result = boolean_result_mesh or result_from_bool_node(last_boolean_node)
         if result:
             excluded.update(mesh_shapes(result))
-
         self.cache = self.make_cache(self.filtered_visible(excluded))
 
-        self.cache_start_values()
-        last_mmb_duplicate_cutter = self.mesh
-        select_active_cutter(self.mesh, deferred=True)
-
-        x, y, _ = mc.draggerContext(CTX, q=True, dragPoint=True)
+        x, y = self.get_drag_point()
         self.place(x, y)
-
         last_mmb_duplicate_cutter = self.mesh
         select_active_cutter(self.mesh, deferred=True)
         mc.refresh(cv=True, f=True)

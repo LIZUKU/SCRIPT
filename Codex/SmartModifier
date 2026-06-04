@@ -15170,5 +15170,232 @@ def show(poly_node=None):
     return show_modifier_stack_ui()
 
 
+
+# ---------------------------------------------------------------------------
+# v6.11 stability patch: stable row order + non-pushing Shell thickness
+# ---------------------------------------------------------------------------
+# Two important rules live here, after every older compatibility patch:
+# 1) Modifier rows are sorted by the actual DG dependency chain instead of raw
+#    listHistory order. Maya can return history in a different order when the
+#    visible shape toggles between Edit Base and Show Result, which made rows look
+#    inverted even though the DG stack itself was unchanged.
+# 2) Shell UI Thickness drives polyExtrudeFace.thickness again, while Local
+#    Translate Z stays separate. Driving Thickness through localTranslateZ made the
+#    shell visibly push whole faces forward at the default setting.
+
+_SM_PREV_STACK_NODES_V611 = _ms_stack_nodes
+
+
+def _sm_node_connections(node, source=False, destination=True):
+    if not node or not ex(node):
+        return []
+    out = []
+    try:
+        raw = c.listConnections(node, s=source, d=destination, plugs=False) or []
+    except Exception:
+        raw = []
+    for item in raw:
+        try:
+            if not item or not ex(item):
+                continue
+            item = lg(item)
+        except Exception:
+            pass
+        if item and item not in out:
+            out.append(item)
+    return out
+
+
+def _sm_node_is_upstream_of(upstream, downstream, max_steps=200):
+    if not upstream or not downstream or not ex(upstream) or not ex(downstream):
+        return False
+    try:
+        upstream = lg(upstream)
+        downstream = lg(downstream)
+    except Exception:
+        pass
+    if upstream == downstream:
+        return False
+    seen = set([upstream])
+    todo = list(_sm_node_connections(upstream, source=False, destination=True))
+    steps = 0
+    while todo and steps < int(max_steps):
+        steps += 1
+        node = todo.pop(0)
+        if not node or node in seen:
+            continue
+        if node == downstream:
+            return True
+        seen.add(node)
+        try:
+            if c.nodeType(node) in ("mesh", "transform") and node != downstream:
+                # DAG shape/transform fan-out can be large and is not useful for
+                # ordering history nodes once we have left the modifier chain.
+                continue
+        except Exception:
+            pass
+        todo.extend(_sm_node_connections(node, source=False, destination=True))
+    return False
+
+
+def _sm_sort_modifier_nodes_by_dg(nodes):
+    ordered = []
+    for node in nodes or []:
+        if not node or not ex(node) or node in ordered:
+            continue
+        inserted = False
+        for index, existing in enumerate(list(ordered)):
+            try:
+                if _sm_node_is_upstream_of(node, existing):
+                    ordered.insert(index, node)
+                    inserted = True
+                    break
+            except Exception:
+                pass
+        if not inserted:
+            ordered.append(node)
+    return ordered
+
+
+def _ms_stack_nodes(t):
+    try:
+        raw_nodes = list(_SM_PREV_STACK_NODES_V611(t) or [])
+    except Exception:
+        raw_nodes = []
+    return _sm_sort_modifier_nodes_by_dg(raw_nodes)
+
+
+def _qd_set_shell_node(node, values=None):
+    if not ex(node):
+        return
+    values = _qd_shell_values(values)
+    try:
+        c.lockNode(node, l=False)
+    except Exception:
+        pass
+    try:
+        _qd_force_shell_all_faces_component(node)
+    except Exception:
+        pass
+
+    try:
+        _sm_set_shell_store_attrs(node, values)
+    except Exception:
+        pass
+
+    amount = float(values.get("amount", 0.0))
+    thickness = float(values.get("thickness", 0.1))
+
+    # Keep the hidden transform-style channels neutral, but do not add Thickness
+    # to localTranslateZ. Local Translate Z is an explicit separate control; at
+    # the default 0.0 Shell should add thickness without pushing the face sheet.
+    try:
+        _sm_reset_shell_extrude_hidden_transform_attrs(node, amount_z=amount)
+    except Exception:
+        pass
+
+    mapping = (
+        ("keepFacesTogether", int(bool(values["keep_together"]))),
+        ("divisions", int(values["divisions"])),
+        ("localTranslateZ", amount),
+        ("thickness", thickness),
+        ("offset", float(values["offset"])),
+        ("smoothingAngle", 30.0),
+    )
+    for attr_name, value in mapping:
+        try:
+            _sm_set_attr_if_exists(node, attr_name, value)
+        except Exception:
+            pass
+
+    for attr_name, value in (
+        ("localTranslateX", 0.0),
+        ("localTranslateY", 0.0),
+        ("localRotateX", 0.0),
+        ("localRotateY", 0.0),
+        ("localRotateZ", 0.0),
+        ("localScaleX", 1.0),
+        ("localScaleY", 1.0),
+        ("localScaleZ", 1.0),
+        ("random", 0.0),
+        ("twist", 0.0),
+        ("taper", 1.0),
+    ):
+        try:
+            _sm_set_attr_if_exists(node, attr_name, value)
+        except Exception:
+            pass
+
+    try:
+        c.dgdirty(node)
+    except Exception:
+        pass
+
+
+def _qd_create_shell_node(t, result_shape, values=None):
+    values = _qd_shell_values(values)
+    if not result_shape or not ex(result_shape):
+        return None
+
+    before = set(c.ls(type="polyExtrudeFace") or [])
+    old_selection = []
+    try:
+        old_selection = c.ls(sl=True, long=True, flatten=True) or []
+    except Exception:
+        old_selection = []
+
+    made = None
+    try:
+        for shape_node in sh(t):
+            setv(shape_node, lg(shape_node) == lg(result_shape))
+        try:
+            c.selectMode(component=True)
+        except Exception:
+            pass
+        try:
+            c.select(t + ".f[*]", replace=True)
+        except Exception:
+            c.select(t, replace=True)
+
+        made = c.polyExtrudeFacet(
+            constructionHistory=True,
+            keepFacesTogether=int(bool(values["keep_together"])),
+            divisions=int(values["divisions"]),
+            localTranslateZ=float(values.get("amount", 0.0)),
+            twist=0,
+            taper=1,
+            offset=float(values["offset"]),
+            thickness=float(values["thickness"]),
+            smoothingAngle=30,
+        )
+    finally:
+        try:
+            c.selectMode(object=True)
+        except Exception:
+            pass
+        try:
+            c.select(t, replace=True)
+        except Exception:
+            try:
+                c.select(old_selection, replace=True)
+            except Exception:
+                pass
+
+    node = _qd_new_shell_node_from_command(before, made)
+    if not node:
+        raise RuntimeError("polyExtrudeFace node not found after Shell creation.")
+    node = _qd_mark_shell_node(node) or node
+    try:
+        node = lg(c.rename(node, sn(t) + "_shellModifier"))
+    except Exception:
+        pass
+    node = _qd_mark_shell_node(node) or node
+    try:
+        _qd_force_shell_all_faces_component(node)
+    except Exception:
+        pass
+    _qd_set_shell_node(node, values)
+    return node
+
 # Re-open safely when the file is executed directly in Maya Script Editor.
 _safe_auto_show_modifier_stack_ui()
